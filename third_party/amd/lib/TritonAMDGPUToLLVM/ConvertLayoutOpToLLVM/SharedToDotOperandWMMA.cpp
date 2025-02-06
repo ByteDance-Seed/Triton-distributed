@@ -27,9 +27,8 @@
 
 using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
-using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 namespace SharedToDotOperandWMMA {
 
@@ -155,7 +154,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
 
   auto aTensorTy = cast<triton::gpu::MemDescType>(tensor.getType());
   ArrayRef<int64_t> shape = aTensorTy.getShape();
-  auto sharedLayout = cast<SharedEncodingAttr>(aTensorTy.getEncoding());
+  auto sharedLayout = cast<SwizzledSharedEncodingAttr>(aTensorTy.getEncoding());
   auto order = sharedLayout.getOrder();
   assert((rank == 2 || order[2] == 0) &&
          "expect batch to be the slowest dimension");
@@ -172,13 +171,12 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   auto numRepK = numReps[opIdx == 0 ? 2 : 1];
   auto repB = numReps[0];
 
-  unsigned iWaveSize = triton::gpu::getWarpSize(wmmaLayout);
+  unsigned iWaveSize = triton::gpu::lookupThreadsPerWarp(rewriter);
   assert(iWaveSize == 32);
   Value waveSize = tb.i32_val(iWaveSize);
   Value linearWaveId = tb.udiv(thread, waveSize);
 
-  unsigned numElemsPerThreadPerRep =
-      wmmaLayout.getSizePerThreadForOperand(kWidth, opIdx)[kDimIdx];
+  unsigned numElemsPerThreadPerRep = wmmaLayout.getKWidthForOperands();
 
   Value lane = tb.urem(thread, waveSize);
   unsigned int maxNumWarps = shape[nonKDimIdx] / wmmaInstrNonK;
@@ -192,9 +190,10 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   SmallVector<Value> offsets;
   Value smemBase;
   auto smemStrides = smemObj.getStrides(aTensorTy, loc, rewriter);
+  auto warpOrder = triton::gpu::getMatrixOrder(rank, /*rowMajor*/ true);
   Value spatialWarpId = AMD::getWarpIdInBlock(
       rewriter, loc, linearWaveId, warpsPerCTA, elemsPerInstr[0],
-      shape[nonKDimIdx], nonKDimIdx, triton::gpu::getOrder(wmmaLayout));
+      shape[nonKDimIdx], nonKDimIdx, warpOrder);
   if (opIdx == 0) {
     offsets = AMD::computeOffsetsAType(
         rewriter, loc, computeTensorElemMappingInBlock, elemsPerInstr,

@@ -25,9 +25,7 @@
 #include <deque>
 #include <memory>
 
-namespace mlir {
-namespace triton {
-namespace gpu {
+namespace mlir::triton::gpu {
 
 #define GEN_PASS_DEF_TRITONGPUREMOVELAYOUTCONVERSIONS
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
@@ -165,6 +163,7 @@ private:
   SetVector<Operation *> opToDelete;
   FuncOp funcOp;
   DominanceInfo domInfo;
+  PostDominanceInfo postDomInfo;
 };
 
 void LayoutRematerialization::addRematValue(Value old, Attribute encoding,
@@ -185,8 +184,8 @@ void LayoutRematerialization::cleanup() {
 bool isLayoutAnchor(Operation *op) {
   if (isa<LoadOp, StoreOp>(op))
     return isExpensiveLoadOrStore(op);
-  if (isa<DotOp, nvidia_gpu::WarpGroupDotOp, AtomicRMWOp, AtomicCASOp,
-          triton::nvidia_gpu::TMEMLoadOp>(op))
+  if (isa<DotOp, DotScaledOp, nvidia_gpu::WarpGroupDotOp, AtomicRMWOp,
+          AtomicCASOp, triton::nvidia_gpu::TMEMLoadOp>(op))
     return true;
   if (auto gatherOp = dyn_cast<GatherOp>(op))
     return gatherOp.getEfficientLayout();
@@ -975,14 +974,17 @@ LogicalResult LayoutRematerialization::getConvertBackwardSlice(
     if (domInfo.properlyDominates(remat, user)) {
       return remat;
     }
-    // Alternatively, if the current use can be sunk below the existing
-    // rematerialization, then it is okay to use as well. E.g. the current use
-    // is a conversion that will be folded away when its result is
-    // rematerialized.
-    if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
-        domInfo.properlyDominates(user, remat.getDefiningOp())) {
-      return remat;
-    }
+    // FIXME: If the current user is a conversion, then we know it will become
+    // a no-op when its operand is replaced with `remat`, but we need to check
+    // that its users are all dominated by `remat` so the IR is valid.
+    // if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
+    //     domInfo.properlyDominates(user, remat.getDefiningOp())) {
+    //   for (Operation *op : user->getUsers()) {
+    //     if (!domInfo.dominates(remat, op))
+    //       return Value();
+    //   }
+    //   return remat;
+    // }
     return Value();
   };
 
@@ -1117,22 +1119,46 @@ void LayoutRematerialization::hoistConvertDotOperand(
     ConvertLayoutOp convertOp) {
   auto targetType = convertOp.getType();
   // The pass is targeted to Nvidia mma/wgmma dot operands
+
+  auto canBePipelined = [&](ConvertLayoutOp convertOp) {
+    // FIXME: Check that the parent is a for loop
+    auto parent = convertOp->getParentOp();
+    if (!parent)
+      return false;
+
+    // Find all the dot-like ops in the for loop that have a nvidia dot operand
+    // encoding on the lhs and check if any of them post-dominates the load +
+    // cvt
+    SmallVector<Operation *> dotLikeOps;
+    parent->walk([&](Operation *op) {
+      if (!isa<mlir::triton::DotOpInterface>(op))
+        return;
+      auto opType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+      if (!opType)
+        return;
+      auto dotEnc = dyn_cast<DotOperandEncodingAttr>(opType.getEncoding());
+      if (!dotEnc)
+        return;
+      if (isa<NvidiaMmaEncodingAttr>(dotEnc.getParent()))
+        dotLikeOps.push_back(op);
+    });
+    if (dotLikeOps.empty())
+      return false;
+    return llvm::any_of(dotLikeOps, [&](Operation *dot) {
+      return postDomInfo.postDominates(dot, convertOp);
+    });
+  };
+
   // We move convert #dot_operand next to their loads. This is done
   // so that it's then easy to pipeline these loads
-  // TODO: Perhaps we should do this whenever convertOp is within a loop
-
-  auto dotEnc = dyn_cast<DotOperandEncodingAttr>(targetType.getEncoding());
-  if (!(dotEnc && isa<NvidiaMmaEncodingAttr>(dotEnc.getParent())))
+  if (!canBePipelined(convertOp))
     return;
 
   // We hoist over any operation that can be done without data movement between
   // threads We do views and elementwise pure ops for now
-  // UpcastMXFPOp is here temporarily until
-  // https://github.com/triton-lang/triton/pull/5475 lands
   auto noDataMovement = [](Operation *op) {
     return (op->hasTrait<OpTrait::Elementwise>() && isMemoryEffectFree(op)) ||
-           isa<BroadcastOp, ExpandDimsOp, ReshapeOp, TransOp, UpcastMXFPOp,
-               ConvertLayoutOp>(op);
+           isa<BroadcastOp, Fp4ToFpOp, ConvertLayoutOp>(op) || isView(op);
   };
   // Stop the slice as soon as we find an operation that cannot be done without
   // data movement between threads
@@ -1298,27 +1324,19 @@ void LayoutRematerialization::hoistConvertIntoConditionals(
   // These are the conditional edges above which conversions should be hoisted.
   // The value represents the `scf.if` op result and the operand represents the
   // edge into one of the branches.
-  SmallVector<std::pair<OpResult, OpOperand *>> hoistAbove;
+  SmallVector<std::pair<Value, OpOperand *>> hoistAbove;
 
   // The list of `scf.if` op results in the slice that are not rematerializable.
   // Hoisting is terminated at these values.
   SmallVector<OpResult> terminals;
 
-  // Process the whole backward slice in subslices that stop at each condtional.
-  // This is so we can apply more specific rules about when to hoist.
-  struct Subslice {
-    OpResult v;
-    OpOperand *edge;
-    SetVector<Value> slice;
-    DenseMap<Value, Attribute> layout;
-  };
-  SmallVector<Subslice> subslices;
-
-  // Check a value in the subslice.
-  auto visitValue = [&](OpResult v) {
+  // This loop recurses through the subslices of the backwards dependencies, so
+  // re-query the size of `slice`.
+  for (unsigned i = 0; i != slice.size(); ++i) {
+    Value v = slice[i];
     auto ifOp = v.getDefiningOp<scf::IfOp>();
     if (!ifOp)
-      return;
+      continue;
 
     Attribute rootLayout = layout.at(v);
     unsigned resIdx = cast<OpResult>(v).getResultNumber();
@@ -1347,65 +1365,40 @@ void LayoutRematerialization::hoistConvertIntoConditionals(
       slice.insert(elseSlice.begin(), elseSlice.end());
       layout.insert(thenLayout.begin(), thenLayout.end());
       layout.insert(elseLayout.begin(), elseLayout.end());
-      return;
+      continue;
     }
 
     // If propagation across both edges failed, then this conditional
     // terminates backwards rematerialization.
     if (failed(thenResult) && failed(elseResult)) {
-      terminals.push_back(v);
-      return;
+      terminals.push_back(cast<OpResult>(v));
+      continue;
+    }
+
+    // Only hoist into conditionals inside loops. The assumption is that an if
+    // inside a loop executes fewer than the total number of loop iterations,
+    // making this hoist profitable.
+    if (!isa<scf::ForOp>(ifOp->getParentOp())) {
+      terminals.push_back(cast<OpResult>(v));
+      continue;
     }
 
     // The layout conversion can be rematerialized along one edge but not the
     // other. We can hoist the conversion into the other branch. Push this
     // into the subslice list for analysis.
     if (succeeded(thenResult)) {
-      subslices.push_back(
-          {v, &elseRes, std::move(thenSlice), std::move(thenLayout)});
+      hoistAbove.emplace_back(v, &elseRes);
+      slice.insert(thenSlice.begin(), thenSlice.end());
+      layout.insert(thenLayout.begin(), thenLayout.end());
     } else {
-      subslices.push_back(
-          {v, &thenRes, std::move(elseSlice), std::move(elseLayout)});
+      hoistAbove.emplace_back(v, &thenRes);
+      slice.insert(elseSlice.begin(), elseSlice.end());
+      layout.insert(elseLayout.begin(), elseLayout.end());
     }
-  };
-
-  // Process the whole slice in subslices.
-  unsigned i = 0;
-  bool isLoneHoist = false;
-  do {
-    // Visit values in the current subslice.
-    for (; i != slice.size(); ++i) {
-      if (auto v = dyn_cast<OpResult>(slice[i]))
-        visitValue(v);
-    }
-    // Check the next chunk of subslices. When a condtional is marked as being
-    // valid to be hoisted across, we have to recurse on a new subslice rooted
-    // at the corresopnding yield operand.
-    //
-    // Hoist across condtionals when:
-    // 1. The conditional is directly inside a loop.
-    // 2. The whole slice contains only one conditional.
-    for (auto &[v, edge, subslice, layouts] : subslices) {
-      bool oneHoist = false;
-      if (isa<LoopLikeOpInterface>(v.getDefiningOp()->getParentOp()) ||
-          (oneHoist = subslices.size() == 1 && hoistAbove.empty())) {
-        isLoneHoist |= oneHoist;
-        hoistAbove.push_back({v, edge});
-        // Recurse on the subslice.
-        slice.insert(subslice.begin(), subslice.end());
-        layout.insert(layouts.begin(), layouts.end());
-      } else {
-        terminals.push_back(v);
-      }
-    }
-    subslices.clear();
-  } while (i != slice.size());
+  }
 
   // Exit early if there is nothing to do.
   if (hoistAbove.empty())
-    return;
-  // Check if this is a lone hoist. There should be no other terminals.
-  if (isLoneHoist && !terminals.empty())
     return;
 
   // Rematerialize failed hoists right before the condtional, and hoist those
@@ -1534,6 +1527,4 @@ public:
   }
 };
 
-} // namespace gpu
-} // namespace triton
-} // namespace mlir
+} // namespace mlir::triton::gpu

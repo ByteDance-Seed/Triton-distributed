@@ -45,24 +45,25 @@ struct ClipAsyncCopySizePerThread
     if (!blockedEnc)
       return rewriter.notifyMatchFailure(copyOp,
                                          "src must be of blocked encoding");
-    auto sharedEnc = cast<SharedEncodingAttr>(dstTy.getEncoding());
+    auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    if (!sharedEnc)
+      return failure();
     auto sharedVec = sharedEnc.getVec();
 
     // obtain max contiguous copy size
     // Note this can be further optimized, as copyContigSize can be even
     // smaller when lowering, depending on contiguity and mask alignment
     // (see AsyncCopyGlobalToLocalOpConversion)
-    auto elemBitWidth = dstTy.getElementTypeBitWidth();
     LinearLayout regLayout =
         triton::gpu::toLinearLayout(srcTy.getShape(), blockedEnc);
     LinearLayout sharedLayout =
-        triton::gpu::toLinearLayout(srcTy.getShape(), sharedEnc, elemBitWidth);
+        triton::gpu::toLinearLayout(srcTy.getShape(), sharedEnc);
     auto copyContigSize =
         regLayout.invertAndCompose(sharedLayout).getNumConsecutiveInOut();
 
     // obtain block sizePerThread along contig dim
-    auto sizePerThread = blockedEnc.getSizePerThread();
-    auto blockContigSize = sizePerThread[blockedEnc.getOrder()[0]];
+    auto contigPerThread = getContigPerThread(srcTy);
+    auto blockContigSize = contigPerThread[blockedEnc.getOrder()[0]];
 
     if (blockContigSize <= copyContigSize)
       return rewriter.notifyMatchFailure(
@@ -70,16 +71,16 @@ struct ClipAsyncCopySizePerThread
           "blocked sizePerThread along contiguous dim must be greater than the "
           "max contiguous copy size ");
 
-    sizePerThread[blockedEnc.getOrder()[0]] = copyContigSize;
+    contigPerThread[blockedEnc.getOrder()[0]] = copyContigSize;
 
     // obtain new blockedEnc based on clipped sizePerThread
     auto mod = copyOp->getParentOfType<ModuleOp>();
-    int numWarps = TritonGPUDialect::getNumWarps(mod);
+    int numWarps = lookupNumWarps(copyOp);
     int threadsPerWarp = TritonGPUDialect::getThreadsPerWarp(mod);
-    auto newBlockEnc =
-        BlockedEncodingAttr::get(copyOp.getContext(), srcTy.getShape(),
-                                 sizePerThread, blockedEnc.getOrder(), numWarps,
-                                 threadsPerWarp, blockedEnc.getCTALayout());
+    auto newBlockEnc = BlockedEncodingAttr::get(
+        copyOp.getContext(), srcTy.getShape(), contigPerThread,
+        blockedEnc.getOrder(), numWarps, threadsPerWarp,
+        blockedEnc.getCTALayout());
 
     // insert cvt's after src, mask, and other
     auto convertBlockLayout = [&](Value src, BlockedEncodingAttr enc) {

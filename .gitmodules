@@ -1,0 +1,3 @@
+[submodule "third_party/rocshmem"]
+	path = third_party/rocshmem
+	url = https://github.com/ROCm/rocSHMEM.git

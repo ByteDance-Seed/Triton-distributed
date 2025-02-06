@@ -1,3 +1,7 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
+# fmt: off
 from triton.backends.compiler import BaseBackend, GPUTarget
 from triton._C.libtriton import ir, passes, llvm, nvidia
 from triton.runtime.errors import PTXASError
@@ -49,17 +53,17 @@ def _path_to_binary(binary: str):
 
 
 @functools.lru_cache()
-def get_ptxas(arch: int):
-    name = "ptxas-blackwell" if arch >= 100 else "ptxas"
+def get_ptxas():
+    name = "ptxas"
     return _path_to_binary(name)
 
 
 @functools.lru_cache()
-def get_ptxas_version(arch: int):
+def get_ptxas_version():
     mock_ver = os.environ.get('TRITON_MOCK_PTX_VERSION')
     if mock_ver is not None:
         return mock_ver  # This is not really a version of ptxas, but it is good enough for testing
-    version = subprocess.check_output([get_ptxas(arch)[0], "--version"]).decode("utf-8")
+    version = subprocess.check_output([get_ptxas()[0], "--version"]).decode("utf-8")
     return version
 
 
@@ -85,7 +89,7 @@ def ptx_get_version(cuda_version) -> int:
 def get_ptx_version_from_options(options, arch: int):
     ptx_version = options.ptx_version
     if ptx_version is None:
-        _, cuda_version = get_ptxas(arch)
+        _, cuda_version = get_ptxas()
         ptx_version = ptx_get_version(cuda_version)
     return ptx_version
 
@@ -134,6 +138,7 @@ class CUDAOptions:
     allowed_dot_input_precisions: Tuple[str] = ("tf32", "tf32x3", "ieee")
     max_num_imprecise_acc_default: bool = None
     extern_libs: dict = None
+    nvshmem_device_lib: str = ""
     debug: bool = False
     backend_name: str = 'cuda'
     sanitize_overflow: bool = True
@@ -144,7 +149,10 @@ class CUDAOptions:
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         if not extern_libs.get('libdevice', None):
             extern_libs['libdevice'] = os.getenv("TRITON_LIBDEVICE_PATH", str(default_libdir / 'libdevice.10.bc'))
+        nvshmem_device_lib = os.getenv("TRITON_LIBDEVICE_PATH", str(default_libdir / 'libnvshmem_device.bc'))
+
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
+        object.__setattr__(self, 'nvshmem_device_lib', nvshmem_device_lib)
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
                "num_warps must be a power of 2"
 
@@ -216,7 +224,9 @@ class CUDABackend(BaseBackend):
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from triton.language.extra.cuda import libdevice
-        return {"triton.language.extra.libdevice": libdevice}
+        from triton.language.extra.cuda import libnvshmem_device
+        return {"triton.language.extra.libdevice": libdevice,
+                "triton.language.extra.libshmem_device": libnvshmem_device,}
 
     def load_dialects(self, ctx):
         nvidia.load_dialects(ctx)
@@ -231,7 +241,6 @@ class CUDABackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
-        passes.common.add_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod)
@@ -245,7 +254,7 @@ class CUDABackend(BaseBackend):
             cluster_info.clusterDimY = opt.cluster_dims[1]
             cluster_info.clusterDimZ = opt.cluster_dims[2]
         pm = ir.pass_manager(mod.context)
-        pm.enable_debug()
+        dump_enabled = pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
         # optimize TTGIR
         passes.ttgpuir.add_coalesce(pm)
@@ -258,20 +267,28 @@ class CUDABackend(BaseBackend):
         passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
+        nvidia.passes.ttnvgpuir.add_optimize_descriptor_encoding(pm)
         passes.common.add_cse(pm)
         if capability // 10 in [8, 9]:
-            passes.ttgpuir.add_optimize_accumulator_init(pm)
+            passes.ttgpuir.add_fuse_nested_loops(pm)
+            passes.common.add_canonicalizer(pm)
+            passes.ttir.add_triton_licm(pm)
+            passes.common.add_canonicalizer(pm)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
-            passes.ttgpuir.add_loop_scheduling(pm, opt.num_stages)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages)
-        if capability // 10 >= 10:
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
+        elif capability // 10 >= 10:
+            passes.ttgpuir.add_fuse_nested_loops(pm)
+            passes.common.add_canonicalizer(pm)
+            passes.ttir.add_triton_licm(pm)
             passes.ttgpuir.add_optimize_accumulator_init(pm)
-            passes.ttgpuir.add_loop_scheduling(pm, opt.num_stages)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages)
+            passes.ttgpuir.add_warp_specialize(pm, opt.num_stages)
+            passes.ttgpuir.add_hoist_tmem_alloc(pm)
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
             nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
-            nvidia.passes.ttnvgpuir.add_keep_acc_in_tmem(pm)
             passes.common.add_canonicalizer(pm)
+        else:
+            passes.ttir.add_triton_licm(pm)
         passes.ttgpuir.add_prefetch(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         passes.ttgpuir.add_coalesce_async_copy(pm)
@@ -291,10 +308,6 @@ class CUDABackend(BaseBackend):
     def make_llir(self, src, metadata, options, capability):
         ptx_version = get_ptx_version_from_options(options, self.target.arch)
 
-        # warp-specialization mutates num_warps
-        num_warp_groups = src.get_int_attr("ttg.num-warp-groups-per-cta")
-        if num_warp_groups is not None:
-            metadata["num_warps"] *= num_warp_groups
         mod = src
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
@@ -302,8 +315,8 @@ class CUDABackend(BaseBackend):
 
         nvidia.passes.ttnvgpuir.add_lower_mma(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+        passes.ttgpuir.add_allocate_warp_groups(pm)
         passes.convert.add_scf_to_cf(pm)
-        passes.convert.add_index_to_llvmir(pm)
         passes.ttgpuir.add_allocate_shared_memory(pm)
         nvidia.passes.ttnvgpuir.add_allocate_tensor_memory(pm)
         passes.ttgpuir.add_allocate_global_scratch_memory(pm)
@@ -311,7 +324,7 @@ class CUDABackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
-        passes.convert.add_arith_to_llvmir(pm)
+        nvidia.passes.ttnvgpuir.add_warp_specialize_to_llvm(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
@@ -323,11 +336,12 @@ class CUDABackend(BaseBackend):
         context = llvm.context()
         if os.environ.get("TRITON_ENABLE_ASAN", "0") == "1":
             raise RuntimeError(
-                "Address Sanitizer Error: Address sanitizer is currently only supporteedd on the AMD backend")
+                "Address Sanitizer Error: Address sanitizer is currently only supported on the AMD backend")
         llvm_mod = llvm.to_module(mod, context)
         proc = sm_arch_from_capability(capability)
         features = get_features(options, self.target.arch)
         triple = 'nvptx64-nvidia-cuda'
+        nvidia.set_short_ptr()
         llvm.attach_datalayout(llvm_mod, triple, proc, features)
         nvidia.set_nvvm_reflect_ftz(llvm_mod)
 
@@ -336,14 +350,29 @@ class CUDABackend(BaseBackend):
             for k in llvm_mod.get_functions():
                 if not k.is_declaration() and k.is_external_linkage():
                     k.set_nvvm_maxnreg(options.maxnreg)
+        metadata['use_nvshmem'] = False
+        for k in llvm_mod.get_functions():
+            # TODO(zhengxuegui.0): check whether the function exists in libnvshmem_device.bc
+            if "nvshmem" in k.name and k.is_declaration():
+                metadata['use_nvshmem'] = True
+                break
+
+        # inline nvshmem ptx
+        if "nvshmemi_device_state_d" in str(llvm_mod):
+            metadata['use_nvshmem'] = True
 
         if options.extern_libs:
             paths = [path for (name, path) in options.extern_libs]
             llvm.link_extern_libs(llvm_mod, paths)
-
+        if options.nvshmem_device_lib and metadata['use_nvshmem']:
+            llvm.link_extern_libs(llvm_mod, [options.nvshmem_device_lib])
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
 
         # Get some metadata
+        # warp-specialization mutates num_warps
+        total_num_warps = src.get_int_attr("ttg.total-num-warps")
+        if total_num_warps is not None:
+            metadata["num_warps"] = total_num_warps
         metadata["shared"] = src.get_int_attr("ttg.shared")
         metadata["tmem_size"] = src.get_int_attr("ttg.tensor_memory_size")
         metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size")
@@ -359,7 +388,7 @@ class CUDABackend(BaseBackend):
         triple = 'nvptx64-nvidia-cuda'
         proc = sm_arch_from_capability(capability)
         features = get_features(opt, self.target.arch)
-        ret = llvm.translate_to_asm(src, triple, proc, features, ['nvptx-short-ptr'], opt.enable_fp_fusion, False)
+        ret = llvm.translate_to_asm(src, triple, proc, features, [], opt.enable_fp_fusion, False)
         # Find kernel names (there should only be one)
         names = re.findall(r".visible .entry ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
         assert len(names) == 1
@@ -376,7 +405,7 @@ class CUDABackend(BaseBackend):
         return ret
 
     def make_cubin(self, src, metadata, opt, capability):
-        ptxas, _ = get_ptxas(self.target.arch)
+        ptxas, _ = get_ptxas()
         with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ptx') as fsrc, \
             tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
             fsrc.write(src)
@@ -412,7 +441,7 @@ class CUDABackend(BaseBackend):
                                  f"`ptxas` stderr:\n{log}\n"
                                  f'Repro command: {" ".join(ptxas_cmd)}\n')
 
-            with open(fbin, 'rb') as f:
+            with open(fbin, "rb") as f:
                 cubin = f.read()
             if os.path.exists(fbin):
                 os.remove(fbin)
@@ -428,5 +457,5 @@ class CUDABackend(BaseBackend):
 
     @functools.lru_cache()
     def hash(self):
-        version = get_ptxas_version(self.target.arch)
+        version = get_ptxas_version()
         return f'{version}-{self.target.arch}'

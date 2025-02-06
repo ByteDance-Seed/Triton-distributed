@@ -33,82 +33,97 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUPIPELINE
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-static void tryAndPipelineOuterLoop(scf::ForOp forOp) {
-  mlir::triton::PipeliningOption options;
-  bool foundSchedule = false;
-  // Limit 2 stages to not require extra shared memory.
-  foundSchedule = getOuterLoopSchedule(forOp, /*numStage=*/2, options);
-  if (!foundSchedule)
-    return;
-  IRRewriter rewriter(forOp->getContext());
-  rewriter.setInsertionPoint(forOp);
-  FailureOr<scf::ForOp> newForOp =
-      mlir::triton::pipelineForLoop(rewriter, forOp, options);
+static void pipelineWgmma(ModuleOp moduleOp) {
+  SmallVector<scf::ForOp> loops;
+  moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+
+  for (scf::ForOp forOp : loops) {
+    mlir::triton::asyncLaunchDots(forOp);
+  }
 }
 
-static scf::ForOp pipelineLoop(scf::ForOp forOp, int numStages) {
-  mlir::triton::PipeliningOption options;
+static void expandLoops(ModuleOp moduleOp) {
+  SmallVector<scf::ForOp> loops;
+  moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+  for (scf::ForOp forOp : loops) {
+    CoarseSchedule schedule;
+    if (failed(schedule.deSerialize(forOp))) {
+      continue;
+    }
 
-  bool foundSchedule = false;
-  foundSchedule = preProcessLoopAndGetSchedule(forOp, numStages, options);
+    std::vector<std::pair<Operation *, unsigned>> finalSchedule =
+        schedule.createFinalSchedule(forOp);
+    triton::PipeliningOption options;
+    options.supportDynamicLoops = true;
+    options.peelEpilogue = false;
+    options.predicateFn = triton::predicateOp;
+    options.getScheduleFn =
+        [&](scf::ForOp forOp,
+            std::vector<std::pair<Operation *, unsigned>> &schedule) {
+          schedule = finalSchedule;
+        };
+    IRRewriter rewriter(forOp);
+    FailureOr<scf::ForOp> newForOp =
+        triton::pipelineForLoop(rewriter, forOp, options);
+  }
+}
 
-  // TODO: add more pipelines strategy.
-  if (!foundSchedule)
-    return nullptr;
-
-  IRRewriter rewriter(forOp->getContext());
-  rewriter.setInsertionPoint(forOp);
-  FailureOr<scf::ForOp> newForOp =
-      mlir::triton::pipelineForLoop(rewriter, forOp, options);
-
-  if (failed(newForOp))
-    return nullptr;
-  mlir::triton::asyncLaunchDots(newForOp.value());
-  return newForOp.value();
+static void removeAttributes(ModuleOp moduleOp) {
+  moduleOp->walk([&](Operation *op) {
+    op->removeAttr(mlir::triton::kLoopStageAttrName);
+    op->removeAttr(mlir::triton::kLoopClusterAttrName);
+    op->removeAttr(mlir::triton::kScheduledMaxStageAttrName);
+  });
 }
 
 struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
 
   using impl::TritonGPUPipelineBase<PipelinePass>::TritonGPUPipelineBase;
 
-  int getNumStagesOrDefault(scf::ForOp forOp) {
-    // Use the attribute attached to the loop if it exists otherwise use the
-    // global control.
-    if (!forOp->hasAttr(mlir::triton::kNumStagesAttrName))
-      return numStages;
-    return mlir::cast<IntegerAttr>(
-               forOp->getAttr(mlir::triton::kNumStagesAttrName))
-        .getInt();
-  }
-
   void runOnOperation() override {
-    SmallVector<scf::ForOp> loops;
-    getOperation()->walk([&](scf::ForOp forOp) {
-      // Bail out for loops with num_stage <= 1.
-      if (getNumStagesOrDefault(forOp) > 1)
-        loops.push_back(forOp);
-    });
+    ModuleOp moduleOp = getOperation();
+    // Go over the interesting ops and assign latencies (based on the
+    // numStages) to the them, trying to populate the allowed stages. This
+    // step will be at some point extracted to separate pass that will be run
+    // only for loops missing the latency information.
+    assignLatencies(moduleOp, numStages);
+    if (dumpIntermediateSteps) {
+      llvm::dbgs() << "// -----// SoftwarePipeliner internal IR Dump After: "
+                      "AssignLatencies\n"
+                   << moduleOp << "\n\n\n";
+    }
+    // numStages should not be used below this point. We should know
+    // everything based on the assigned stages
 
-    if (loops.empty())
-      return;
-
-    llvm::SmallSetVector<scf::ForOp, 8> outerLoops;
-    llvm::SmallVector<scf::ForOp> pipelinedLoops;
-    for (scf::ForOp forOp : loops) {
-      auto outerLoop = dyn_cast<scf::ForOp>(forOp->getParentOp());
-      int loopNumStages = getNumStagesOrDefault(forOp);
-      scf::ForOp pipelinedFor = pipelineLoop(forOp, loopNumStages);
-      if (pipelinedFor != nullptr)
-        pipelinedLoops.push_back(pipelinedFor);
-      if (pipelinedFor != nullptr && outerLoop &&
-          getNumStagesOrDefault(outerLoop) > 1)
-        outerLoops.insert(outerLoop);
+    // Schedule the loops
+    scheduleLoops(moduleOp);
+    if (dumpIntermediateSteps) {
+      llvm::dbgs() << "// -----// SoftwarePipeliner internal IR Dump After: "
+                      "ScheduleLoops\n"
+                   << moduleOp << "\n\n\n";
     }
 
-    // There is a hard dependency between load pipelining and the TC05MMA
-    // pipelining. We can pipeline the TC05MMA only after the loads are
-    // pipelined and buffers are allocated.
-    mlir::triton::pipelineTC05MMALoops(getOperation(), pipelinedLoops, 2);
+    // Transform the loop by introducing async operations to prepare it for
+    // pipeline expansion.
+    lowerLoops(moduleOp);
+    if (dumpIntermediateSteps) {
+      llvm::dbgs()
+          << "// -----// SoftwarePipeliner internal IR Dump After: LowerLoops\n"
+          << moduleOp << "\n\n\n";
+    }
+
+    // Apply the pipeline expansion.
+    expandLoops(moduleOp);
+    if (dumpIntermediateSteps) {
+      llvm::dbgs() << "// -----// SoftwarePipeliner internal IR Dump After: "
+                      "ExpandLoops\n"
+                   << moduleOp << "\n\n\n";
+    }
+
+    // Cleanup the IR from the pipeline attributes.
+    removeAttributes(moduleOp);
+
+    pipelineWgmma(moduleOp);
 
     // schedule the waits
     mlir::triton::updateWaits(getOperation());
@@ -122,25 +137,21 @@ struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
     if (applyPatternsGreedily(getOperation(), std::move(patterns)).failed())
       return signalPassFailure();
 
-    // Try to pipeline the outer loop to overlap the prologue and epilogue of
-    // the inner loop.
-    for (scf::ForOp outerLoop : outerLoops)
-      tryAndPipelineOuterLoop(outerLoop);
+    {
+      SmallVector<scf::ForOp> loops;
+      getOperation()->walk([&](scf::ForOp forOp) {
+        // Bail out for loops with num_stage <= 1.
+        if (getNumStagesOrDefault(forOp, numStages) > 1)
+          loops.push_back(forOp);
+      });
 
-    // Re-collect loop ops
-    loops.clear();
-    getOperation()->walk([&](scf::ForOp forOp) {
-      // Bail out for loops with num_stage <= 1.
-      if (getNumStagesOrDefault(forOp) > 1)
-        loops.push_back(forOp);
-    });
+      for (scf::ForOp forOp : loops) {
+        mlir::triton::pipelineTMAStores(forOp);
+      }
 
-    for (scf::ForOp forOp : loops) {
-      mlir::triton::pipelineTMAStores(forOp);
-    }
-
-    for (scf::ForOp forOp : loops) {
-      mlir::triton::pipelineMMAWithScaledAcc(forOp);
+      for (scf::ForOp forOp : loops) {
+        mlir::triton::pipelineMMAWithScaledAcc(forOp);
+      }
     }
   }
 };

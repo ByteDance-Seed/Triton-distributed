@@ -213,7 +213,7 @@ struct ExperimentalTensormapFenceproxyAcquireOpConversion
     // We run the fence on a single warp, then use a barrier to synchronize the
     // rest. This ends up being faster than running the fence on each warp.
     // TODO: Ideally we only emit one barrier after all fences are issued
-    rewriter.create<NVVM::Barrier0Op>(loc);
+    b.barrier();
 
     rewriter.eraseOp(op);
     return success();
@@ -302,7 +302,9 @@ struct ReinterpretTensorDescOpConversion
   LogicalResult
   matchAndRewrite(triton::ReinterpretTensorDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getRawDesc());
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    rewriter.replaceOpWithNewOp<LLVM::AddrSpaceCastOp>(op, resultType,
+                                                       adaptor.getRawDesc());
     return success();
   }
 };
@@ -318,7 +320,9 @@ struct TensorDescToTMAPtrOpConversion
   matchAndRewrite(triton::nvidia_gpu::TensorDescToTMAPtrOp op,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getDesc());
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    rewriter.replaceOpWithNewOp<LLVM::AddrSpaceCastOp>(op, resultType,
+                                                       adaptor.getDesc());
     return success();
   }
 };

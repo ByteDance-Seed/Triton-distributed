@@ -1,12 +1,11 @@
 add_triton_library(TritonGPUToLLVM
-    ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
     DotOpToLLVM/FMA.cpp
     DotOpToLLVM/FMADotUtility.cpp
     AllocateSharedMemory.cpp
+    AllocateWarpGroups.cpp
     AssertOpToLLVM.cpp
     ControlFlowOpToLLVM.cpp
     ConvertLayoutOpToLLVM.cpp
-    DecomposeUnsupportedConversions.cpp
     ElementwiseOpToLLVM.cpp
     FuncOpToLLVM.cpp
     GatherOpToLLVM.cpp

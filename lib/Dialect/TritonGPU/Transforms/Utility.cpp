@@ -4,6 +4,7 @@
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -12,9 +13,11 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "llvm/Support/Debug.h"
+
 #define DEBUG_TYPE "ttg-utility"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -138,6 +141,10 @@ unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
                         << ", contig: " << valInfo.getContiguity(order[0])
                         << ", alignment: " << alignment);
   return currPerThread;
+}
+
+bool isView(Operation *op) {
+  return isa<ExpandDimsOp, ReshapeOp, TransOp, JoinOp, SplitOp>(op);
 }
 
 //===----------------------------------------------------------------------===//
@@ -284,7 +291,7 @@ std::string GraphLayoutMarker::getColor(const Type &type) const {
       return "lightslateblue";
     else if (isa<triton::gpu::DotOperandEncodingAttr>(layout))
       return "orange";
-    else if (isa<triton::gpu::SharedEncodingAttr>(layout))
+    else if (isa<triton::gpu::SharedEncodingTrait>(layout))
       return "orangered";
     else {
       llvm::report_fatal_error("Unrecognized layout");
@@ -297,8 +304,9 @@ std::string GraphLayoutMarker::getColor(const Type &type) const {
 // -------------------------------------------------------------------------- //
 
 static Attribute inferDstEncoding(triton::ReduceOp op, Attribute encoding) {
-  return triton::gpu::SliceEncodingAttr::get(op->getContext(), op.getAxis(),
-                                             encoding);
+  return triton::gpu::SliceEncodingAttr::get(
+      op->getContext(), op.getAxis(),
+      cast<ttg::DistributedEncodingTrait>(encoding));
 }
 
 static Attribute inferDstEncoding(triton::ExpandDimsOp op, Attribute encoding) {
@@ -312,10 +320,11 @@ static Attribute inferDstEncoding(triton::ExpandDimsOp op, Attribute encoding) {
 
 static Attribute inferDstEncoding(JoinOp op, Attribute srcEnc) {
   Attribute dstEnc;
+  auto shape = op.getLhs().getType().getShape();
   if (srcEnc.getDialect()
           .getRegisteredInterface<DialectInferLayoutInterface>()
-          ->inferJoinOpEncoding(srcEnc, dstEnc,
-                                /*loc=*/std::nullopt)
+          ->inferDefaultJoinOpEncoding(srcEnc, dstEnc, shape,
+                                       /*loc=*/std::nullopt)
           .succeeded()) {
     return dstEnc;
   }
@@ -324,9 +333,10 @@ static Attribute inferDstEncoding(JoinOp op, Attribute srcEnc) {
 
 static Attribute inferDstEncoding(SplitOp op, Attribute srcEnc) {
   Attribute dstEnc;
+  auto shape = op.getSrc().getType().getShape();
   if (srcEnc.getDialect()
           .getRegisteredInterface<DialectInferLayoutInterface>()
-          ->inferSplitOpEncoding(srcEnc, dstEnc,
+          ->inferSplitOpEncoding(srcEnc, dstEnc, shape,
                                  /*loc=*/std::nullopt)
           .succeeded()) {
     return dstEnc;
@@ -344,16 +354,18 @@ static Attribute inferSrcEncoding(triton::ReduceOp op, Attribute encoding) {
 }
 
 static Attribute inferSrcEncoding(triton::ExpandDimsOp op, Attribute encoding) {
-  return triton::gpu::SliceEncodingAttr::get(op->getContext(), op.getAxis(),
-                                             encoding);
+  return triton::gpu::SliceEncodingAttr::get(
+      op->getContext(), op.getAxis(),
+      cast<ttg::DistributedEncodingTrait>(encoding));
 }
 
 static Attribute inferSrcEncoding(JoinOp op, Attribute dstEnc) {
   // Split is the inverse of join.
+  auto shape = op.getResult().getType().getShape();
   Attribute srcEnc;
   if (dstEnc.getDialect()
           .getRegisteredInterface<DialectInferLayoutInterface>()
-          ->inferSplitOpEncoding(dstEnc, srcEnc, /*loc=*/std::nullopt)
+          ->inferSplitOpEncoding(dstEnc, srcEnc, shape, /*loc=*/std::nullopt)
           .succeeded()) {
     return srcEnc;
   }
@@ -363,9 +375,11 @@ static Attribute inferSrcEncoding(JoinOp op, Attribute dstEnc) {
 static Attribute inferSrcEncoding(SplitOp op, Attribute dstEnc) {
   // Join is the inverse of split.
   Attribute srcEnc;
+  auto shape = op.getOutLHS().getType().getShape();
   if (dstEnc.getDialect()
           .getRegisteredInterface<DialectInferLayoutInterface>()
-          ->inferJoinOpEncoding(dstEnc, srcEnc, /*loc=*/std::nullopt)
+          ->inferDefaultJoinOpEncoding(dstEnc, srcEnc, shape,
+                                       /*loc=*/std::nullopt)
           .succeeded()) {
     return srcEnc;
   }
@@ -387,6 +401,31 @@ static Attribute inferTransOpDstEncoding(Attribute srcEnc,
               .getRegisteredInterface<triton::DialectInferLayoutInterface>()
               ->inferTransOpEncoding(srcEnc, shape, order, retEncoding))) {
     return retEncoding;
+  }
+  return {};
+}
+
+static Attribute inferDstEncoding(triton::gpu::Fp4ToFpOp op, Attribute srcEnc) {
+  Attribute dstEnc;
+  auto shape = op.getSrc().getType().getShape();
+  auto result =
+      srcEnc.getDialect()
+          .getRegisteredInterface<triton::DialectInferLayoutInterface>()
+          ->inferFp4ToFpOpEncoding(shape, op.getAxis(), srcEnc, dstEnc,
+                                   /*fwdInference*/ true, std::nullopt);
+  assert(succeeded(result));
+  return dstEnc;
+}
+
+static Attribute inferSrcEncoding(triton::gpu::Fp4ToFpOp op, Attribute dstEnc) {
+  Attribute srcEnc;
+  auto shape = op.getSrc().getType().getShape();
+  if (succeeded(
+          dstEnc.getDialect()
+              .getRegisteredInterface<triton::DialectInferLayoutInterface>()
+              ->inferFp4ToFpOpEncoding(shape, op.getAxis(), dstEnc, srcEnc,
+                                       /*fwdInference*/ false, std::nullopt))) {
+    return srcEnc;
   }
   return {};
 }
@@ -494,6 +533,8 @@ Attribute inferSrcEncoding(Operation *op, Attribute encoding) {
     return inferSrcEncoding(reshape, encoding);
   if (auto gather = dyn_cast<triton::GatherOp>(op))
     return inferSrcEncoding(gather, encoding);
+  if (auto fp4ToFp = dyn_cast<triton::gpu::Fp4ToFpOp>(op))
+    return inferSrcEncoding(fp4ToFp, encoding);
 
   return {};
 }
@@ -523,6 +564,8 @@ Attribute inferDstEncoding(Operation *op, Attribute encoding) {
     return inferDstEncoding(reshape, encoding);
   if (auto gather = dyn_cast<triton::GatherOp>(op))
     return inferDstEncoding(gather, encoding);
+  if (auto fp4ToFp = dyn_cast<triton::gpu::Fp4ToFpOp>(op))
+    return inferDstEncoding(fp4ToFp, encoding);
 
   return {};
 }
@@ -540,7 +583,7 @@ bool isExpensiveLoadOrStore(Operation *op) {
   // we can presume a high hit-rate that makes it cheap to load
   auto ptrType = cast<RankedTensorType>(op->getOperand(0).getType());
   auto mod = op->getParentOfType<ModuleOp>();
-  int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
+  int numWarps = triton::gpu::lookupNumWarps(op);
   int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
   if (ptrType.getNumElements() < numWarps * threadsPerWarp)
     return false;
@@ -592,7 +635,7 @@ bool canFoldIntoConversion(Operation *op, Attribute targetEncoding) {
 }
 
 scf::ForOp replaceForOpWithNewSignature(
-    RewriterBase &rewriter, scf::ForOp loop, ValueRange newIterOperands,
+    OpBuilder &rewriter, scf::ForOp loop, ValueRange newIterOperands,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements) {
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(loop);
@@ -616,19 +659,32 @@ scf::ForOp replaceForOpWithNewSignature(
   return newLoop;
 }
 
-scf::ForOp replaceForOpWithNewSignature(RewriterBase &rewriter, scf::ForOp loop,
+scf::ForOp replaceForOpWithNewSignature(OpBuilder &rewriter, scf::ForOp loop,
                                         ValueRange newIterOperands) {
   SmallVector<std::tuple<Value, Value>> replacements;
   auto newForOp = replaceForOpWithNewSignature(rewriter, loop, newIterOperands,
                                                replacements);
-  for (auto &kv : replacements) {
-    rewriter.replaceAllUsesWith(std::get<0>(kv), std::get<1>(kv));
+  for (auto [result, value] : replacements) {
+    result.replaceAllUsesWith(value);
   }
   return newForOp;
 }
 
+Block::BlockArgListType addIterArgsToLoop(OpBuilder &rewriter, scf::ForOp &loop,
+                                          ValueRange newIterOperands) {
+  unsigned curArgIdx = loop.getNumRegionIterArgs();
+  scf::ForOp newLoop =
+      replaceForOpWithNewSignature(rewriter, loop, newIterOperands);
+  // Save the caller from insertion point invalidation.
+  if (rewriter.getInsertionPoint() == loop->getIterator())
+    rewriter.setInsertionPoint(newLoop);
+  loop.erase();
+  loop = newLoop;
+  return loop.getRegionIterArgs().slice(curArgIdx);
+}
+
 scf::WhileOp replaceWhileOpWithNewSignature(
-    RewriterBase &rewriter, scf::WhileOp loop, ValueRange newIterOperands,
+    OpBuilder &rewriter, scf::WhileOp loop, ValueRange newIterOperands,
     TypeRange newResultTypes,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements) {
   OpBuilder::InsertionGuard g(rewriter);
@@ -667,11 +723,11 @@ scf::WhileOp replaceWhileOpWithNewSignature(
   for (auto [oldArg, newArg] : llvm::zip(
            loop.getBeforeArguments(), newLoop.getBeforeArguments().take_front(
                                           loop.getBeforeArguments().size())))
-    rewriter.replaceAllUsesWith(oldArg, newArg);
+    oldArg.replaceAllUsesWith(newArg);
   for (auto [oldArg, newArg] : llvm::zip(loop.getAfterArguments(),
                                          newLoop.getAfterArguments().take_front(
                                              loop.getAfterArguments().size())))
-    rewriter.replaceAllUsesWith(oldArg, newArg);
+    oldArg.replaceAllUsesWith(newArg);
 
   // Stack the new results
   for (auto it : llvm::zip(loop.getResults(), newLoop.getResults().take_front(
@@ -681,7 +737,7 @@ scf::WhileOp replaceWhileOpWithNewSignature(
   return newLoop;
 }
 
-scf::WhileOp replaceWhileOpWithNewSignature(RewriterBase &rewriter,
+scf::WhileOp replaceWhileOpWithNewSignature(OpBuilder &rewriter,
                                             scf::WhileOp loop,
                                             ValueRange newIterOperands,
                                             TypeRange newResultTypes) {
@@ -689,13 +745,13 @@ scf::WhileOp replaceWhileOpWithNewSignature(RewriterBase &rewriter,
   auto newWhileOp = replaceWhileOpWithNewSignature(
       rewriter, loop, newIterOperands, newResultTypes, replacements);
   for (auto &kv : replacements) {
-    rewriter.replaceAllUsesWith(std::get<0>(kv), std::get<1>(kv));
+    std::get<0>(kv).replaceAllUsesWith(std::get<1>(kv));
   }
   return newWhileOp;
 }
 
 scf::IfOp replaceIfOpWithNewSignature(
-    RewriterBase &rewriter, scf::IfOp ifOp, TypeRange newResultTypes,
+    OpBuilder &rewriter, scf::IfOp ifOp, TypeRange newResultTypes,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements) {
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(ifOp);
@@ -703,14 +759,14 @@ scf::IfOp replaceIfOpWithNewSignature(
   // Create a new loop before the existing one, with the extra operands.
   auto resultTypes = llvm::to_vector<4>(ifOp.getResults().getTypes());
   resultTypes.append(newResultTypes.begin(), newResultTypes.end());
-  scf::IfOp newIf = rewriter.create<scf::IfOp>(
-      ifOp.getLoc(), resultTypes, ifOp.getCondition(), /*withElse=*/true);
+  scf::IfOp newIf = rewriter.create<scf::IfOp>(ifOp.getLoc(), resultTypes,
+                                               ifOp.getCondition());
   newIf->setAttrs(ifOp->getAttrs());
 
-  rewriter.inlineBlockBefore(ifOp.thenBlock(), newIf.thenBlock(),
-                             newIf.thenBlock()->begin());
-  rewriter.inlineBlockBefore(ifOp.elseBlock(), newIf.elseBlock(),
-                             newIf.elseBlock()->begin());
+  newIf.getThenRegion().takeBody(ifOp.getThenRegion());
+  newIf.getElseRegion().takeBody(ifOp.getElseRegion());
+  scf::IfOp::ensureTerminator(newIf.getThenRegion(), rewriter, ifOp.getLoc());
+  scf::IfOp::ensureTerminator(newIf.getElseRegion(), rewriter, ifOp.getLoc());
 
   for (auto it : llvm::zip(ifOp.getResults(),
                            newIf.getResults().take_front(ifOp.getNumResults())))
@@ -728,13 +784,13 @@ void appendToForOpYield(scf::ForOp forOp, ArrayRef<Value> newOperands) {
   yieldOp->erase();
 }
 
-scf::IfOp replaceIfOpWithNewSignature(RewriterBase &rewriter, scf::IfOp ifOp,
+scf::IfOp replaceIfOpWithNewSignature(OpBuilder &rewriter, scf::IfOp ifOp,
                                       TypeRange newResultTypes) {
   SmallVector<std::tuple<Value, Value>> replacements;
   auto newIfOp =
       replaceIfOpWithNewSignature(rewriter, ifOp, newResultTypes, replacements);
   for (auto &kv : replacements)
-    rewriter.replaceAllUsesWith(std::get<0>(kv), std::get<1>(kv));
+    std::get<0>(kv).replaceAllUsesWith(std::get<1>(kv));
   return newIfOp;
 }
 
@@ -963,11 +1019,9 @@ bool isPureUnaryInlineAsm(Operation *op) {
 }
 
 int getNVIDIAComputeCapability(Operation *module) {
-  assert(module->hasAttr(triton::AttrTargetName) &&
-         "Expected a target attribute on the module operation");
-
   StringAttr targetAttr =
-      cast<StringAttr>(module->getAttr(triton::AttrTargetName));
+      module->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
+  assert(targetAttr && "Expected a target attribute on the module operation");
 
   StringRef ref = targetAttr.strref();
   assert(ref.starts_with("cuda:") &&
@@ -982,23 +1036,38 @@ int getNVIDIAComputeCapability(Operation *module) {
   return computeCapability;
 }
 
+StringRef getAMDArch(Operation *module) {
+  StringAttr targetAttr =
+      module->getAttrOfType<StringAttr>(triton::gpu::AttrTargetName);
+  assert(targetAttr && "Expected a target attribute on the module operation");
+
+  StringRef ref = targetAttr.strref();
+  assert(ref.starts_with("hip:") &&
+         "expected target attribute to be prefixed with \"hip:\"");
+
+  return ref.drop_front(4); // drop the "hip:"
+}
+
 // If all the transitive uses of the given value have are used by a convert to
 // the same dot operand encoding, return the shared encoding that needs to be
 // used to be compatible with users' layouts. If there are incompatible shared
 // encodings, set incompatible to true.
-std::optional<ttg::SharedEncodingAttr>
+std::optional<ttg::SwizzledSharedEncodingAttr>
 getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible) {
-  ttg::SharedEncodingAttr attr;
+  ttg::SwizzledSharedEncodingAttr attr;
   incompatible = false;
   for (Operation *user : val.getUsers()) {
-    ttg::SharedEncodingAttr tempAttr;
+    ttg::SwizzledSharedEncodingAttr tempAttr;
     if (user->getNumResults() != 1)
       return std::nullopt;
     if (auto memDesc =
             dyn_cast<triton::gpu::MemDescType>(user->getResult(0).getType())) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
-      tempAttr = cast<ttg::SharedEncodingAttr>(memDesc.getEncoding());
+      tempAttr =
+          dyn_cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
+      if (!tempAttr)
+        return std::nullopt;
       if (!getSharedEncIfAllUsersAreDotEnc(user->getResult(0), incompatible)
                .has_value())
         return std::nullopt;
@@ -1012,9 +1081,9 @@ getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible) {
         return std::nullopt;
       auto srcTy = cast<triton::gpu::TensorOrMemDesc>(val.getType());
       auto CTALayout = ttg::getCTALayout(srcTy.getEncoding());
-      auto order = ttg::getOrder(srcTy.getEncoding());
+      auto order = getOrderForMemory(srcTy);
       unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
-      tempAttr = ttg::SharedEncodingAttr::get(
+      tempAttr = ttg::SwizzledSharedEncodingAttr::get(
           val.getContext(), dotOpEnc, srcTy.getShape(), order, CTALayout,
           bitWidth, /*needTrans=*/false);
     }
@@ -1026,45 +1095,6 @@ getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible) {
     attr = tempAttr;
   }
   return attr;
-}
-
-MMALoadType getMMALoadType(Operation *loadOp) {
-  if (!loadOp->hasOneUse())
-    return MMALoadType::DoNotPipeline;
-
-  if (auto alloc = dyn_cast<ttg::LocalAllocOp>(*loadOp->getUsers().begin())) {
-    auto sharedEnc =
-        cast<ttg::SharedEncodingAttr>(alloc.getType().getEncoding());
-
-    if (!sharedEnc.getHasLeadingOffset())
-      return MMALoadType::DoNotPipeline;
-
-    // MMA V3 case.
-    auto newOrder = sharedEnc.getOrder();
-    auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
-    auto oldOrder = ttg::getOrder(ty.getEncoding());
-
-    // The operand of MMAv3 is in SharedEncoding and its order should not
-    // be changed after FuseTranspositions Pass. So we only pipeline the
-    // load if the order of the loaded BlockedEncoding is the same as the
-    // order of the SharedEncoding it is converted to.
-    return oldOrder == newOrder ? MMALoadType::SharedV3
-                                : MMALoadType::DoNotPipeline;
-  } else if (auto cvt =
-                 dyn_cast<ttg::ConvertLayoutOp>(*loadOp->getUsers().begin())) {
-    auto resTy = dyn_cast<RankedTensorType>(cvt->getResultTypes()[0]);
-    if (!resTy) {
-      return MMALoadType::DoNotPipeline;
-    }
-
-    if (isa<ttg::DotOperandEncodingAttr>(resTy.getEncoding())) {
-      return MMALoadType::Registers;
-    }
-
-    return MMALoadType::DoNotPipeline;
-  } else {
-    return MMALoadType::DoNotPipeline;
-  }
 }
 
 namespace {
@@ -1223,14 +1253,16 @@ ttg::LocalAllocOp findShmemAlloc(Value operand) {
       transitiveOperand = transitiveOperand.getDefiningOp()->getOperand(0);
     }
   }
-  if (auto subView =
-          dyn_cast<ttg::MemDescSubviewOp>(transitiveOperand.getDefiningOp())) {
+  if (auto subView = dyn_cast_or_null<ttg::MemDescSubviewOp>(
+          transitiveOperand.getDefiningOp())) {
     // Multi-buffered operand
-    return dyn_cast<ttg::LocalAllocOp>(subView.getSrc().getDefiningOp());
+    return dyn_cast_or_null<ttg::LocalAllocOp>(
+        subView.getSrc().getDefiningOp());
   } else {
     // Single bufferred operand that does not require a subview (not loaded in
     // the loop)
-    return dyn_cast<ttg::LocalAllocOp>(transitiveOperand.getDefiningOp());
+    return dyn_cast_or_null<ttg::LocalAllocOp>(
+        transitiveOperand.getDefiningOp());
   }
   return nullptr;
 }
@@ -1250,6 +1282,95 @@ getMMAsWithMultiBufferredOperands(scf::ForOp forOp,
   }
 
   return eligible;
+}
+
+Operation *findNearestCommonDominator(ArrayRef<Operation *> ops,
+                                      DominanceInfo &domInfo) {
+  if (ops.size() == 0) {
+    return nullptr;
+  }
+  if (ops.size() == 1) {
+    return ops[0];
+  }
+  llvm::SmallPtrSet<Block *, 16> blocks;
+  for (auto op : ops) {
+    blocks.insert(op->getBlock());
+  }
+  Block *domBlock = domInfo.findNearestCommonDominator(blocks);
+  if (domBlock == nullptr) {
+    return nullptr;
+  }
+  SmallVector<Operation *> ancestorOps;
+  for (auto op : ops) {
+    ancestorOps.push_back(domBlock->findAncestorOpInBlock(*op));
+  }
+  Operation *dom = ancestorOps[0];
+  for (unsigned i = 1; i < ops.size(); i++) {
+    if (ancestorOps[i]->isBeforeInBlock(dom)) {
+      dom = ancestorOps[i];
+    }
+  }
+  return dom;
+}
+
+void visitNestedOperands(Operation *op,
+                         function_ref<void(OpOperand &)> visitor) {
+  op->walk([&](Operation *nestedOp) {
+    for (OpOperand &operand : nestedOp->getOpOperands()) {
+      if (operand.get().getParentBlock()->getParentOp()->isProperAncestor(op))
+        visitor(operand);
+    }
+  });
+}
+
+void visitNestedOperands(Operation *op, function_ref<void(Value)> visitor) {
+  visitNestedOperands(op, [&](OpOperand &operand) { visitor(operand.get()); });
+}
+
+SetVector<Value> getNestedOperands(Operation *op) {
+  SetVector<Value> result;
+  visitNestedOperands(op, [&](Value operand) { result.insert(operand); });
+  return result;
+}
+
+void eraseLoopCarriedValues(scf::ForOp &loop, llvm::BitVector indices) {
+  // Pad the indices in case new arguments were added.
+  while (indices.size() != loop.getInitArgs().size())
+    indices.push_back(false);
+
+  loop.getBody()->getTerminator()->eraseOperands(indices);
+  loop.getBody()->eraseArguments([&](BlockArgument arg) {
+    int idx = arg.getArgNumber();
+    return idx != 0 && indices.test(idx - 1);
+  });
+
+  llvm::BitVector loopOperandIndices(loop->getNumOperands());
+  for (auto [i, operand] : llvm::enumerate(loop.getInitArgsMutable())) {
+    if (indices.test(i))
+      loopOperandIndices.set(operand.getOperandNumber());
+  }
+  loop->eraseOperands(loopOperandIndices);
+
+  // Rewrite the loop to erase results.
+  OperationState state(loop.getLoc(), loop->getName(), loop->getOperands(),
+                       loop.getInitArgs().getTypes(), loop->getAttrs());
+  state.addRegion()->takeBody(loop.getBodyRegion());
+
+  OpBuilder b(loop);
+  auto newLoop = cast<scf::ForOp>(b.create(state));
+
+  // Replace uses of the old loop with the new loop.
+  unsigned newResultIdx = 0;
+  for (auto [i, result] : llvm::enumerate(loop.getResults())) {
+    if (indices.test(i)) {
+      assert(result.use_empty() && "loop carried value still has uses");
+      continue;
+    }
+    result.replaceAllUsesWith(newLoop.getResult(newResultIdx++));
+  }
+
+  loop.erase();
+  loop = newLoop;
 }
 
 } // namespace mlir

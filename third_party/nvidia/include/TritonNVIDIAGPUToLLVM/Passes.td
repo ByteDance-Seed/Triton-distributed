@@ -1,3 +1,6 @@
+//
+// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+//
 #ifndef TRITONGPU_CONVERSION_PASSES
 #define TRITONGPU_CONVERSION_PASSES
 
@@ -18,6 +21,8 @@ def ConvertTritonGPUToLLVM : Pass<"convert-triton-gpu-to-llvm", "mlir::ModuleOp"
                              "mlir::triton::TritonDialect",
                              "mlir::triton::gpu::TritonGPUDialect",
                              "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+                             "triton::distributed::DistributedDialect",
+                             "mlir::triton::nvgpu::NVGPUDialect",
                              "mlir::NVVM::NVVMDialect"];
 
     let options = [
@@ -30,4 +35,15 @@ def ConvertTritonGPUToLLVM : Pass<"convert-triton-gpu-to-llvm", "mlir::ModuleOp"
     ];
 }
 
-#endif
+def ConvertWarpSpecializeToLLVM : Pass<"convert-warp-specialize-to-llvm", "mlir::ModuleOp"> {
+  let summary = "lower `ttg.warp_specialize` to LLVM";
+  let description = [{
+    The `convert-warp-specialize-to-llvm` pass performs codegen for warp
+    specialization. It is a function-level transformation that rewrites
+    warp-specialized kernels by using shared memory and barriers to communicate
+    states between the default warpgroup and the worker warps.
+  }];
+  let dependentDialects = ["mlir::LLVM::LLVMDialect", "mlir::NVVM::NVVMDialect"];
+}
+
+#endif // TRITONGPU_CONVERSION_PASSES

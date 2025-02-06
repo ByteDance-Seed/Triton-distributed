@@ -1,13 +1,19 @@
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
 
 #include <algorithm>
 #include <numeric>
 
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+
+#include "third_party/distributed/dialect/include/Dialect/Distributed/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
@@ -95,18 +101,20 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
   addIllegalOp<scf::ExecuteRegionOp, scf::ParallelOp, scf::ReduceOp,
                scf::ReduceReturnOp>();
 
-  addDynamicallyLegalDialect<arith::ArithDialect, math::MathDialect,
-                             triton::TritonDialect, cf::ControlFlowDialect,
-                             scf::SCFDialect>([&](Operation *op) {
-    bool hasLegalRegions = true;
-    for (auto &region : op->getRegions()) {
-      hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
-    }
-    if (hasLegalRegions && typeConverter.isLegal(op)) {
-      return true;
-    }
-    return false;
-  });
+  addDynamicallyLegalDialect<
+      arith::ArithDialect, math::MathDialect, triton::TritonDialect,
+      cf::ControlFlowDialect, scf::SCFDialect,
+      triton::distributed::DistributedDialect, ub::UBDialect>(
+      [&](Operation *op) {
+        bool hasLegalRegions = true;
+        for (auto &region : op->getRegions()) {
+          hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
+        }
+        if (hasLegalRegions && typeConverter.isLegal(op)) {
+          return true;
+        }
+        return false;
+      });
 
   // We have requirements for the data layouts
   addDynamicallyLegalOp<triton::DotOp>([](triton::DotOp dotOp) -> bool {

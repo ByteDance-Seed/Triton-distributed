@@ -31,6 +31,62 @@ void PrintTo(const Attribute &attr, std::ostream *os) {
 namespace mlir::triton::gpu {
 namespace {
 
+std::vector<DistributedEncodingTrait>
+createDistributedEncodings(MLIRContext &ctx) {
+  // Assorted distributed encodings to run tests on
+  // Define a tensor shape
+  auto rank = 2;
+  SmallVector<SmallVector<unsigned>> orders = {{0, 1}, {1, 0}};
+  SmallVector<triton::gpu::CTALayoutAttr> ctaLayouts = {
+      triton::gpu::CTALayoutAttr::getDefault(&ctx, rank),
+      triton::gpu::CTALayoutAttr::get(&ctx, {4, 2}, {2, 2}, {1, 0}),
+  };
+  std::vector<DistributedEncodingTrait> distributedEncodings;
+
+  // Create blocked and slice(blocked) encodings
+  {
+    SmallVector<unsigned> sizePerThread = {4, 4};
+    SmallVector<unsigned> threadsPerWarp = {4, 8};
+    SmallVector<unsigned> warpsPerCTA = {2, 2};
+
+    for (auto ctaLayout : ctaLayouts) {
+      for (const auto &order : orders) {
+        auto blockedEncoding = triton::gpu::BlockedEncodingAttr::get(
+            &ctx, sizePerThread, threadsPerWarp, warpsPerCTA, order, ctaLayout);
+        distributedEncodings.push_back(blockedEncoding);
+        distributedEncodings.push_back(
+            triton::gpu::SliceEncodingAttr::get(&ctx, 0, blockedEncoding));
+      }
+    }
+  }
+
+  // Create an MMAv2 and DotOperandEncodingAttr (MMAv3 doesn't support linear
+  // layouts yet)
+  {
+    for (auto versionMajor : {2, 3}) {
+      unsigned versionMinor = 0;
+      auto kWidth = 2;
+      SmallVector<unsigned> warpsPerCTA{4, 2};
+      auto instrShape = versionMajor == 2 ? SmallVector<unsigned>{16, 8}
+                                          : SmallVector<unsigned>{16, 32, 16};
+      auto mma = triton::gpu::NvidiaMmaEncodingAttr::get(
+          &ctx, versionMajor, versionMinor, warpsPerCTA, ctaLayouts[0],
+          instrShape);
+      distributedEncodings.push_back(mma);
+      // Create an opIdx=0 and opIdx=1 encoding
+      for (unsigned opIdx = 0; opIdx < 2; ++opIdx) {
+        if (opIdx == 1 && versionMajor == 3) {
+          // MMAv3 doesn't support register operand on the rhs
+          continue;
+        }
+        distributedEncodings.push_back(
+            triton::gpu::DotOperandEncodingAttr::get(&ctx, opIdx, mma, kWidth));
+      }
+    }
+  }
+  return distributedEncodings;
+}
+
 std::string strReplace(std::string s, const std::string &from,
                        const std::string &to) {
   size_t start_pos = 0;
@@ -267,6 +323,127 @@ INSTANTIATE_TEST_SUITE_P(
          R"(T<2x2xf32,   #B<{spt=[2,1],   tpw=[2,2],   wpc=[4,8],   ord=[1,0]}>>)"},
     })));
 
+class Fp4ToFpOpTest : public ::testing::Test {
+public:
+  Fp4ToFpOpTest() { ctx.getOrLoadDialect<TritonGPUDialect>(); }
+
+protected:
+  MLIRContext ctx;
+};
+
+TEST_F(Fp4ToFpOpTest, Fp4ToFpOpLayoutPropagation) {
+  SmallVector<SmallVector<int64_t>> shapes = {{64, 128}, {256, 1024}};
+  auto distributedEncodings = createDistributedEncodings(ctx);
+  auto *inferLayout =
+      ctx.getOrLoadDialect<TritonGPUDialect>()
+          ->getRegisteredInterface<DialectInferLayoutInterface>();
+
+  for (auto enc : distributedEncodings) {
+    for (auto shape : shapes) {
+      if (auto sliceEncoding = dyn_cast<triton::gpu::SliceEncodingAttr>(enc)) {
+        shape.erase(shape.begin() + sliceEncoding.getDim());
+      }
+      auto rank = shape.size();
+      auto axis = rank - 1;
+      // Test that we can do a round trip from src to dst encoding and back.
+      Attribute dstEnc;
+      LogicalResult result = inferLayout->inferFp4ToFpOpEncoding(
+          shape, axis, enc, dstEnc, /*fwdInference=*/true, std::nullopt);
+      EXPECT_TRUE(succeeded(result));
+      Attribute newSrcEnc;
+      auto newShape = shape;
+      newShape[axis] *= 2;
+      result = inferLayout->inferFp4ToFpOpEncoding(
+          newShape, axis, dstEnc, newSrcEnc, /*fwdInference=*/false,
+          std::nullopt);
+      EXPECT_TRUE(succeeded(result));
+      // Structural equality.
+      EXPECT_EQ(toLinearLayout(shape, newSrcEnc), toLinearLayout(shape, enc));
+      // We'll have equality iff dstEnc is a legacy encoding.
+      if (!isa<LinearEncodingAttr>(dstEnc)) {
+        EXPECT_EQ(newSrcEnc, enc);
+      }
+    }
+  }
+}
+
+class JoinOpTest : public ::testing::Test {
+public:
+  JoinOpTest() { ctx.getOrLoadDialect<TritonGPUDialect>(); }
+
+protected:
+  MLIRContext ctx;
+};
+
+TEST_F(JoinOpTest, JoinOpLayoutPropagation) {
+  SmallVector<SmallVector<int64_t>> shapes = {{64, 128}, {256, 1024}};
+  auto distributedEncodings = createDistributedEncodings(ctx);
+  auto *inferLayout =
+      ctx.getOrLoadDialect<TritonGPUDialect>()
+          ->getRegisteredInterface<DialectInferLayoutInterface>();
+
+  for (auto enc : distributedEncodings) {
+    for (auto shape : shapes) {
+      if (auto sliceEncoding = dyn_cast<triton::gpu::SliceEncodingAttr>(enc)) {
+        shape.erase(shape.begin() + sliceEncoding.getDim());
+      }
+      auto rank = shape.size();
+      // Join only supports Linear or Blocked
+      auto linear = LinearEncodingAttr::get(&ctx, toLinearLayout(shape, enc));
+      // Test that we can do a round trip from src to dst encoding and back.
+      Attribute dstEnc;
+      LogicalResult result = inferLayout->inferDefaultJoinOpEncoding(
+          linear, dstEnc, shape, std::nullopt);
+      EXPECT_TRUE(succeeded(result));
+      Attribute newSrcEnc;
+      auto newShape = shape;
+      newShape.push_back(2);
+      result = inferLayout->inferSplitOpEncoding(dstEnc, newSrcEnc, newShape,
+                                                 std::nullopt);
+      EXPECT_TRUE(succeeded(result));
+      // Structural equality.
+      EXPECT_EQ(toLinearLayout(shape, newSrcEnc), toLinearLayout(shape, enc));
+      // We'll have equality iff dstEnc is a legacy encoding.
+      if (!isa<LinearEncodingAttr>(dstEnc)) {
+        EXPECT_EQ(newSrcEnc, enc);
+      }
+
+      // We test against this decomposition:
+      // newShape = shape
+      // newShape[axis] *= 2
+      // rank = len(shape)
+      // transShape = list(range(rank))
+      // transShape.insert(axis + 1, rank)
+      // join(enc, enc).trans(transShape).reshape(newShape)
+      auto axis = rank - 1;
+      auto transPerm = llvm::to_vector(llvm::seq<int32_t>(0, rank));
+      transPerm.insert(transPerm.begin() + axis + 1, rank);
+      Attribute joinedEnc;
+      result = inferLayout->inferDefaultJoinOpEncoding(enc, joinedEnc, shape,
+                                                       std::nullopt);
+      auto joinShape = shape;
+      joinShape.push_back(2);
+      assert(succeeded(result));
+      Attribute transEnc;
+      result = inferLayout->inferTransOpEncoding(joinedEnc, joinShape,
+                                                 transPerm, transEnc);
+      assert(succeeded(result));
+      SmallVector<int64_t> transShape;
+      for (auto i : transPerm) {
+        transShape.push_back(joinShape[i]);
+      }
+      Attribute reshapedEnc;
+      result = inferLayout->inferReshapeOpEncoding(
+          transShape, transEnc, newShape, reshapedEnc, std::nullopt);
+      assert(succeeded(result));
+      // The layouts should be structurally the same
+      // but reshapeEnc will likely be a LinearEncodingAttr
+      EXPECT_EQ(toLinearLayout(newShape, reshapedEnc),
+                toLinearLayout(newShape, dstEnc));
+    }
+  }
+}
+
 class AMDLayoutTest : public ::testing::Test {
 public:
   AMDLayoutTest() {
@@ -309,181 +486,6 @@ public:
   }
 };
 
-class AMDWmmaLayoutTest : public AMDLayoutTest {
-public:
-  AMDWmmaLayoutTest() = default;
-
-  triton::gpu::AMDWmmaEncodingAttr
-  createWMMAv1(ArrayRef<unsigned> warpsPerCTA) {
-    return triton::gpu::AMDWmmaEncodingAttr::get(
-        &ctx, /*version=*/1, /*isTransposed=*/false, warpsPerCTA, ctaLayout);
-  }
-
-  triton::gpu::AMDWmmaEncodingAttr
-  createWMMAv2(bool isTransposed, ArrayRef<unsigned> warpsPerCTA) {
-    return triton::gpu::AMDWmmaEncodingAttr::get(
-        &ctx, /*version=*/2, isTransposed, warpsPerCTA, ctaLayout);
-  }
-};
-
-TEST_F(AMDMfmaLayoutTest, mfma32) {
-  auto mfma2d = createMFMA(32, 32, {2, 4});
-  ASSERT_THAT(mfma2d.getThreadOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(mfma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-
-  auto tmfma2d = createTransposedMFMA(32, 32, {2, 4});
-  ASSERT_THAT(tmfma2d.getThreadOrder(), testing::ElementsAre(0u, 1u));
-  ASSERT_THAT(tmfma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-
-  auto mfma3d = createMFMA(32, 32, {2, 4, 1});
-  ASSERT_THAT(mfma3d.getThreadOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(mfma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-
-  auto tmfma3d = createTransposedMFMA(32, 32, {2, 4, 1});
-  ASSERT_THAT(tmfma3d.getThreadOrder(), testing::ElementsAre(1u, 2u, 0u));
-  ASSERT_THAT(tmfma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-}
-
-TEST_F(AMDMfmaLayoutTest, mfma16) {
-  auto mfma2d = createMFMA(16, 16, {2, 4});
-  ASSERT_THAT(mfma2d.getThreadOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(mfma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-
-  auto tmfma2d = createTransposedMFMA(16, 16, {2, 4});
-  ASSERT_THAT(tmfma2d.getThreadOrder(), testing::ElementsAre(0u, 1u));
-  ASSERT_THAT(tmfma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-
-  auto mfma3d = createMFMA(16, 16, {2, 4, 1});
-  ASSERT_THAT(mfma3d.getThreadOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(mfma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-
-  auto tmfma3d = createTransposedMFMA(16, 16, {2, 4, 1});
-  ASSERT_THAT(tmfma3d.getThreadOrder(), testing::ElementsAre(1u, 2u, 0u));
-  ASSERT_THAT(tmfma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-}
-
-TEST_F(AMDMfmaLayoutTest, mfma_dot_op) {
-  auto mfma2d = createMFMA(32, 32, {2, 4});
-  auto dot2dOp0 = createDotOperand(0, mfma2d, 4);
-  auto dot2dOp1 = createDotOperand(1, mfma2d, 4);
-  ASSERT_THAT(dot2dOp0.getWarpOrder(), mfma2d.getWarpOrder());
-  ASSERT_THAT(dot2dOp1.getWarpOrder(), mfma2d.getWarpOrder());
-  ASSERT_THAT(dot2dOp0.getThreadsPerWarp(), testing::ElementsAre(32u, 2u));
-  ASSERT_THAT(dot2dOp1.getThreadsPerWarp(), testing::ElementsAre(2u, 32u));
-
-  auto tmfma2d = createTransposedMFMA(32, 32, {2, 4});
-  auto tdot2dOp0 = createDotOperand(0, tmfma2d, 4);
-  auto tdot2dOp1 = createDotOperand(1, tmfma2d, 4);
-  ASSERT_THAT(tdot2dOp0.getWarpOrder(), tmfma2d.getWarpOrder());
-  ASSERT_THAT(tdot2dOp1.getWarpOrder(), tmfma2d.getWarpOrder());
-
-  auto mfma3d = createMFMA(32, 32, {2, 4, 1});
-  auto dot3dOp0 = createDotOperand(0, mfma3d, 4);
-  auto dot3dOp1 = createDotOperand(1, mfma3d, 4);
-  ASSERT_THAT(dot3dOp0.getWarpOrder(), mfma3d.getWarpOrder());
-  ASSERT_THAT(dot3dOp1.getWarpOrder(), mfma3d.getWarpOrder());
-  ASSERT_THAT(dot3dOp0.getThreadsPerWarp(), testing::ElementsAre(1u, 32u, 2u));
-  ASSERT_THAT(dot3dOp1.getThreadsPerWarp(), testing::ElementsAre(1u, 2u, 32u));
-
-  auto tmfma3d = createTransposedMFMA(32, 32, {2, 4, 1});
-  auto tdot3dOp0 = createDotOperand(0, tmfma3d, 4);
-  auto tdot3dOp1 = createDotOperand(1, tmfma3d, 4);
-  ASSERT_THAT(tdot3dOp0.getWarpOrder(), tmfma3d.getWarpOrder());
-  ASSERT_THAT(tdot3dOp1.getWarpOrder(), tmfma3d.getWarpOrder());
-
-  auto mfma16_2d = createMFMA(16, 16, {2, 4});
-  auto dot16_2dOp0 = createDotOperand(0, mfma16_2d, 4);
-  auto dot16_2dOp1 = createDotOperand(1, mfma16_2d, 4);
-  ASSERT_THAT(dot16_2dOp0.getThreadsPerWarp(), testing::ElementsAre(16u, 4u));
-  ASSERT_THAT(dot16_2dOp1.getThreadsPerWarp(), testing::ElementsAre(4u, 16u));
-
-  auto mfma16_3d = createMFMA(16, 16, {2, 4, 1});
-  auto dot16_3dOp0 = createDotOperand(0, mfma16_3d, 4);
-  auto dot16_3dOp1 = createDotOperand(1, mfma16_3d, 4);
-  ASSERT_THAT(dot16_3dOp0.getThreadsPerWarp(),
-              testing::ElementsAre(1u, 16u, 4u));
-  ASSERT_THAT(dot16_3dOp1.getThreadsPerWarp(),
-              testing::ElementsAre(1u, 4u, 16u));
-}
-
-TEST_F(AMDWmmaLayoutTest, wmmaV1) {
-  auto wmma2d = createWMMAv1({2, 4});
-  ASSERT_THAT(wmma2d.getThreadOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(wmma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(wmma2d.getSizePerThread(), testing::ElementsAre(8u, 1u));
-  ASSERT_THAT(wmma2d.getThreadsPerWarp(), testing::ElementsAre(2u, 16u));
-
-  auto wmma3d = createWMMAv1({2, 4, 1});
-  ASSERT_THAT(wmma3d.getThreadOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(wmma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(wmma3d.getSizePerThread(), testing::ElementsAre(1u, 8u, 1u));
-  ASSERT_THAT(wmma3d.getThreadsPerWarp(), testing::ElementsAre(1, 2u, 16u));
-}
-
-TEST_F(AMDWmmaLayoutTest, wmmaV2) {
-  auto wmma2d = createWMMAv2(false, {2, 4});
-  ASSERT_THAT(wmma2d.getThreadOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(wmma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(wmma2d.getSizePerThread(), testing::ElementsAre(8u, 1u));
-  ASSERT_THAT(wmma2d.getThreadsPerWarp(), testing::ElementsAre(2u, 16u));
-
-  auto wmma3d = createWMMAv2(false, {2, 4, 1});
-  ASSERT_THAT(wmma3d.getThreadOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(wmma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(wmma3d.getSizePerThread(), testing::ElementsAre(1u, 8u, 1u));
-  ASSERT_THAT(wmma3d.getThreadsPerWarp(), testing::ElementsAre(1u, 2u, 16u));
-
-  auto twmma2d = createWMMAv2(true, {2, 4});
-  ASSERT_THAT(twmma2d.getThreadOrder(), testing::ElementsAre(0u, 1u));
-  ASSERT_THAT(twmma2d.getWarpOrder(), testing::ElementsAre(1u, 0u));
-  ASSERT_THAT(twmma2d.getSizePerThread(), testing::ElementsAre(1u, 8u));
-  ASSERT_THAT(twmma2d.getThreadsPerWarp(), testing::ElementsAre(16u, 2u));
-
-  auto twmma3d = createWMMAv2(true, {2, 4, 1});
-  ASSERT_THAT(twmma3d.getThreadOrder(), testing::ElementsAre(1u, 2u, 0u));
-  ASSERT_THAT(twmma3d.getWarpOrder(), testing::ElementsAre(2u, 1u, 0u));
-  ASSERT_THAT(twmma3d.getSizePerThread(), testing::ElementsAre(1u, 1u, 8u));
-  ASSERT_THAT(twmma3d.getThreadsPerWarp(), testing::ElementsAre(1u, 16u, 2u));
-}
-
-TEST_F(AMDWmmaLayoutTest, wmma_dot_op) {
-  auto wmma2dVer1 = createWMMAv1({2, 4});
-  auto dot2dVer1Op0 = createDotOperand(0, wmma2dVer1, 16);
-  auto dot2dVer1Op1 = createDotOperand(1, wmma2dVer1, 16);
-  ASSERT_THAT(dot2dVer1Op0.getWarpOrder(), wmma2dVer1.getWarpOrder());
-  ASSERT_THAT(dot2dVer1Op1.getWarpOrder(), wmma2dVer1.getWarpOrder());
-  ASSERT_THAT(dot2dVer1Op0.getThreadsPerWarp(), testing::ElementsAre(16u, 1u));
-  ASSERT_THAT(dot2dVer1Op1.getThreadsPerWarp(), testing::ElementsAre(1u, 16u));
-
-  auto wmma3dVer1 = createWMMAv1({2, 4, 1});
-  auto dot3dVer1Op0 = createDotOperand(0, wmma3dVer1, 16);
-  auto dot3dVer1Op1 = createDotOperand(1, wmma3dVer1, 16);
-  ASSERT_THAT(dot3dVer1Op0.getWarpOrder(), wmma3dVer1.getWarpOrder());
-  ASSERT_THAT(dot3dVer1Op1.getWarpOrder(), wmma3dVer1.getWarpOrder());
-  ASSERT_THAT(dot3dVer1Op0.getThreadsPerWarp(),
-              testing::ElementsAre(1, 16u, 1u));
-  ASSERT_THAT(dot3dVer1Op1.getThreadsPerWarp(),
-              testing::ElementsAre(1, 1u, 16u));
-
-  auto wmma2dVer2 = createWMMAv2(false, {2, 4});
-  auto dot2dVer2Op0 = createDotOperand(0, wmma2dVer2, 16);
-  auto dot2dVer2Op1 = createDotOperand(1, wmma2dVer2, 16);
-  ASSERT_THAT(dot2dVer2Op0.getWarpOrder(), wmma2dVer2.getWarpOrder());
-  ASSERT_THAT(dot2dVer2Op1.getWarpOrder(), wmma2dVer2.getWarpOrder());
-  ASSERT_THAT(dot2dVer2Op0.getThreadsPerWarp(), testing::ElementsAre(16u, 2u));
-  ASSERT_THAT(dot2dVer2Op1.getThreadsPerWarp(), testing::ElementsAre(2u, 16u));
-
-  auto wmma3dVer2 = createWMMAv2(false, {2, 4, 1});
-  auto dot3dVer2Op0 = createDotOperand(0, wmma3dVer2, 16);
-  auto dot3dVer2Op1 = createDotOperand(1, wmma3dVer2, 16);
-  ASSERT_THAT(dot3dVer2Op0.getWarpOrder(), wmma3dVer2.getWarpOrder());
-  ASSERT_THAT(dot3dVer2Op1.getWarpOrder(), wmma3dVer2.getWarpOrder());
-  ASSERT_THAT(dot3dVer2Op0.getThreadsPerWarp(),
-              testing::ElementsAre(1, 16u, 2u));
-  ASSERT_THAT(dot3dVer2Op1.getThreadsPerWarp(),
-              testing::ElementsAre(1, 2u, 16u));
-}
-
 class LinearEncodingTest : public ::testing::Test {
 public:
   LinearEncodingTest() { ctx.getOrLoadDialect<TritonGPUDialect>(); }
@@ -496,47 +498,25 @@ TEST_F(LinearEncodingTest, DistributedEncodingToLinearEncoding) {
   // Define a tensor shape
   auto rank = 2;
   SmallVector<SmallVector<int64_t>> shapes = {{64, 128}, {256, 1024}};
-  SmallVector<SmallVector<unsigned>> orders = {{0, 1}, {1, 0}};
-  SmallVector<triton::gpu::CTALayoutAttr> ctaLayouts = {
-      triton::gpu::CTALayoutAttr::getDefault(&ctx, rank),
-      triton::gpu::CTALayoutAttr::get(&ctx, {4, 2}, {2, 2}, {1, 0}),
-  };
-  SmallVector<triton::gpu::DistributedEncodingTrait> distributedEncodings;
+  std::vector<DistributedEncodingTrait> distributedEncodings =
+      createDistributedEncodings(ctx);
 
-  // Create BlockedEncodingAttr and SliceEncodingAttr
-  {
-    SmallVector<unsigned> sizePerThread = {4, 4};
-    SmallVector<unsigned> threadsPerWarp = {4, 8};
-    SmallVector<unsigned> warpsPerCTA = {2, 2};
-
-    for (auto ctaLayout : ctaLayouts) {
-      for (const auto &order : orders) {
-        auto blockedEncoding = triton::gpu::BlockedEncodingAttr::get(
-            &ctx, sizePerThread, threadsPerWarp, warpsPerCTA, order, ctaLayout);
-        distributedEncodings.push_back(blockedEncoding);
+  auto n = distributedEncodings.size();
+  for (auto i = 0; i < n; ++i) {
+    if (auto blocked = dyn_cast<triton::gpu::BlockedEncodingAttr>(
+            distributedEncodings[i])) {
+      for (unsigned opIdx = 0; opIdx < 2; ++opIdx) {
         distributedEncodings.push_back(
-            triton::gpu::SliceEncodingAttr::get(&ctx, 0, blockedEncoding));
+            triton::gpu::DotOperandEncodingAttr::get(&ctx, opIdx, blocked, 0));
       }
     }
   }
 
-  // Create an MMAv2 and DotOperandEncodingAttr (MMAv3 doesn't support linear
-  // layouts yet)
-  {
-    unsigned versionMajor = 2;
-    unsigned versionMinor = 0;
-    SmallVector<unsigned> warpsPerCTA{4, 2};
-    SmallVector<unsigned> instrShape{16, 8}; // Instruction shape (M, N)
-    auto mma = triton::gpu::NvidiaMmaEncodingAttr::get(
-        &ctx, versionMajor, versionMinor, warpsPerCTA, ctaLayouts[0],
-        instrShape);
-    distributedEncodings.push_back(mma);
-    // Create an opIdx=0 and opIdx=1 encoding
-    for (unsigned opIdx = 0; opIdx < 2; ++opIdx) {
-      distributedEncodings.push_back(
-          triton::gpu::DotOperandEncodingAttr::get(&ctx, opIdx, mma, 2));
-    }
-  }
+  auto is_dot_op_with_block_parent = [](Attribute layout) {
+    auto dot_layout = dyn_cast<triton::gpu::DotOperandEncodingAttr>(layout);
+    return dot_layout &&
+           isa<triton::gpu::BlockedEncodingAttr>(dot_layout.getParent());
+  };
 
   for (const auto &distributedEncoding : distributedEncodings) {
     for (auto shape : shapes) {
@@ -558,55 +538,27 @@ TEST_F(LinearEncodingTest, DistributedEncodingToLinearEncoding) {
       // Test that methods of DistributedEncoding return the same values
       Type eltTy = Float32Type::get(&ctx);
 
-      ASSERT_EQ(getOrder(distributedEncoding), linearEncoding.getRepOrder());
-      ASSERT_EQ(cast<triton::gpu::TritonGPU_AttrTrait>(distributedEncoding)
-                    .getTotalElemsPerThread(shape, eltTy),
-                linearEncoding.getTotalElemsPerThread(shape, eltTy));
-      ASSERT_EQ(cast<triton::gpu::TritonGPU_AttrTrait>(distributedEncoding)
-                    .getElemsPerThread(shape, eltTy),
-                linearEncoding.getElemsPerThread(shape, eltTy));
-      ASSERT_EQ(distributedEncoding.getRepOrder(),
-                linearEncoding.getRepOrder());
-      ASSERT_EQ(distributedEncoding.getContigPerThread(),
-                linearEncoding.getContigPerThread());
-      // DotOperandEncodingAttr::getWarpOrder() is not defined
-      if (!isa<triton::gpu::DotOperandEncodingAttr>(distributedEncoding)) {
-        ASSERT_EQ(distributedEncoding.getWarpOrder(),
-                  linearEncoding.getWarpOrder());
-      }
-      ASSERT_EQ(distributedEncoding.getThreadOrder(),
-                linearEncoding.getThreadOrder());
-      // For slice these do not equal the total number of lines / warps
-      // See [Note. Divergence of methods wrt. legacy layouts]
-      if (!isa<triton::gpu::SliceEncodingAttr>(distributedEncoding)) {
-        ASSERT_EQ(distributedEncoding.getWarpsPerCTA(),
-                  linearEncoding.getWarpsPerCTA());
-        ASSERT_EQ(distributedEncoding.getThreadsPerWarp(),
-                  linearEncoding.getThreadsPerWarp());
-      }
-      // Canonicalisation for opIdx=0 takes just a [2 x 2] subtile as it takes
-      // the second repetition along K as the second tile.
-      if (!isa<triton::gpu::DotOperandEncodingAttr>(distributedEncoding)) {
-        // FIXME: This happens to be correct for SliceLayout because of the hack
-        // in SliceEncodingAttr::toLinearLayout(). We should remove the hack
-        // and the skips in the getWarpsPerCTA() and getThreadsPerWarp()
-        ASSERT_EQ(distributedEncoding.getSizePerThread(),
-                  linearEncoding.getSizePerThread());
+      ASSERT_EQ(distributedEncoding.getTotalElemsPerThread(shape),
+                linearEncoding.getTotalElemsPerThread(shape));
+      ASSERT_EQ(distributedEncoding.getElemsPerThread(shape),
+                linearEncoding.getElemsPerThread(shape));
+      if (!is_dot_op_with_block_parent(distributedEncoding)) {
+        ASSERT_EQ(distributedEncoding.getRepOrder(),
+                  linearEncoding.getRepOrder());
       }
 
       // block level
       // SliceEncoding is not well-defined for CGAs
       if (!isa<triton::gpu::SliceEncodingAttr>(distributedEncoding)) {
-        ASSERT_EQ(distributedEncoding.getCTASplitNum(),
+        auto baseEncoding = cast<LayoutEncodingTrait>(distributedEncoding);
+        ASSERT_EQ(baseEncoding.getCTASplitNum(),
                   linearEncoding.getCTASplitNum());
-        ASSERT_EQ(distributedEncoding.getCTAsPerCGA(),
-                  linearEncoding.getCTAsPerCGA());
+        ASSERT_EQ(baseEncoding.getCTAsPerCGA(), baseEncoding.getCTAsPerCGA());
         // If we are not using CGAs, the order is meaningless
-        auto useCGA = distributedEncoding.getCTAsPerCGA() !=
-                      SmallVector<unsigned>(rank, 1);
-        if (useCGA) {
-          ASSERT_EQ(distributedEncoding.getCTAOrder(),
-                    linearEncoding.getCTAOrder());
+        auto useCGA =
+            baseEncoding.getCTAsPerCGA() != SmallVector<unsigned>(rank, 1);
+        if (useCGA && !is_dot_op_with_block_parent(distributedEncoding)) {
+          ASSERT_EQ(baseEncoding.getCTAOrder(), linearEncoding.getCTAOrder());
         }
       }
     }

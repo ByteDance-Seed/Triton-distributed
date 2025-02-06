@@ -1,0 +1,18 @@
+set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
+
+set(LLVM_TARGET_DEFINITIONS DistributedOps.td)
+mlir_tablegen(Dialect.h.inc -gen-dialect-decls -dialect=distributed)
+mlir_tablegen(Dialect.cpp.inc -gen-dialect-defs -dialect=distributed)
+mlir_tablegen(OpsConversions.inc -gen-llvmir-conversions)
+mlir_tablegen(Ops.h.inc -gen-op-decls)
+mlir_tablegen(Ops.cpp.inc -gen-op-defs)
+add_mlir_doc(DistributedDialect DistributedDialect dialects/ -gen-dialect-doc)
+add_mlir_doc(DistributedOps DistributedOps dialects/ -gen-op-doc)
+add_public_tablegen_target(DistributedTableGen)
+
+set(LLVM_TARGET_DEFINITIONS DistributedAttrDefs.td)
+mlir_tablegen(DistributedEnums.h.inc -gen-enum-decls)
+mlir_tablegen(DistributedEnums.cpp.inc -gen-enum-defs)
+mlir_tablegen(DistributedAttrDefs.h.inc -gen-attrdef-decls)
+mlir_tablegen(DistributedAttrDefs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(DistributedAttrDefsIncGen)

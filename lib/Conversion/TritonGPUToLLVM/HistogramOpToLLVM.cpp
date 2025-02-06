@@ -5,8 +5,7 @@
 
 using namespace mlir;
 using namespace mlir::triton;
-
-static int log2Int(int64_t num) { return (num > 1) ? 1 + log2Int(num / 2) : 0; }
+using namespace mlir::triton::gpu;
 
 // Compute a histogram within a warp. This uses an algorithm by @apgoucher
 // that does the following:
@@ -22,12 +21,10 @@ static SmallVector<Value> computeWarpLevelHistogram(
   assert(numBins % numThreadPerWarp == 0 &&
          "numBins must be divisible by numThreadPerWarp");
   Value zero = b.i32_val(0);
-  int numBits = log2Int(numBins);
-  int numBitsLaneId = log2Int(numThreadPerWarp);
-  unsigned numElementsPerThreads = triton::gpu::getTotalElemsPerThread(srcType);
-  unsigned numThreadWithUniqueData =
-      triton::gpu::getThreadsPerWarpWithUniqueData(srcType.getEncoding(),
-                                                   srcType.getShape())[0];
+  int numBits = llvm::Log2_64(numBins);
+  int numBitsLaneId = llvm::Log2_64(numThreadPerWarp);
+  unsigned numElementsPerThreads = getTotalElemsPerThread(srcType);
+  unsigned numThreadWithUniqueData = getThreadsPerWarp(srcType)[0];
   // The histogram is distributed across threads, each thread owns `numBins /
   // numThreadPerWarp` bins.
   SmallVector<Value> warpLevelHistogram(numBins / numThreadPerWarp, zero);
@@ -90,9 +87,8 @@ static SmallVector<Value> computeCrossWarpHistogram(
     Value threadId, int numWarps) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> histogramValues;
-  unsigned numWarpsWithUniqueData =
-      mlir::triton::gpu::getWarpsPerCTAWithUniqueData(srcType.getEncoding(),
-                                                      srcType.getShape())[0];
+  unsigned numWarpsWithUniqueData = mlir::triton::gpu::getWarpsPerCTA(
+      srcType.getEncoding(), srcType.getShape())[0];
   Value laneId = b.and_(threadId, b.i32_val(numThreadPerWarp - 1));
   // Initialize the shared memory with zeros.
   int64_t numElementPerThread =
@@ -170,7 +166,7 @@ public:
     assert(numThreadsPerWarp == 32 ||
            numThreadsPerWarp == 64 &&
                "Only supports 32 or 64 threads per warp");
-    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
+    int numWarps = triton::gpu::lookupNumWarps(op);
     // Pad out the bins so that we have at least one bin per thread within a
     // warp.
     numBins = std::max(numBins, numThreadsPerWarp);

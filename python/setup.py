@@ -1,3 +1,6 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
 import os
 import platform
 import re
@@ -177,6 +180,14 @@ def get_json_package_info():
     return Package("json", "", url, "JSON_INCLUDE_DIR", "", "JSON_SYSPATH")
 
 
+def is_linux_os(id):
+    if os.path.exists("/etc/os-release"):
+        with open("/etc/os-release", "r") as f:
+            os_release_content = f.read()
+            return f'ID="{id}"' in os_release_content
+    return False
+
+
 # llvm
 def get_llvm_package_info():
     system = platform.system()
@@ -187,7 +198,9 @@ def get_llvm_package_info():
     if system == "Darwin":
         system_suffix = f"macos-{arch}"
     elif system == "Linux":
-        if arch == 'arm64':
+        if arch == 'arm64' and is_linux_os('almalinux'):
+            system_suffix = 'almalinux-arm64'
+        elif arch == 'arm64':
             system_suffix = 'ubuntu-arm64'
         elif arch == 'x64':
             vglibc = tuple(map(int, platform.libc_ver()[1].split('.')))
@@ -378,7 +391,37 @@ class CMakeBuild(build_ext):
     def finalize_options(self):
         build_ext.finalize_options(self)
 
+    def build_nvshmem(self, cap):
+        nvshmem_dir = os.path.join(get_base_dir(), "third_party", "nvshmem_bind")
+        if not os.path.exists(nvshmem_dir):
+            raise RuntimeError("NVSHMEM source directory not found")
+
+        CUDA_ARCH = "".join([str(x) for x in cap])
+        extra_args = ["--arch", CUDA_ARCH] if CUDA_ARCH != "" else []
+        subprocess.check_call(["bash", f"{nvshmem_dir}/build.sh"] + extra_args)
+
+    def build_rocshmem(self, cap):
+        rocshmem_dir = os.path.join(get_base_dir(), "third_party", "rocshmem_bind")
+        if not os.path.exists(rocshmem_dir):
+            raise RuntimeError("ROCSHMEM source directory not found")
+
+        ROCM_ARCH = "gfx942"  # hard-code for now
+        extra_args = ["--arch", ROCM_ARCH] if ROCM_ARCH != "" else []
+        subprocess.check_call(["bash", f"{rocshmem_dir}/build.sh"] + extra_args)
+
     def run(self):
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                if torch.version.hip is None:
+                    self.build_nvshmem(torch.cuda.get_device_capability())
+                else:
+                    self.build_rocshmem(torch.cuda.get_device_capability())  # (9, 4)
+        except Exception:
+            print("Cannot import torch.")
+            pass
+
         try:
             out = subprocess.check_output(["cmake", "--version"])
         except OSError:
@@ -431,9 +474,8 @@ class CMakeBuild(build_ext):
             "-DCMAKE_MAKE_PROGRAM=" +
             ninja_dir,  # Pass explicit path to ninja otherwise cmake may cache a temporary path
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", "-DLLVM_ENABLE_WERROR=ON",
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir, "-DTRITON_BUILD_TUTORIALS=OFF",
-            "-DTRITON_BUILD_PYTHON_MODULE=ON", "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable,
-            "-DPython3_INCLUDE_DIR=" + python_include_dir,
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir, "-DTRITON_BUILD_PYTHON_MODULE=ON",
+            "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable, "-DPython3_INCLUDE_DIR=" + python_include_dir,
             "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends if not b.is_external]),
             "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external])
         ]
@@ -479,7 +521,7 @@ class CMakeBuild(build_ext):
         # environment variables we will pass through to cmake
         passthrough_args = [
             "TRITON_BUILD_PROTON",
-            "TRITON_BUILD_TUTORIALS",
+            "TRITON_BUILD_DISTRIBUTED",
             "TRITON_BUILD_WITH_CCACHE",
             "TRITON_PARALLEL_LINK_JOBS",
         ]
@@ -487,6 +529,9 @@ class CMakeBuild(build_ext):
 
         if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
             cmake_args += self.get_proton_cmake_args()
+
+        if check_env_flag("USE_TRITON_DISTRIBUTED_AOT", "0"):  # Default OFF
+            cmake_args += ["-DUSE_TRITON_DISTRIBUTED_AOT=ON"]
 
         if is_offline_build():
             # unit test builds fetch googletests from GitHub
@@ -515,16 +560,6 @@ download_and_copy(
     dst_path="bin/ptxas",
     variable="TRITON_PTXAS_PATH",
     version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
-    url_func=lambda system, arch, version:
-    f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
-)
-# We download a separate ptxas for blackwell, since there are some bugs when using it for hopper
-download_and_copy(
-    name="nvcc",
-    src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas{exe_extension}",
-    dst_path="bin/ptxas-blackwell",
-    variable="TRITON_PTXAS_PATH",
-    version=NVIDIA_TOOLCHAIN_VERSION["ptxas-blackwell"],
     url_func=lambda system, arch, version:
     f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
 )
@@ -616,10 +651,19 @@ def add_link_to_proton():
     update_symlink(proton_install_dir, proton_dir)
 
 
+def add_link_to_distributed():
+    distributed_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, "third_party", "distributed", "distributed"))
+    distributed_install_dir = os.path.join(os.path.dirname(__file__), "triton", "distributed")
+    update_symlink(distributed_install_dir, distributed_dir)
+
+
 def add_links():
     add_link_to_backends()
     if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
         add_link_to_proton()
+    if check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):  # Default ON
+        add_link_to_distributed()
 
 
 class plugin_install(install):
@@ -698,6 +742,8 @@ def get_packages():
     packages += get_extra_packages("tools")
     if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
         packages += ["triton/profiler"]
+    if check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):  # Default ON
+        packages += ["triton/distributed"]
 
     return packages
 
@@ -720,9 +766,25 @@ def get_git_commit_hash(length=8):
         return ""
 
 
+def get_git_branch():
+    try:
+        cmd = ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+        return subprocess.check_output(cmd).strip().decode('utf-8')
+    except Exception:
+        return ""
+
+
+def get_git_version_suffix():
+    branch = get_git_branch()
+    if branch.startswith("release"):
+        return ""
+    else:
+        return get_git_commit_hash()
+
+
 setup(
     name=os.environ.get("TRITON_WHEEL_NAME", "triton"),
-    version="3.2.0" + get_git_commit_hash() + os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", ""),
+    version="3.3.0" + get_git_version_suffix() + os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", ""),
     author="Philippe Tillet",
     author_email="phil@openai.com",
     description="A language and compiler for custom Deep Learning operations",

@@ -1,4 +1,4 @@
-// RUN: triton-opt %s --convert-nv-gpu-to-llvm  -split-input-file | FileCheck %s
+// RUN: triton-opt %s --convert-nv-gpu-to-llvm -allow-unregistered-dialect -split-input-file | FileCheck %s
 
 // CHECK-LABEL: @nvvm_syncs
 llvm.func @nvvm_syncs() {
@@ -124,4 +124,90 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %264 = llvm.ptrtoint %263 : !llvm.ptr<6> to i32
     llvm.return %264 : i32
   }
+}
+
+// -----
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 65544 : i32, ttg.target = "cuda:100", ttg.tensor_memory_size = 128 : i32, "ttg.threads-per-warp" = 32 : i32} {
+
+llvm.mlir.global external @global_smem() {addr_space = 3 : i32, alignment = 16 : i64} : !llvm.array<0 x i8>
+
+// CHECK-LABEL: @tensor_memory_base_warpgroup
+llvm.func @tensor_memory_base_warpgroup() attributes {nvvm.kernel = 1 : ui1, nvvm.maxntid = array<i32: 128>} {
+  // CHECK: [[PTR:%.*]] = llvm.inttoptr %{{.*}} : i32 to !llvm.ptr<6>
+  // CHECK: ttg.warp_specialize([[PTR]])
+  ttg.warp_specialize()
+  default {
+    ttg.warp_yield
+  }
+  // CHECK: partition0
+  partition0() num_warps(1) {
+    %0 = nvgpu.tensor_memory_base
+    // CHECK-NEXT: "use"(%arg0)
+    "use"(%0) : (!llvm.ptr<6>) -> ()
+    ttg.warp_return
+  } : () -> ()
+  llvm.return
+}
+
+}
+
+// -----
+
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+
+// CHECK-LABEL: @warpid_warp_specialize
+llvm.func @warpid_warp_specialize() {
+  // CHECK: [[C32:%.*]] = llvm.mlir.constant(32 : i32)
+  // CHECK: [[TIDX:%.*]] = nvvm.read.ptx.sreg.tid.x
+  // CHECK: [[ID:%.*]] = llvm.udiv [[TIDX]], [[C32]]
+  // CHECK: [[UNIFORM:%.*]] = nvvm.shfl.sync idx {{%[0-9]+}}, [[ID]]
+  %0 = nvgpu.warp_id
+  // CHECK: "use"([[UNIFORM]])
+  "use"(%0) : (i32) -> ()
+
+  // CHECK: ttg.warp_specialize
+  ttg.warp_specialize() attributes {warpGroupStartIds = array<i32: 6, 4>}
+  // CHECK: default
+  default {
+    // CHECK: [[TIDX:%.*]] = nvvm.read.ptx.sreg.tid.x
+    // CHECK: [[ID:%.*]] = llvm.udiv [[TIDX]], [[C32]]
+    // CHECK: [[UNIFORM:%.*]] = nvvm.shfl.sync idx {{%[0-9]+}}, [[ID]]
+    %1 = nvgpu.warp_id
+    // CHECK: "use"([[UNIFORM]])
+    "use"(%1) : (i32) -> ()
+    ttg.warp_yield
+  }
+  // CHECK: partition0
+  partition0() num_warps(4) {
+    // 6*32 = 196
+
+    // CHECK: [[C32:%.*]] = llvm.mlir.constant(32 : i32)
+    // CHECK: [[C192:%.*]] = llvm.mlir.constant(192 : i32)
+    // CHECK: [[TIDX:%.*]] = nvvm.read.ptx.sreg.tid.x
+    // CHECK: [[REL_TIDX:%.*]] = llvm.sub [[TIDX]], [[C192]]
+    // CHECK: [[ID:%.*]] = llvm.udiv [[REL_TIDX]], [[C32]]
+    // CHECK: [[UNIFORM:%.*]] = nvvm.shfl.sync idx {{%[0-9]+}}, [[ID]]
+    %1 = nvgpu.warp_id
+    // CHECK: "use"([[UNIFORM]])
+    "use"(%1) : (i32) -> ()
+    ttg.warp_return
+  }
+  partition1() num_warps(2) {
+    // 4*32 = 128
+
+    // CHECK: [[C32:%.*]] = llvm.mlir.constant(32 : i32)
+    // CHECK: [[C128:%.*]] = llvm.mlir.constant(128 : i32)
+    // CHECK: [[TIDX:%.*]] = nvvm.read.ptx.sreg.tid.x
+    // CHECK: [[REL_TIDX:%.*]] = llvm.sub [[TIDX]], [[C128]]
+    // CHECK: [[ID:%.*]] = llvm.udiv [[REL_TIDX]], [[C32]]
+    // CHECK: [[UNIFORM:%.*]] = nvvm.shfl.sync idx {{%[0-9]+}}, [[ID]]
+    %1 = nvgpu.warp_id
+    // CHECK: "use"([[UNIFORM]])
+    "use"(%1) : (i32) -> ()
+    ttg.warp_return
+  } : () -> ()
+  llvm.return
+}
+
 }

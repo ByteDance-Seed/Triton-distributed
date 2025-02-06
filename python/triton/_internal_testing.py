@@ -20,6 +20,7 @@ dtypes = integral_dtypes + float_dtypes
 dtypes_with_bfloat16 = dtypes + ['bfloat16']
 torch_float8_dtypes = ['float8_e4m3fn', 'float8_e5m2']
 torch_dtypes = ['bool'] + int_dtypes + ['uint8'] + float_dtypes + ['bfloat16']
+tma_dtypes = sorted(set(dtypes_with_bfloat16) - {"int64", "uint64", "float64"})
 
 
 def is_interpreter():
@@ -46,22 +47,29 @@ def is_hip():
     return False if target is None else target.backend == "hip"
 
 
-def is_hip_mi200():
+def is_hip_cdna2():
     target = get_current_target()
     if target is None or target.backend != 'hip':
         return False
     return target.arch == 'gfx90a'
 
 
-def is_hip_mi300():
+def is_hip_cdna3():
     target = get_current_target()
     if target is None or target.backend != 'hip':
         return False
     return target.arch in ('gfx940', 'gfx941', 'gfx942')
 
 
+def is_hip_cdna4():
+    target = get_current_target()
+    if target is None or target.backend != 'hip':
+        return False
+    return target.arch in ('gfx950')
+
+
 def is_hip_cdna():
-    return is_hip_mi200() or is_hip_mi300()
+    return is_hip_cdna2() or is_hip_cdna3() or is_hip_cdna4()
 
 
 def is_xpu():
@@ -150,6 +158,8 @@ def to_numpy(x):
 
 
 def supports_tma(byval_only=False):
+    if is_interpreter():
+        return True
     if not is_cuda():
         return False
     _, cuda_version = _path_to_binary("ptxas")
@@ -167,3 +177,9 @@ def tma_skip_msg(byval_only=False):
 
 
 requires_tma = pytest.mark.skipif(not supports_tma(), reason=tma_skip_msg())
+
+
+def unwrap_tensor(t: Union[torch.Tensor, triton.runtime.jit.TensorWrapper]) -> torch.Tensor:
+    if isinstance(t, triton.runtime.jit.TensorWrapper):
+        return t.base
+    return t

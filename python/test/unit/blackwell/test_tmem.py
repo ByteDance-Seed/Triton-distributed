@@ -16,7 +16,7 @@ def test_tmem_copy_2d():
     num_cols = smem_h * 4 // 32
 
     copy_ops = """
-%93 = ttg.local_alloc  : () -> !ttg.memdesc<1xi64, #shared1, #ttg.shared_memory, mutable>
+%93 = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared1, #ttg.shared_memory, mutable>
 ttng.init_barrier %93, 1 : !ttg.memdesc<1xi64, #shared1, #ttg.shared_memory, mutable>
 %tmem_alloc = ttng.tmem_alloc {{tensor_memory_offset = 0 : i32}}: () -> !ttg.memdesc<128x{num_cols}xi32, #tmem, #ttng.tensor_memory, mutable>
 ttng.tmem_copy %17, %tmem_alloc, %93 : (!ttg.memdesc<{smem_h}x4xi32, #shared, #ttg.shared_memory>, !ttg.memdesc<128x{num_cols}xi32, #tmem, #ttng.tensor_memory, mutable>, !ttg.memdesc<1xi64, #shared1, #ttg.shared_memory, mutable>) -> ()
@@ -64,8 +64,8 @@ ttng.wait_barrier %93, %c0_i32 : !ttg.memdesc<1xi64, #shared1, #ttg.shared_memor
 
     ir = """
     #blocked = #ttg.blocked<{sizePerThread=[1, 4], threadsPerWarp=[32, 1], warpsPerCTA=[4, 1], order=[0, 1]}>
-    #shared = #ttg.shared<{vec=1, perPhase=1, maxPhase=1, order=[1, 0]}>
-    #shared1 = #ttg.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+    #shared = #ttg.swizzled_shared<{vec=1, perPhase=1, maxPhase=1, order=[1, 0]}>
+    #shared1 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
     #tmem = #ttng.tensor_memory_encoding<blockM = 128, blockN = 32, unpacked = false>
     module attributes {"ttg.num-warps" = 4 : i32, "ttg.num-ctas" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
     tt.func public @kernel_0d1d(%arg0: !tt.ptr<i32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<i32> {tt.divisibility = 16 : i32}) {

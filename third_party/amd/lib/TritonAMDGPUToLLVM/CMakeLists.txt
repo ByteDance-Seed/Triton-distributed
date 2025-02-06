@@ -1,10 +1,13 @@
 add_triton_library(TritonAMDGPUToLLVM
+    AtomicRMWOpsEmitter.cpp
     BufferOpsEmitter.cpp
     ConvertLayoutOpToLLVM/SharedToDotOperandHelper.cpp
     ConvertLayoutOpToLLVM/SharedToDotOperandMFMA.cpp
     ConvertLayoutOpToLLVM/SharedToDotOperandWMMA.cpp
     ConvertLayoutOpToLLVM.cpp
     MemoryOpToLLVM.cpp
+    DistributedOpToLLVM.cpp
+    DotOpToLLVM/FMA.cpp
     DotOpToLLVM/MFMA.cpp
     DotOpToLLVM/WMMA.cpp
     DotOpToLLVM.cpp
@@ -16,7 +19,6 @@ add_triton_library(TritonAMDGPUToLLVM
     Utility.cpp
     TargetInfo.cpp
     TargetUtils.cpp
-    DecomposeUnsupportedConversions.cpp
     OptimizeLDSUsage.cpp
     OptimizeLDSUtility.cpp
     SPMDOpToLLVM.cpp
@@ -30,4 +32,5 @@ add_triton_library(TritonAMDGPUToLLVM
     TritonGPUToLLVM
     TritonAMDGPUIR
     TritonProtonToLLVM
+    DistributedIR
 )

@@ -1,0 +1,5 @@
+${SCRIPT_DIR}/../third_party/distributed/distributed/kernels/nvidia/flash_decode.py:kernel_gqa_fwd_batch_decode_split_kv_persistent
+${SCRIPT_DIR}/../third_party/distributed/distributed/kernels/nvidia/flash_decode.py:kernel_gqa_fwd_batch_decode_split_kv
+${SCRIPT_DIR}/../third_party/distributed/distributed/kernels/nvidia/flash_decode.py:kernel_gqa_fwd_batch_decode_combine_kv
+${SCRIPT_DIR}/../third_party/distributed/distributed/kernels/nvidia/flash_decode.py:kernel_intra_rank_gqa_fwd_batch_decode_combine_kv
+${SCRIPT_DIR}/../third_party/distributed/distributed/kernels/nvidia/flash_decode.py:kernel_inter_rank_gqa_fwd_batch_decode_combine_kv

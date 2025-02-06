@@ -57,11 +57,11 @@ cmake-build-*
 cuobjdump
 nvdisasm
 ptxas
-ptxas-blackwell
 
 # Third-party include
 third_party/nvidia/backend/include
 third_party/nvidia/backend/lib/cupti
+third_party/nvidia/backend/lib/libnvshmem_device.bc
 
 # Docs
 docs/_build/
@@ -84,3 +84,22 @@ docs/sg_execution_times.rst
 
 # macOS
 .DS_Store
+
+# .triton and cache
+.triton
+.triton_cache
+
+# log files
+trace*.log
+prof
+
+# distributed
+python/triton/distributed
+triton_aot_generated
+rank-*.log
+python/*.egg-info
+third_party/nvshmem
+third_party/rocshmem_bind/runtime/*.o
+third_party/rocshmem_bind/rocshmem_build
+third_party/rocshmem_bind/ompi_build
+third_party/rocshmem_bind/pyrocshmem/build/

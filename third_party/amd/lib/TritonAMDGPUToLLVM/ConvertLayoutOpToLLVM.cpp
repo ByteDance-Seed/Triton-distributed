@@ -8,7 +8,6 @@ using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
-using ::mlir::triton::gpu::SharedEncodingAttr;
 
 namespace SharedToDotOperandMFMA {
 Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
@@ -58,7 +57,7 @@ public:
     auto mfmaLayout = dyn_cast<AMDMfmaEncodingAttr>(srcType.getEncoding());
     assert((mfmaLayout.getMDim() == 16 || mfmaLayout.getMDim() == 32) &&
            "Expected MFMA size 16 or 32");
-    assert(triton::gpu::getWarpSize(mfmaLayout) == 64 &&
+    assert(triton::gpu::lookupThreadsPerWarp(rewriter) == 64 &&
            "Expected warp size 64 for MFMA");
 
     auto elemTy = int_ty(8);
@@ -69,7 +68,7 @@ public:
     Value c48 = b.i32_val(48);
     Value c64 = b.i32_val(64);
 
-    Value threadId = b.tid_val();
+    Value threadId = getThreadId(rewriter, loc);
     Value laneId = b.urem(threadId, c64);
 
     Value mask0 = b.icmp_slt(laneId, c32);

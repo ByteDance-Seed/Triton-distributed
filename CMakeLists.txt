@@ -18,9 +18,10 @@ include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Options
-option(TRITON_BUILD_TUTORIALS "Build C++ Triton tutorials" ON)
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
+option(TRITON_BUILD_DISTRIBUTED "Build the Triton Distributed" ON)
+option(USE_TRITON_DISTRIBUTED_AOT "Build the Triton Distributed with AOT" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
@@ -163,7 +164,7 @@ add_subdirectory(lib)
 # TODO: Figure out which target is sufficient to fix errors; triton is
 # apparently not enough. Currently set linking libstdc++fs for all targets
 # to support some old version GCC compilers like 8.3.0.
-if (NOT WIN32 AND NOT APPLE)
+if (NOT WIN32 AND NOT APPLE AND NOT BSD)
   link_libraries(stdc++fs)
 endif()
 
@@ -204,9 +205,15 @@ if(TRITON_BUILD_PYTHON_MODULE)
   if (TRITON_BUILD_PROTON)
     add_subdirectory(third_party/proton)
   endif()
+  if (TRITON_BUILD_DISTRIBUTED)
+    add_subdirectory(third_party/distributed)
+  endif()
   # We always build proton dialect
   list(APPEND TRITON_PLUGIN_NAMES "proton")
   add_subdirectory(third_party/proton/dialect)
+  # We always build distributed dialect
+  list(APPEND TRITON_PLUGIN_NAMES "distributed")
+  add_subdirectory(third_party/distributed/dialect)
 
   get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
   get_property(triton_plugins GLOBAL PROPERTY TRITON_PLUGINS)
@@ -318,6 +325,7 @@ if(NOT TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
   add_subdirectory(third_party/proton/dialect)
+  add_subdirectory(third_party/distributed/dialect)
 endif()
 
 find_package(Threads REQUIRED)

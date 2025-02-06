@@ -1,3 +1,6 @@
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 #ifndef TRITON_CONVERSION_TRITONNVIDIAGPU_TO_LLVM_PATTERNS_TRITON_GPU_OP_TO_LLVM_H
 #define TRITON_CONVERSION_TRITONNVIDIAGPU_TO_LLVM_PATTERNS_TRITON_GPU_OP_TO_LLVM_H
 
@@ -41,10 +44,9 @@ void populateElementwiseOpToLLVMPatterns(
     ModuleAxisInfoAnalysis &axisInfoAnalysis, int computeCapability,
     const TargetInfo &targetInfo, PatternBenefit benefit);
 
-void populateUpcastMXFPToLLVMPatterns(LLVMTypeConverter &typeConverter,
-                                      RewritePatternSet &patterns,
-                                      const TargetInfo &targetInfo,
-                                      PatternBenefit benefit);
+void populateFp4ToFpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                   RewritePatternSet &patterns,
+                                   PatternBenefit benefit);
 
 void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        const TargetInfo &targetInfo,
@@ -82,6 +84,13 @@ void populateTensorMemoryOpToLLVMPattern(LLVMTypeConverter &typeConverter,
 void populateTensorMemorySubviewOpToLLVMPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     PatternBenefit benefit);
+
+void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                         RewritePatternSet &patterns,
+                                         PatternBenefit benefit,
+                                         const TargetInfo &targetInfo,
+                                         std::string NVSHMEMLibname = "",
+                                         std::string NVSHMEMLibpath = "");
 } // namespace NVIDIA
 } // namespace triton
 } // namespace mlir

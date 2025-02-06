@@ -42,24 +42,25 @@ Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
 // Loads from shared or global memory with predication.
 // `otherElems` is used to mask out the elements that are not loaded
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, int64_t alignmentBytes = 0,
+             Value pred, Value falseVal,
              triton::CacheModifier cm = triton::CacheModifier::NONE);
 
 // Stores to shared or global memory with predication.
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred, int64_t alignmentBytes = 0,
+             Value pred,
              triton::CacheModifier cm = triton::CacheModifier::NONE);
 
 // Get cache modifier information for creating load or store instruction
 // Get flags <volatile, nontemporal> for a predicated Load or Store
 std::pair<bool, bool> getCacheModifierFlagsForPredicatedCall(LLVM::CallOp);
 // Get the cachepolicy value for a cache modifier
-int32_t getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier, bool,
-                                            mlir::triton::AMD::TargetInfo &);
+int32_t
+getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier, bool,
+                                    const mlir::triton::AMD::TargetInfo &);
 
 // Get cache modifier information for buffer atomics
-int32_t getCtrlBitsForBufferAtomicsOnGFX942(bool setSC0, bool setSC1,
-                                            bool setNT);
+int32_t getCtrlBitsForBufferAtomicsOnGFX_942_950(bool setSC0, bool setSC1,
+                                                 bool setNT);
 
 Value cvtFp32ToFp16(Location loc, RewriterBase &rewriter, const Value &v,
                     triton::RoundingMode rounding);
@@ -82,6 +83,25 @@ unsigned getVectorSize(Value ptr, ModuleAxisInfoAnalysis &axisAnalysisPass);
 unsigned getVectorSize(Value ptr, Value offset,
                        ModuleAxisInfoAnalysis &axisAnalysisPass);
 
+Type scaleDotElemTypeToMLIRType(MLIRContext *ctx, triton::ScaleDotElemType t);
+
+// Returns true if we can perform coalesced write from the source encoding to
+// the destination encoding.
+bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
+                                      RankedTensorType srcTy,
+                                      triton::gpu::MemDescType dstTy,
+                                      unsigned vectorSize);
+
+// Return true if op is used by DotScaledOp or UpcastMXFPOp ops.
+bool isUsedByDotScaledOp(Operation *op);
+
+// Check if the result of this tl.dot is used as opA of another tl.dot
+// in the same region
+bool isChainDotHead(mlir::triton::DotOpInterface dotOp);
+
+// Check if the opA of this tl.dot is the result of another tl.dot
+// in the same region
+bool isChainDotTail(mlir::triton::DotOpInterface dotOp);
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_

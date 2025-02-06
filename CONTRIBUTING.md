@@ -1,70 +1,83 @@
-# Governance Structure
+<!-- #
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# -->
 
-Triton adopts the following hierarchical technical governance structure:
-* A community of **contributors** who file issues and submit pull requests
-* A group of **module maintainers** who own parts of Triton and drive their development
-* A body of **core maintainers** who own Triton overall and drive its development
-* A **lead core maintainer** who is the catch-all decision maker when consensus cannot be reached by core maintainers
+# How to Contribute
 
-All contributions are expected to follow Triton’s design principles, as enforced by module and core maintainers. While high-quality pull requests are appreciated and encouraged, all maintainers reserve the right to prioritize their own work over code reviews at-will, hence contributors should not expect their work to be reviewed promptly.
+We'd love to accept your patches and contributions to this project. There are
+just a few small guidelines you need to follow.
 
-Contributors can maximize the chances of their work being accepted by maintainers by meeting a high quality bar before sending a PR to maintainers.  We encourage maintainers who contribute to Triton on behalf of a company to get reviews from senior developers within their company before sending to maintainers.
-Module maintainers
-We aim to make the Triton codebase as modular as possible, such that different components (e.g., subdirectories) can be improved in parallel under the supervision of different module maintainers.
+## Contributor License Agreement
 
-What constitutes (or not) a module is up to the core maintainers. Core maintainers also reserve the right to decide whether the development of a module should happen – or keep happening – in-tree or not.
+Contributions to this project must be accompanied by a Contributor License
+Agreement. You (or your employer) retain the copyright to your contribution;
+this simply gives us permission to use and redistribute your contributions as
+part of the project.
 
-**List of in-tree modules (as of 05/12/2024, alphabetical order):**
-* AMD backend (Lei Zhang)
-* Interpreter (Keren Zhou)
-* Profiler (Keren Zhou)
+You generally only need to submit a CLA once, so if you've already submitted one
+(even if it was for a different project), you probably don't need to do it
+again.
 
-Note: Parts of Triton that are not listed above (e.g., Nvidia backend) are assumed to be owned by core maintainers.
+## Changes Accepted
 
-Note: Some important parts of the Triton eco-system (e.g., Intel XPU backend) may be maintained out-of-tree and advertised in our repository. The governance rules described in this document do not carry over to these modules.
+Please file issues before doing substantial work; this will ensure that others
+don't duplicate the work and that there's a chance to discuss any design issues.
+Changes only tweaking style are unlikely to be accepted unless they are applied
+consistently across the project. 
+Most of the code style is derived from the
+[Google Style Guides](http://google.github.io/styleguide/) for the appropriate
+language and is generally not something we accept changes on (as clang-format
+and clang-tidy handle that for us).
+For Python code, we utilize `yapf` and `ruff`. 
 
-__List of out-of-tree modules (as of 05/12/2024, alphabetical order):__
-* CPU backend (Bert Maher, Ilya Enkovich)
-* Intel backend (Ettore Tiotto, Whitney Tsang)
+- `yapf` is used to format Python code according to the Google Python Style Guide. It helps in making the code more readable and maintainable by applying consistent formatting rules.
+- `ruff` serves as a fast Python code analysis and formatting tool. It combines multiple code - checking and formatting functionalities, and can quickly identify and fix style issues in Python code, ensuring it meets our style requirements.
+
+The compiler portion of the project follows
+[MLIR style](https://mlir.llvm.org/getting_started/DeveloperGuide/#style-guide).
+Improvements to code structure and clarity are welcome but please file issues to
+track such work first.
 
 
-## Core maintainers
-The core maintainers drive the development of Triton at large and set the roadmap for the project. As such, they have the following responsibilities:
-* Proposing, implementing and reviewing profound changes to user-facing APIs, IR specifications and/or pass infrastructures
-* Enforcing code quality standards and adherence to core design principles
-* Drawing module boundaries and resolving disputes between module maintainers
+## AUTHORS file
 
+If you would like to receive additional recognition for your contribution, you
+may add yourself (or your organization) to the AUTHORS file. This keeps track of
+those who have made significant contributions to the project. Please add the
+entity who owns the copyright for your contribution. The source control history
+remains the most accurate source for individual contributions.
 
-The core maintainers as a group have the power to veto any decision made at a Module maintainer level.
+##  Pull Requests
+We actively welcome your pull requests.
 
-The core maintainers should publicly articulate their decision-making, and share the reasoning behind their decisions, vetoes, and dispute resolution.
+1. Fork the repo and create your branch from `main`.
+2. If you've added code that should be tested, add tests.
+3. If you've changed APIs, update the documentation.
+4. Ensure the test suite passes.
+5. Make sure your code lints.
+6. If you haven't already, complete the Contributor License Agreement ("CLA").
 
-__List of core maintainers (as of 01/30/2025, alphabetical order):__
-* Jeff Niu
-* Keren Zhou
-* Mario Lezcano-Casado
-* Pawel Szczerbuk
-* Peter Bell
-* Phil Tillet
-* Thomas Raoux
-* Zahi Moudallal
+## Issues
 
-## Lead core maintainer
-When core maintainers cannot come to a consensus, a publicly declared lead maintainer is expected to settle the debate and make executive decisions.
+We use GitHub issues to track public bugs. Please ensure your description is
+clear and has sufficient instructions to be able to reproduce the issue.
 
-The Lead Core Maintainer should publicly articulate their decision-making, and give a clear reasoning for their decisions.
-
-The Lead Core Maintainer is also responsible for confirming or removing core maintainers.
-
-**Lead maintainer (as of 05/12/2024)**
-* Phil Tillet
-
-# Decision Making
-
-## Uncontroversial Changes
-
-We are committed to accepting functional bug fixes that meet our quality standards – and include minimized unit tests to avoid future regressions. Performance improvements generally fall under the same category, with the caveat that they may be rejected if the trade-off between usefulness and complexity is deemed unfavorable by core maintainers (e.g., complex swizzling logic to improve the performance of non-tensor-cores matrix multiplications). Design changes that neither fix known functional nor performance issues are automatically considered controversial.
-
-## Controversial Changes
-
-More controversial design changes (e.g., changes in our IRs/APIs/Passes) are evaluated on a case-by-case basis under the subjective judgment of core maintainers. While it is possible for contributors to propose and land deep design changes upstream (see https://github.com/triton-lang/triton/pull/1305), the community should expect such occurrences to be relatively rare.

@@ -10,6 +10,7 @@
 #include <numeric>
 
 namespace mlir {
+class DominanceInfo;
 
 namespace triton {
 class ModuleAxisInfoAnalysis;
@@ -17,7 +18,7 @@ class LoadOp;
 class StoreOp;
 class FuncOp;
 namespace gpu {
-class SharedEncodingAttr;
+class SwizzledSharedEncodingAttr;
 }
 } // namespace triton
 
@@ -48,6 +49,9 @@ unsigned getElementBitWidth(RankedTensorType type);
 unsigned
 getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
                         triton::ModuleAxisInfoAnalysis &axisInfoAnalysis);
+
+// Returns whether the op is a "view op", i.e. doesn't move any data
+bool isView(Operation *op);
 
 /* Dump Triton IR in graphviz dot format.
  *
@@ -128,18 +132,20 @@ bool canFoldIntoConversion(Operation *op, Attribute targetEncoding);
 // Replace ForOp with a new ForOp with extra operands. The YieldOp is not
 // updated and needs to be updated separately for the loop to be correct.
 scf::ForOp replaceForOpWithNewSignature(
-    RewriterBase &rewriter, scf::ForOp loop, ValueRange newIterOperands,
+    OpBuilder &rewriter, scf::ForOp loop, ValueRange newIterOperands,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements);
-scf::ForOp replaceForOpWithNewSignature(RewriterBase &rewriter, scf::ForOp loop,
+scf::ForOp replaceForOpWithNewSignature(OpBuilder &rewriter, scf::ForOp loop,
                                         ValueRange newIterOperands);
+Block::BlockArgListType addIterArgsToLoop(OpBuilder &rewriter, scf::ForOp &loop,
+                                          ValueRange newIterOperands);
 
 // Replace WhileOp with a new WhileOp with extra operands. The YieldOp is not
 // updated and needs to be updated separately for the loop to be correct.
 scf::WhileOp replaceWhileOpWithNewSignature(
-    RewriterBase &rewriter, scf::WhileOp loop, ValueRange newIterOperands,
+    OpBuilder &rewriter, scf::WhileOp loop, ValueRange newIterOperands,
     TypeRange newResultTypes,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements);
-scf::WhileOp replaceWhileOpWithNewSignature(RewriterBase &rewriter,
+scf::WhileOp replaceWhileOpWithNewSignature(OpBuilder &rewriter,
                                             scf::WhileOp loop,
                                             ValueRange newIterOperands,
                                             TypeRange newResultTypes);
@@ -147,9 +153,9 @@ scf::WhileOp replaceWhileOpWithNewSignature(RewriterBase &rewriter,
 // Replace IfOp with a new IfOp with extra results operands. The YieldOp is not
 // updated and needs to be updated separately for the bodies to be correct.
 scf::IfOp replaceIfOpWithNewSignature(
-    RewriterBase &rewriter, scf::IfOp loop, TypeRange newResultTypes,
+    OpBuilder &rewriter, scf::IfOp loop, TypeRange newResultTypes,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements);
-scf::IfOp replaceIfOpWithNewSignature(RewriterBase &rewriter, scf::IfOp ifOp,
+scf::IfOp replaceIfOpWithNewSignature(OpBuilder &rewriter, scf::IfOp ifOp,
                                       TypeRange newResultTypes);
 
 // Append the given |newOperands| to the |forOp|'s yield op.
@@ -194,16 +200,11 @@ bool isPureUnaryInlineAsm(Operation *op);
 // read the compute capability from the module attributes
 int getNVIDIAComputeCapability(Operation *module);
 
-std::optional<mlir::triton::gpu::SharedEncodingAttr>
-getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible);
+// Read the amd target from the module attributes
+StringRef getAMDArch(Operation *module);
 
-enum class MMALoadType {
-  SharedV3,
-  Registers,     // may be v2 or v3
-  DoNotPipeline, // could be a valid shared/registers MMA operand, but skip
-                 // pipelining
-};
-MMALoadType getMMALoadType(Operation *loadOp);
+std::optional<mlir::triton::gpu::SwizzledSharedEncodingAttr>
+getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible);
 
 // Convert \param op operands and results to layout \param encoding.
 void convertOpEncoding(Attribute encoding, Operation *op);
@@ -215,6 +216,27 @@ triton::gpu::LocalAllocOp findShmemAlloc(Value operand);
 SmallVector<Operation *>
 getMMAsWithMultiBufferredOperands(scf::ForOp forOp,
                                   SmallVector<Operation *> &mmaOps);
+
+// Given a list of ops, find the naerest common dominator of all ops or return
+// null if one could not be found. The ops are allowed to be in different
+// regions. The result op is not necessarily one of the ops in the list.
+Operation *findNearestCommonDominator(ArrayRef<Operation *> ops,
+                                      DominanceInfo &domInfo);
+
+/// Visit the operands of `op` and the operands of any nested ops defined
+/// outside of `op`.
+void visitNestedOperands(Operation *op,
+                         function_ref<void(OpOperand &)> visitor);
+/// Visit the operands of `op` and the operands of any nested ops defined
+/// outside of `op`.
+void visitNestedOperands(Operation *op, function_ref<void(Value)> visitor);
+/// Get the operands of `op` and the operands of any nested ops defined outside
+/// of `op`.
+SetVector<Value> getNestedOperands(Operation *op);
+
+// Erase the given loop carried values from the loop, where `loop` is replaced
+// with a new loop.
+void eraseLoopCarriedValues(scf::ForOp &loop, llvm::BitVector indices);
 } // namespace mlir
 
 #endif // TRITON_DIALECT_TRITONGPU_TRANSFORMS_UTILITY_H_

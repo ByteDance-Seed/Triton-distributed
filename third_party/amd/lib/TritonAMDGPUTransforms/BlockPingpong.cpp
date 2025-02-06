@@ -1,3 +1,4 @@
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -11,6 +12,10 @@
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
+
+#define DEBUG_TYPE "tritonamdgpu-block-pingpong"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 using namespace mlir;
 namespace ttg = mlir::triton::gpu;
@@ -42,7 +47,7 @@ class Pingponger {
   // rocdl.s.setprio will be mapped to `s_setprio` instruction which set the
   // priority of the warp within a SIMD, determines which warp to occupy the
   // instruction unit when they compete on the same instruction.
-  // We use this instruction in the pingpong sheduling to prevent warps from
+  // We use this instruction in the pingpong scheduling to prevent warps from
   // entering into the dot cluster while the other warp is still busy in the dot
   // cluster. Otherwise pingpong pattern can be broken and performance drops.
   // Currently pingpong only handles two warps, we only need 0/1 priorities.
@@ -50,10 +55,11 @@ class Pingponger {
   int highPriority = 1;
   int32_t kWidth;
   int32_t numWarps;
+  int32_t numStages;
 
 public:
-  Pingponger(scf::ForOp forOp, int32_t numWarps)
-      : forOp(forOp), numWarps(numWarps) {}
+  Pingponger(scf::ForOp forOp, int32_t numWarps, int32_t numStages)
+      : forOp(forOp), numWarps(numWarps), numStages(numStages) {}
   void getDotPingponged();
 
 private:
@@ -70,9 +76,16 @@ private:
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
+  void moveOpAndPredecessorsUpSameBlock(Operation *Op);
   void appendSlicedLoadAB(int slice);
   void appendClusterBarrier(OpBuilder &builder, Location loc);
   void appendOpWithPrio(OpBuilder &builder, Operation *Op, Location loc);
+  void determineDotMemoryOps(tt::DotOp dotOp,
+                             DenseSet<tt::LoadOp> &dotGlobalLoads,
+                             DenseSet<ttg::LocalLoadOp> &dotLocalLoads,
+                             DenseSet<ttg::LocalStoreOp> &dotLocalStores);
+  template <typename T>
+  void findClosestPredOps(Value v, DenseSet<T> &matchingOps);
 };
 
 void Pingponger::updateOpInsertion(Operation *op) { lastInsertedOp = op; }
@@ -80,6 +93,43 @@ void Pingponger::appendOp(Operation *op) {
   assert(lastInsertedOp != nullptr);
   op->moveAfter(lastInsertedOp);
   lastInsertedOp = op;
+}
+
+// Move the given operations and any predecessors upon which it depends
+// up in the block to the last inserted operation. This does not move
+// operations that reaches the last inserted operation or
+// are not in the same block. The exception is op, which is always moved
+// to the new location (can move down or up).
+void Pingponger::moveOpAndPredecessorsUpSameBlock(Operation *op) {
+  assert(lastInsertedOp != nullptr);
+  // TODO: Enable moving ops across blocks
+  assert(op->getBlock() == lastInsertedOp->getBlock());
+  Operation *checkedOp = lastInsertedOp;
+  // Check if we are moving the op up, if so we may need to
+  // move additional ops up to maintain correctness.
+  if (lastInsertedOp->isBeforeInBlock(op)) {
+    SetVector<Operation *> backwardSlice;
+    BackwardSliceOptions opt;
+    opt.omitBlockArguments = true;
+    opt.filter = [&checkedOp](Operation *op) {
+      return op->getBlock() == checkedOp->getBlock() &&
+             checkedOp->isBeforeInBlock(op);
+    };
+    getBackwardSlice(op, &backwardSlice, opt);
+    for (auto predOp : backwardSlice)
+      appendOp(predOp);
+    appendOp(op);
+  } else {
+    auto hasUnsafeUser = [&checkedOp](auto &&user) {
+      return user != checkedOp && user->getBlock() == checkedOp->getBlock() &&
+             user->isBeforeInBlock(checkedOp);
+    };
+    if (std::any_of(op->user_begin(), op->user_end(), hasUnsafeUser))
+      LDBG("Unable to move operation "
+           << op << " due to use before intended move location");
+    else
+      appendOp(op);
+  }
 }
 void Pingponger::appendSlicedLoadAB(int slice) {
   appendOp(subViewOps[0][slice]);
@@ -107,6 +157,89 @@ void Pingponger::appendOpWithPrio(OpBuilder &builder, Operation *op,
   appendOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority));
 }
 
+// Find all of the "closest" operations that are of a given type T
+// in the same basic block. Here "closest" means along any path P,
+// the first operation of type T that is encountered when traversing
+// P from the given value v. This also includes "later" operations
+// for block arguments. Note: That we find all T for every path P.
+template <typename T>
+void Pingponger::findClosestPredOps(Value v, DenseSet<T> &matchingOps) {
+  // Create a cache so we can traverse across block arguments.
+  DenseSet<Operation *> visitedOps;
+  std::function<void(Value)> impl;
+  impl = [&matchingOps, &visitedOps, &impl](Value v) {
+    // If we encounter a block argument we only look at the terminators of the
+    // current block
+    if (auto blockArg = dyn_cast<BlockArgument>(v)) {
+      auto operandNumber = blockArg.getArgNumber();
+      auto block = blockArg.getOwner();
+      if (auto yield = dyn_cast<scf::YieldOp>(block->getTerminator())) {
+        auto parentOp = block->getParentOp();
+        // Skip the induction variables to find the yield position
+        if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
+          if (operandNumber < forOp.getNumInductionVars())
+            return;
+          operandNumber -= forOp.getNumInductionVars();
+        }
+        impl(yield->getOperand(operandNumber));
+      }
+    } else {
+      auto definingOp = v.getDefiningOp();
+      if (!definingOp)
+        return;
+      else if (visitedOps.contains(definingOp))
+        return;
+      visitedOps.insert(definingOp);
+      if (auto matchOp = dyn_cast<T>(definingOp))
+        matchingOps.insert(matchOp);
+      else
+        for (auto predValue : definingOp->getOperands())
+          impl(predValue);
+    }
+  };
+  impl(v);
+}
+
+// Populate the dotGlobalLoads, dotLocalLoads, and dotLocalStores set with
+// any loads that are generated by the current dot product. This occurs in
+// steps to:
+// 1. Determine which loads are generated by the dot product via getA()
+//    and getB().
+// 2. Determine which local stores are used to populate the inputs to
+//    the local loads.
+// 3. Determine which global loads are used to populate the inputs to
+//    the local stores.
+// Note: This function currently depends on num_stages=2, which is a
+// precondition for the pingpong scheduling.
+void Pingponger::determineDotMemoryOps(
+    tt::DotOp dotOp, DenseSet<tt::LoadOp> &dotGlobalLoads,
+    DenseSet<ttg::LocalLoadOp> &dotLocalLoads,
+    DenseSet<ttg::LocalStoreOp> &dotLocalStores) {
+  // Find the locals loads used to compute the dot inputs. These
+  // must come before the dot op.
+  findClosestPredOps<ttg::LocalLoadOp>(dotOp.getA(), dotLocalLoads);
+  findClosestPredOps<ttg::LocalLoadOp>(dotOp.getB(), dotLocalLoads);
+
+  // Determine the local stores from the local loads.
+  // With pipelining we expect this to be a single local
+  // store within the loop based on a block argument after routing through
+  // a ttg.MemDescSubviewOp.
+  DenseSet<ttg::MemDescSubviewOp> subviews;
+  for (auto &&localLoad : dotLocalLoads)
+    findClosestPredOps<ttg::MemDescSubviewOp>(localLoad.getSrc(), subviews);
+
+  for (auto &&subview : subviews)
+    for (auto &&user : subview->getUsers())
+      if (auto localStore = dyn_cast<ttg::LocalStoreOp>(user))
+        dotLocalStores.insert(localStore);
+
+  // Determine the global loads from the local stores.
+  // We expect this to just be a global load
+  // within the loop.
+  for (auto &&localStore : dotLocalStores)
+    findClosestPredOps<tt::LoadOp>(localStore.getSrc(), dotGlobalLoads);
+}
+
 // Transform a loop into one Dot - Memory (ping - pong) clusters
 // Each cluster, especially the Dot cluster is guarded with setprio(1->0) so
 // each warp can complete the execution of the cluster without being
@@ -129,15 +262,17 @@ void Pingponger::transformOnePPClusters(OpBuilder &builder, Location loc) {
   // Memory cluster #0
   updateOpInsertion(lLoadOps[0]);
   appendOp(builder.create<ROCDL::SetPrioOp>(loc, highPriority));
-  appendOp(gLoadOps[0]);
+  moveOpAndPredecessorsUpSameBlock(gLoadOps[0]);
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(lLoadOps[1]);
+  moveOpAndPredecessorsUpSameBlock(lLoadOps[1]);
   appendOp(builder.create<ROCDL::SetPrioOp>(loc, lowPriority));
-  appendOp(gLoadOps[1]);
+  moveOpAndPredecessorsUpSameBlock(gLoadOps[1]);
 
   // Dot cluster #0
   updateOpInsertion(preDotBar);
   appendOpWithPrio(builder, dotOps[0], loc);
+  // Add a remark for user feedback
+  dotOps[0]->emitRemark() << "Performed one ping pong cluster transformation\n";
 }
 
 void Pingponger::genOffsetConstants(Location loc, OpBuilder &builder,
@@ -236,14 +371,14 @@ LogicalResult Pingponger::sliceDot(OpBuilder &builder, Location loc,
 }
 
 // Transform a loop into four Dot - Memory (ping - pong) clusters
-// This transfrom is useful when the original dot tile is too large that there's
-// no enough register to hold data for a Dot cluster. This path slices the dot
+// This transform is useful when the original dot tile is too large that there's
+// not enough registers to hold data for a Dot cluster. This path slices the dot
 // into four pieces and pair with four clusters of reordered memory operations.
 // There are multiple guards at the boundary of each cluster.
-// (1) sched.barrier : with mask0 to prevent compiler backed from reroder
+// (1) sched.barrier : with mask0 to prevent compiler backed from reordering
 //  instructions across the boundary
 // (2) gpu.barrier : ensures asymmetric synchronization at each point
-// (3) setprio (1->0) : in order to avoid incomming warp overtaking resource
+// (3) setprio (1->0) : in order to avoid incoming warp overtaking resource
 //  while the other warp is actively using it.
 //
 // Here's overview of the instruction clusters
@@ -294,13 +429,20 @@ LogicalResult Pingponger::transformFourPPClusters(OpBuilder &builder,
   appendClusterBarrier(builder, loc);
 
   // mem3: local store A and B
-  updateOpInsertion(lStoreOps[1]);
+  // Matmul kernels may use the output of the dot product in another operation
+  // before the local store (e.g. persistent matmul epilogue). To accommodate
+  // such cases, we need to move the local store up in the loop.
+  moveOpAndPredecessorsUpSameBlock(lStoreOps[0]);
+  moveOpAndPredecessorsUpSameBlock(lStoreOps[1]);
   appendClusterBarrier(builder, loc);
 
   // dot3 (4/4)
   appendOpWithPrio(builder, dotSliceOps[3], loc);
   appendClusterBarrier(builder, loc);
 
+  // Add a remark for user feedback
+  dotSliceOps[0]->emitRemark()
+      << "Performed four ping pong cluster transformation\n";
   return success();
 }
 
@@ -337,15 +479,20 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
   appendClusterBarrier(builder, loc);
 
   // mem1: local store A and B
-  // Don't need to reorder local_stores, just add cluster barrier after the the
-  // last store
-  updateOpInsertion(lStoreOps[1]);
+  // Matmul kernels may use the output of the dot product in another operation
+  // before the local store (e.g. persistent matmul epilogue). To accommodate
+  // such cases, we need to move the local store up in the loop.
+  moveOpAndPredecessorsUpSameBlock(lStoreOps[0]);
+  moveOpAndPredecessorsUpSameBlock(lStoreOps[1]);
   appendClusterBarrier(builder, loc);
 
   // dot1 (2/2)
   appendOpWithPrio(builder, dotSliceOps[1], loc);
   appendClusterBarrier(builder, loc);
 
+  // Add a remark for user feedback
+  dotSliceOps[0]->emitRemark()
+      << "Performed two ping pong cluster transformation\n";
   return success();
 }
 
@@ -381,6 +528,14 @@ void Pingponger::addAsymmetricSyncToLoop(OpBuilder &builder, Location loc) {
 }
 
 void Pingponger::getDotPingponged() {
+  if (numStages != 2) {
+    std::stringstream message;
+    message << "All ping pong scheduling requires 2 stages. Found " << numStages
+            << " stages";
+    LDBG(message.str());
+    return;
+  }
+
   OpBuilder builder(forOp);
   MLIRContext *ctx = forOp.getContext();
   Location loc = forOp.getLoc();
@@ -409,13 +564,58 @@ void Pingponger::getDotPingponged() {
   // software pipelining and dot rank=2. Also only accept the for-loop with
   // supported combination of operations because this transformation is very
   // tightly scheduling the latencies.
-  if (gLoadOps.size() != 2 || lLoadOps.size() != 2 || dotOps.size() != 1)
+  if (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotOps.size() != 1) {
+    std::stringstream message;
+    message << "Unable to match ping pong scheduling pattern. Details: "
+            << gLoadOps.size() << " global loads, " << lLoadOps.size()
+            << " local loads, " << dotOps.size() << " dot products";
+    LDBG(message.str());
     return;
+  }
+
+  // The existing code depends on the loads being targeted being safe to move,
+  // which will not hold if we do not properly have a GEMM. As a result, we
+  // filter the associated load operations to only those that are associated
+  // // with the GEMM.
+  DenseSet<tt::LoadOp> dotGlobalLoads;
+  DenseSet<ttg::LocalLoadOp> dotLocalLoads;
+  DenseSet<ttg::LocalStoreOp> dotLocalStores;
+  determineDotMemoryOps(dotOps[0], dotGlobalLoads, dotLocalLoads,
+                        dotLocalStores);
+
+  auto origGlobalLoadCount = gLoadOps.size();
+  auto origLocalLoadCount = lLoadOps.size();
+  // Prune Memory operations that may be moved to only those involved in dot
+  // computation.
+  auto gLoadIt = llvm::remove_if(gLoadOps, [&dotGlobalLoads](tt::LoadOp op) {
+    return !dotGlobalLoads.contains(op);
+  });
+  gLoadOps.erase(gLoadIt, gLoadOps.end());
+  auto lLoadIt =
+      llvm::remove_if(lLoadOps, [&dotLocalLoads](ttg::LocalLoadOp op) {
+        return !dotLocalLoads.contains(op);
+      });
+  lLoadOps.erase(lLoadIt, lLoadOps.end());
+  auto lStoreIt =
+      llvm::remove_if(lStoreOps, [&dotLocalStores](ttg::LocalStoreOp op) {
+        return !dotLocalStores.contains(op);
+      });
+  lStoreOps.erase(lStoreIt, lStoreOps.end());
+  // All PingPong Scheduler assumes there are 2 movable global loads and 2
+  // movable local loads.
+  if (gLoadOps.size() != 2 || lLoadOps.size() != 2) {
+    std::stringstream message;
+    message << "Unable to match ping pong slicing pattern. Details: "
+            << gLoadOps.size() << " global loads in dot computation, "
+            << lLoadOps.size() << " local loads in dot computation";
+    LDBG(message.str());
+    return;
+  }
 
   // Pingpong scheduling tries to form two different types of the instruction
   // clusters, i.e., Dot clusters and Memory clusters. While each SIMD has
   // two concurrent warps, both warps can execute a different type of
-  // instruction cluster in parallel.Here are currently available patterns,
+  // instruction cluster in parallel. Here are currently available patterns,
   // more patterns could be added later.
   //
   // (1) One Dot-Memory (ping-pong) cluster
@@ -431,7 +631,7 @@ void Pingponger::getDotPingponged() {
   //   exceeds the amount of register GPU has so, we need to split the dot
   //   into several pieces.
   //
-  // (3) Twp Dot-Memory (ping-pongx2) clusters
+  // (3) Two Dot-Memory (ping-pongx2) clusters
   //  :Covers medium sized tile e.g., 256x128x64_FP16. Different tile size may
   //  require different scheduling pattern because the loop consists of
   //  different amount of memory transfer and dot operation. This scheduling
@@ -447,6 +647,7 @@ void Pingponger::getDotPingponged() {
   auto elemWidth = aType.getElementTypeBitWidth();
   int64_t tileSize = dotShape[0] * dotShape[1] * aShape[1] * elemWidth;
 
+  const int64_t minTile = 262144;      // e.g. 32x128x64x16bit
   const int64_t smallTile = 16777216;  // e.g. 128x128x64x16bit
   const int64_t mediumTile = 33554432; // smallTile x 2
   const int64_t largeTile = 67108864;  // e.g. 256x256x64x16bit
@@ -465,26 +666,49 @@ void Pingponger::getDotPingponged() {
     // times for issuing the memory operations and issuing dot operations,
     // smaller tile sizes are not likely to get any advantage from current dot
     // centric pingpong scheduling.
-    if (tileSize == smallTile)
+    if (tileSize <= smallTile && tileSize >= minTile)
       transformOnePPClusters(builder, loc);
     // numWarps=4 doesn't need asymmetric sync, return.
     return;
   } else if (numWarps == 8) { // Pingpong between warps from the same block
+    if (origGlobalLoadCount != 2 || origLocalLoadCount != 2) {
+      std::stringstream message;
+      message << "Unable to match ping pong slicing pattern. Details: "
+              << gLoadOps.size() << " global loads, " << lLoadOps.size()
+              << " local loads";
+      LDBG(message.str());
+      return;
+    }
+    if (lStoreOps.size() != 2) {
+      std::stringstream message;
+      message << "Unable to match ping pong slicing pattern. Details: "
+              << lStoreOps.size() << " local stores in dot computation ";
+      LDBG(message.str());
+      return;
+    }
     // Transform a loop where the tile size requires dots to be sliced
     if (tileSize == mediumTile) {
-      if (transformTwoPPClusters(builder, dotOps[0]->getLoc()).failed())
+      if (transformTwoPPClusters(builder, dotOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
         return;
+      }
     } else if (tileSize >= largeTile) {
       // Avoid known register spilling. i.e., mfma16x16x16 & largetile & kpack>1
-      if (intShape[0] == 16 && intShape[1] == 16 && kWidth == 8)
+      if (intShape[0] == 16 && intShape[1] == 16 && kWidth == 8) {
+        LDBG("Reached known register spilling case, skip pingpong scheduling");
         return;
-      if (transformFourPPClusters(builder, dotOps[0]->getLoc()).failed())
+      }
+      if (transformFourPPClusters(builder, dotOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the four ping pong "
+             "cluster transformation");
         return;
+      }
     } else
       return;
 
     // Let half of the warps start the loop first and the others follow later
-    // but in the synchronized way. This can be accompished by calling
+    // but in the synchronized way. This can be accomplished by calling
     // cond_barrier for the second half before the beginning of the loop so they
     // can wait until the first half hit the first barrier in the loop. Also
     // need to call cond_barrier for the first_half after exiting the loop, so
@@ -497,12 +721,14 @@ class TritonAMDGPUBlockPingpongPass
     : public TritonAMDGPUBlockPingpongBase<TritonAMDGPUBlockPingpongPass> {
 public:
   TritonAMDGPUBlockPingpongPass() = default;
+  TritonAMDGPUBlockPingpongPass(int32_t numStages) {
+    this->numStages = numStages;
+  }
   void runOnOperation() override {
     ModuleOp m = getOperation();
-    int32_t numWarps = ttg::TritonGPUDialect::getNumWarps(m);
     for (auto funcOp : m.getOps<tt::FuncOp>()) {
       funcOp.walk([&](scf::ForOp forOp) {
-        Pingponger pingponger(forOp, numWarps);
+        Pingponger pingponger(forOp, ttg::lookupNumWarps(forOp), numStages);
         pingponger.getDotPingponged();
       });
     }
@@ -510,6 +736,7 @@ public:
 };
 } // namespace
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUBlockPingpongPass() {
-  return std::make_unique<TritonAMDGPUBlockPingpongPass>();
+std::unique_ptr<Pass>
+mlir::createTritonAMDGPUBlockPingpongPass(int32_t numStages) {
+  return std::make_unique<TritonAMDGPUBlockPingpongPass>(numStages);
 }

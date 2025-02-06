@@ -38,6 +38,7 @@
 
 // FIXME: PipelineExpander should not depend on Triton-specific headers!
 #include "triton/Dialect/TritonGPU/IR/Types.h"
+#include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 
 #define DEBUG_TYPE "triton-loop-pipelining"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -258,7 +259,12 @@ bool LoopPipelinerInternal::verifySchedule() {
         continue;
       int64_t producerCycle = it->second;
       if (consumerCycle < producerCycle - numCylesPerIter * distance) {
-        consumer->emitError("operation scheduled before its operands");
+        InFlightDiagnostic diag =
+            consumer->emitWarning("operation scheduled before its operands. "
+                                  "Pipelining will be disabled.");
+        diag.attachNote(producer->getLoc())
+            .append("operand defined here: ")
+            .appendOp(*producer, OpPrintingFlags().printGenericOpForm());
         return false;
       }
     }
@@ -291,7 +297,19 @@ LogicalResult LoopPipelinerInternal::emitPrologue(RewriterBase &rewriter) {
        llvm::zip(forOp.getRegionIterArgs(), forOp.getInitsMutable())) {
     setValueMapping(arg, operand.get(), 0);
   }
+
+  // If the incoming value to an iter arg from the loop yield is defined outside
+  // the loop, then that means the iter arg takes that value for all stages
+  // after the first stage.
   auto yield = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+  for (auto [arg, operand] :
+       llvm::zip(forOp.getRegionIterArgs(), yield->getOpOperands())) {
+    if (forOp.getBodyRegion().isAncestor(operand.get().getParentRegion()))
+      continue;
+    for (int64_t i = 1; i < maxStage; ++i)
+      setValueMapping(arg, operand.get(), i);
+  }
+
   Location loc = forOp.getLoc();
   SmallVector<Value> predicates(maxStage);
   for (int64_t i = 0; i < maxStage; i++) {
@@ -390,21 +408,7 @@ LoopPipelinerInternal::analyzeCrossStageValues() {
 
 std::pair<Operation *, int64_t>
 LoopPipelinerInternal::getDefiningOpAndDistance(Value value) {
-  int64_t distance = 0;
-  while (auto arg = dyn_cast<BlockArgument>(value)) {
-    if (arg.getOwner() != forOp.getBody())
-      return {nullptr, 0};
-    // Ignore induction variable.
-    if (arg.getArgNumber() == 0)
-      return {nullptr, 0};
-    distance++;
-    value =
-        forOp.getBody()->getTerminator()->getOperand(arg.getArgNumber() - 1);
-  }
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return {nullptr, 0};
-  return {def, distance};
+  return triton::getDefiningOpAndDistance(forOp, value);
 }
 
 scf::ForOp LoopPipelinerInternal::createKernelLoop(

@@ -28,9 +28,8 @@ using ::mlir::LLVM::delinearize;
 using ::mlir::LLVM::getSharedMemoryObjectFromStruct;
 using ::mlir::LLVM::linearize;
 using ::mlir::triton::gpu::getCTALayout;
-using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::NVMMASharedEncodingAttr;
 
 namespace ttg = mlir::triton::gpu;
 
@@ -38,32 +37,6 @@ namespace ttg = mlir::triton::gpu;
 static constexpr bool disableLDAcquireLowering = false;
 
 namespace {
-
-llvm::MapVector<StringAttr, int32_t> getAllFreeVarMasks(MLIRContext *ctx) {
-  // Mask where all elements are redundant
-  auto kReg = str_attr("reg");
-  auto kLane = str_attr("lane");
-  auto kWarp = str_attr("warp");
-  auto kBlock = str_attr("block");
-
-  int32_t fullMask = -1;
-  llvm::MapVector<StringAttr, int32_t> ret;
-  for (auto dimName : {kReg, kLane, kWarp, kBlock}) {
-    ret[dimName] = fullMask;
-  }
-  return ret;
-}
-
-llvm::MapVector<StringAttr, int32_t> getFreeVariableMasks(Type type) {
-  auto ctx = type.getContext();
-  auto tensorTy = dyn_cast<RankedTensorType>(type);
-  if (!tensorTy) {
-    return getAllFreeVarMasks(ctx);
-  }
-
-  auto ll = ttg::toLinearLayout(tensorTy.getShape(), tensorTy.getEncoding());
-  return ll.getFreeVariableMasks();
-}
 
 Value maybeAnd(RewriterBase &rewriter, Location loc, Value a, Value b) {
   auto tb = TritonLLVMOpBuilder(loc, rewriter);
@@ -86,11 +59,11 @@ Value emitRedundantThreadPredicate(
   auto kWarp = str_attr("warp");
   auto kBlock = str_attr("block");
 
-  auto warpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(moduleOp);
-  auto emitBlockId = freeVarMasks.lookup(kBlock) != 0;
-  auto [laneId, warpId, blockId] =
-      emitHardwareTuple(loc, rewriter, targetInfo, emitBlockId, warpSize);
-  auto zero = b.i32_val(0);
+  Value zero = b.i32_val(0);
+  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  Value blockId = freeVarMasks.lookup(kBlock) == 0
+                      ? zero
+                      : targetInfo.getClusterCTAId(rewriter, loc);
 
   Value pred;
   auto dimNames = {kLane, kWarp, kBlock};
@@ -103,10 +76,6 @@ Value emitRedundantThreadPredicate(
     }
   }
   return pred;
-}
-
-bool isCanonicalIndex(unsigned index, unsigned freeVarMask) {
-  return (index & freeVarMask) == 0;
 }
 
 unsigned getCanonicalIndex(unsigned index, unsigned freeVarMask) {
@@ -130,6 +99,37 @@ std::string getRegisterSizeCode(int size, bool is_float) {
   }
 }
 
+Value createCachePolicy(triton::EvictionPolicy opEvict,
+                        ConversionPatternRewriter &rewriter, Location loc) {
+  // Emit createpolicy.fractional.L2::policy.b64 xx 1.0
+  PTXBuilder ptxBuilder;
+  const bool hasL2EvictPolicy =
+      opEvict == triton::EvictionPolicy::EVICT_FIRST ||
+      opEvict == triton::EvictionPolicy::EVICT_LAST;
+  Value policyRet;
+
+  if (hasL2EvictPolicy) {
+    auto &policy =
+        ptxBuilder.create<>("createpolicy.fractional")
+            ->o("L2::evict_first",
+                opEvict == triton::EvictionPolicy::EVICT_FIRST)
+            .o("L2::evict_last", opEvict == triton::EvictionPolicy::EVICT_LAST)
+            .b(64);
+
+    const std::string writeConstraint = "=l";
+    // prepare asm operands
+    auto *dstOpr = ptxBuilder.newOperand(writeConstraint, /*init=*/true);
+    std::string fractionStr = "1.0";
+    auto *fractionOpr = ptxBuilder.newConstantOperand(fractionStr);
+    policy(dstOpr, fractionOpr);
+
+    Type policyRetTy = rewriter.getI64Type();
+    policyRet = ptxBuilder.launch(rewriter, loc, policyRetTy);
+  }
+
+  return policyRet;
+}
+
 // Contains some helper functions for both Load and Store conversions.
 struct LoadStoreConversionBase {
   explicit LoadStoreConversionBase(const NVIDIA::TargetInfo &targetInfo,
@@ -140,7 +140,7 @@ struct LoadStoreConversionBase {
     auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType());
     if (!tensorTy)
       return 1;
-    return axisAnalysisPass.getPtrContiguity(ptr);
+    return axisAnalysisPass.getContiguity(ptr);
   }
 
   unsigned getVectorSize(Value ptr) const {
@@ -277,10 +277,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       const size_t movWidth = width < 16 ? 16 : width;
       assert(wordNElems * nWords * numVecs == numElems);
 
-      // TODO(Superjomn) Add cache policy fields to StoreOp.
-      // TODO(Superjomn) Deal with cache policy here.
-      const bool hasL2EvictPolicy = false;
-
       PTXBuilder ptxBuilder;
 
       Value pred = mask ? maskElems[vecStart] : Value{};
@@ -336,6 +332,9 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       auto *addrOpr =
           ptxBuilder.newAddrOperand(ptrElems[vecStart], "l", in_off);
 
+      // Create L2 cache policy register if needed
+      Value l2PolicyReg = createCachePolicy(op.getEvict(), rewriter, loc);
+
       // Define the instruction opcode
       auto &ld = ptxBuilder.create<>("ld")
                      ->o("volatile", op.getIsVolatile())
@@ -346,15 +345,13 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                         op.getEvict() == triton::EvictionPolicy::EVICT_FIRST)
                      .o("L1::evict_last",
                         op.getEvict() == triton::EvictionPolicy::EVICT_LAST)
-                     .o("L1::cache_hint", hasL2EvictPolicy)
+                     .o("L2::cache_hint", l2PolicyReg != Value())
                      .v(nWords)
                      .b(width);
 
-      PTXBuilder::Operand *evictOpr{};
-
-      // Here lack a mlir::Value to bind to this operation, so disabled.
-      // if (has_l2_evict_policy)
-      //   evictOpr = ptxBuilder.newOperand(l2Evict, "l");
+      PTXBuilder::Operand *evictOpr = nullptr;
+      if (l2PolicyReg)
+        evictOpr = ptxBuilder.newOperand(l2PolicyReg, "l");
 
       if (!evictOpr)
         ld(dstsOpr, addrOpr).maybePredicate(pred, "b");
@@ -367,10 +364,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                        ? LLVM::LLVMStructType::getLiteral(getContext(), retTys)
                        : retTys[0];
 
-      // TODO: if (has_l2_evict_policy)
-      // auto asmDialectAttr =
-      // LLVM::AsmDialectAttr::get(rewriter.getContext(),
-      //                                                 LLVM::AsmDialect::AD_ATT);
       Value ret = ptxBuilder.launch(rewriter, loc, retTy);
 
       // Extract and store return values
@@ -523,6 +516,9 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       auto *asmAddr =
           ptxBuilder.newAddrOperand(ptrElems[vecStart], "l", in_off);
 
+      // Create L2 cache policy register if needed
+      Value l2PolicyReg = createCachePolicy(op.getEvict(), rewriter, loc);
+
       auto &ptxStoreInstr =
           ptxBuilder.create<>("st")
               ->global()
@@ -534,9 +530,18 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
                  op.getEvict() == triton::EvictionPolicy::EVICT_FIRST)
               .o("L1::evict_last",
                  op.getEvict() == triton::EvictionPolicy::EVICT_LAST)
+              .o("L2::cache_hint", l2PolicyReg != Value())
               .v(nWords)
               .b(width);
-      ptxStoreInstr(asmAddr, asmArgList).maybePredicate(pred, "b");
+
+      PTXBuilder::Operand *evictOpr = nullptr;
+      if (l2PolicyReg)
+        evictOpr = ptxBuilder.newOperand(l2PolicyReg, "l");
+
+      if (!evictOpr)
+        ptxStoreInstr(asmAddr, asmArgList).maybePredicate(pred, "b");
+      else
+        ptxStoreInstr(asmAddr, asmArgList, evictOpr).maybePredicate(pred, "b");
 
       auto asmReturnTy = void_ty(ctx);
       ptxBuilder.launch(rewriter, loc, asmReturnTy);
@@ -1045,9 +1050,6 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto dstTy = op.getResult().getType();
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
     auto srcLayout = srcTy.getEncoding();
-    assert((isa<BlockedEncodingAttr, SliceEncodingAttr>(srcLayout) &&
-            "Unexpected srcLayout in AsyncCopyGlobalToLocalOpConversion"));
-    auto resSharedLayout = cast<SharedEncodingAttr>(dstTy.getEncoding());
 
     Value llDst = adaptor.getResult();
     Value llSrc = adaptor.getSrc();
@@ -1202,21 +1204,26 @@ struct AsyncTMACopyGlobalToLocalOpConversion
     auto id = getThreadId(rewriter, loc);
 
     auto mod = op->getParentOfType<ModuleOp>();
-    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
-    int warpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
+    int numWarps = ttg::lookupNumWarps(op);
+    int warpSize = ttg::TritonGPUDialect::getThreadsPerWarp(mod);
     Value warpID = rewriter.create<nvgpu::WarpIdOp>(loc);
     Value pred = adaptor.getPred();
     // Select just one thread for the TMA copy. This also helps the compiler to
     // figure out that the op is uniform.
     pred = b.and_(pred, LLVM::NVIDIA::createElectPredicate(loc, rewriter));
 
+    Attribute encoding = op.getResult().getType().getEncoding();
+    auto mmaEncoding = dyn_cast_or_null<NVMMASharedEncodingAttr>(encoding);
     int elementSizeInBytes =
         op.getResult().getType().getElementType().getIntOrFloatBitWidth() / 8;
-    int totalNumElements = product(op.getResult().getType().getShape());
+    int packingFactor = (mmaEncoding && mmaEncoding.getFp4Padded()) ? 2 : 1;
+    int totalNumElements =
+        product(op.getResult().getType().getShape()) * packingFactor;
     int64_t size = totalNumElements * elementSizeInBytes;
 
     int innerBlockSize = op.getResult().getType().getShape().back();
-    int contigDimSizeInByte = innerBlockSize * elementSizeInBytes;
+    int contigDimSizeInByte =
+        innerBlockSize * elementSizeInBytes * packingFactor;
     int numCopies = 1;
     int rank = op.getCoord().size();
     if (rank > 1)
@@ -1298,8 +1305,8 @@ struct AsyncTMACopyLocalToGlobalOpConversion
     int64_t size = totalNumElements * elementSizeInBytes;
 
     auto mod = op->getParentOfType<ModuleOp>();
-    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
-    int warpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
+    int numWarps = ttg::lookupNumWarps(op);
+    int warpSize = ttg::TritonGPUDialect::getThreadsPerWarp(mod);
     Value warpID = rewriter.create<nvgpu::WarpIdOp>(loc);
     int innerBlockSize = op.getSrc().getType().getShape().back();
     int contigDimSizeInByte = innerBlockSize * elementSizeInBytes;
@@ -1361,8 +1368,8 @@ struct AsyncTMACopyLocalToGlobalOpConversion
 
 static LinearLayout getUnswizzledLayout(triton::gpu::MemDescType type) {
   return triton::gpu::sharedToLinearLayoutLeadingOffset(
-      type.getShape(), cast<SharedEncodingAttr>(type.getEncoding()),
-      type.getElementTypeBitWidth(), /*disableSwizzle=*/true);
+      type.getShape(), cast<NVMMASharedEncodingAttr>(type.getEncoding()),
+      /*disableSwizzle=*/true);
 }
 
 // This function is shared between the TMA gather and scatter lowerings. It
@@ -1410,10 +1417,10 @@ static LogicalResult iterateGatherScatterIndices(
   ArrayRef<int64_t> allocShape = smemType.getAllocShape();
   if (allocShape.size() < 2 || smemType.getShape() != allocShape.take_back(2))
     return op->emitError("memdesc shape must match alloc shape");
-  // `hasLeadingOffset` means the core matrix tiles are placed next to each
-  // other in shared memory, which lines up with how `gather4` loads data.
-  if (!cast<SharedEncodingAttr>(smemType.getEncoding()).getHasLeadingOffset())
-    return op->emitError("requires dst encoding with `hasLeadingOffset=true`");
+  // `NVMMASharedEncodingAttr` means the core matrix tiles are placed next to
+  // each other in shared memory, which lines up with how `gather4` loads data.
+  if (!isa<NVMMASharedEncodingAttr>(smemType.getEncoding()))
+    return op->emitError("requires dst encoding NVMMASharedEncodingAttr");
   Type llvmElemTy = typeConverter.convertType(smemType.getElementType());
   Type elemPtrTy = ptr_ty(ctx, /*addrspace=*/3);
   auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, smemObjValue,

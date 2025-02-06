@@ -371,7 +371,9 @@ struct FpToFpOpConversion
     default:
       emitError(loc) << "unsupported rounding mode for f32->bf16 conversion: "
                      << stringifyRoundingMode(rounding) << "\n";
-      llvm_unreachable("");
+      llvm::report_fatal_error(
+          "unsupported rounding mode for f32->bf16 conversion: " +
+          stringifyRoundingMode(rounding) + "\n");
     }
     return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name, bf16_ty, {v})
         .getResult(0);
@@ -392,7 +394,9 @@ struct FpToFpOpConversion
     default:
       emitError(loc) << "unsupported rounding mode for f32->f16 conversion: "
                      << stringifyRoundingMode(rounding) << "\n";
-      llvm_unreachable("");
+      llvm::report_fatal_error(
+          "unsupported rounding mode for f32->f16 conversion: " +
+          stringifyRoundingMode(rounding) + "\n");
     }
     auto &cvt = *builder.create(ptx.str());
     auto res = builder.newOperand("=h");
@@ -418,19 +422,19 @@ struct FpToFpOpConversion
             // F8 -> F16
             {{F8E4M3TyID, F16TyID, undefRounding}, Fp8E4M3Nv_to_Fp16},
             {{F8E5M2TyID, F16TyID, undefRounding},
-             Fp8E5M2_to_Fp16(computeCapability >= 90)},
+             Fp8E5M2_to_Fp16(computeCapability >= 89)},
             {{F16TyID, F8E4M3TyID, RoundingMode::RTNE}, Fp16_to_Fp8E4M3Nv},
             {{F16TyID, F8E5M2TyID, RoundingMode::RTNE},
-             Fp16_to_Fp8E5M2_RTNE(computeCapability >= 90)},
+             Fp16_to_Fp8E5M2_RTNE(computeCapability >= 89)},
             {{F16TyID, F8E5M2TyID, RoundingMode::RTZ}, Fp16_to_Fp8E5M2_RTZ},
             // F8 -> BF16
             {{F8E5M2TyID, BF16TyID, undefRounding},
-             Fp8E5M2_to_Bf16(computeCapability >= 90)},
+             Fp8E5M2_to_Bf16(computeCapability >= 89)},
             {{F8E4M3TyID, BF16TyID, undefRounding},
-             Fp8E4M3Nv_to_Bf16(computeCapability >= 90)},
+             Fp8E4M3Nv_to_Bf16(computeCapability >= 89)},
             // BF16 -> F8
             {{BF16TyID, F8E5M2TyID, RoundingMode::RTNE},
-             Bf16_to_Fp8E5M2(computeCapability >= 90)},
+             Bf16_to_Fp8E5M2(computeCapability >= 89)},
             {{BF16TyID, F8E4M3TyID, RoundingMode::RTNE}, Bf16_to_Fp8E4M3Nv},
             // F32 -> F8
             {{F32TyID, F8E4M3TyID, RoundingMode::RTNE}, Fp32_to_Fp8E4M3Nv},
@@ -450,10 +454,8 @@ struct FpToFpOpConversion
     }
     if (computeCapability < 89 && (llvm::isa<Float8E4M3FNType>(srcTy) ||
                                    llvm::isa<Float8E4M3FNType>(dstTy))) {
-      llvm::errs() << "Conversion from/to f8e4m3nv is only supported on "
-                      "compute capability >= 89"
-                   << "\n";
-      llvm_unreachable("");
+      llvm::report_fatal_error("Conversion from/to f8e4m3nv is only supported "
+                               "on compute capability >= 89\n");
     }
     auto convDesc = srcMap.lookup(key);
     return {makeConverterFromPtx(
@@ -479,9 +481,9 @@ struct FpToFpOpConversion
       // For now only RTNE is supported for conversions from fp16 to fp8
       if (!srcElementType.isF32() &&
           roundingMode.value() != RoundingMode::RTNE) {
-        llvm::errs() << "Unsupported rounding mode for conversion to fp8: "
-                     << stringifyRoundingMode(roundingMode.value()) << "\n";
-        llvm_unreachable("");
+        llvm::report_fatal_error(
+            "Unsupported rounding mode for conversion to fp8: " +
+            stringifyRoundingMode(roundingMode.value()) + "\n");
       }
     }
 

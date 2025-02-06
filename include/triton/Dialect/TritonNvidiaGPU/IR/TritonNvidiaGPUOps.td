@@ -23,10 +23,12 @@
 #define TRITONNVIDIAGPU_OPS
 
 include "triton/Dialect/TritonNvidiaGPU/IR/TritonNvidiaGPUDialect.td"
+include "triton/Dialect/TritonNvidiaGPU/IR/TritonNvidiaGPUOpInterfaces.td"
 include "mlir/Dialect/Arith/IR/ArithBase.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
+include "triton/Dialect/Triton/IR/TritonOpInterfaces.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUTypes.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUTypeInterfaces.td"
 include "mlir/IR/OpBase.td"
@@ -71,7 +73,7 @@ def TTNG_ClusterWaitOp : TTNG_Op<"cluster_wait", []> {
 //
 def TTNG_WarpGroupDotOp : TTNG_Op<"warp_group_dot", [DeclareOpInterfaceMethods<InferTypeOpInterface>,
                                                      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-                                                     DotLike,
+                                                     DeclareOpInterfaceMethods<DotOpInterface>,
                                                      TypesMatchWith<"result's type matches accumulator's type",
                                                                      "d", "c", "$_self">]> {
     let summary = "warp group dot";
@@ -165,7 +167,9 @@ def TTNG_BarrierExpectOp : TTNG_Op<"barrier_expect", [DeclareOpInterfaceMethods<
   }];
 }
 
-def TTNG_WaitBarrierOp : TTNG_Op<"wait_barrier", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+def TTNG_WaitBarrierOp : TTNG_Op<"wait_barrier", [
+      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+      AttrSizedOperandSegments]> {
     let summary = "wait until the mbarrier phase completes.";
 
     let description = [{
@@ -175,6 +179,9 @@ def TTNG_WaitBarrierOp : TTNG_Op<"wait_barrier", [DeclareOpInterfaceMethods<Memo
       This lowers a waitloop using PTX instruction
       mbarrier.try_wait.parity.shared.b64.
 
+      Accepts optional list of memory. If present, it is assumed that any of the
+      dependencies may be accessed until the barrier completes.
+
       The barrier behavior is described here:
       https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-asynchronous-copy-completion-mechanisms
     }];
@@ -182,13 +189,60 @@ def TTNG_WaitBarrierOp : TTNG_Op<"wait_barrier", [DeclareOpInterfaceMethods<Memo
     let hasVerifier = 1;
     let arguments = (ins TTG_MemDescType:$alloc,
                          I32:$phase,
-                         Optional<I1>:$pred);
+                         Optional<I1>:$pred,
+                         Variadic<TTG_MemDescType>:$deps);
     let builders = [
       OpBuilder<(ins "Value":$alloc, "Value":$phase),
       [{
-      build($_builder, $_state, alloc, phase, /*pred=*/static_cast<mlir::Value>(nullptr));
-      }]>];
-    let assemblyFormat = "$alloc `,` $phase attr-dict (`,` $pred^)? `:` qualified(type($alloc))";
+      build($_builder, $_state, alloc, phase, /*pred=*/static_cast<mlir::Value>(nullptr), /*deps=*/{});
+      }]>,
+      OpBuilder<(ins "Value":$alloc, "Value":$phase, "Value":$pred),
+      [{
+      build($_builder, $_state, alloc, phase, pred, /*deps=*/{});
+      }]>,
+      OpBuilder<(ins "Value":$alloc, "Value":$phase, "ValueRange":$deps),
+      [{
+      build($_builder, $_state, alloc, phase, /*pred=*/static_cast<mlir::Value>(nullptr), deps);
+      }]>,
+    ];
+    let assemblyFormat = "$alloc `,` $phase (`,` $pred^)? (`deps` $deps^)? attr-dict `:` qualified(type($alloc)) (`,` type($deps)^)?";
+}
+
+def TTNG_ArriveBarrierOp : TTNG_Op<"arrive_barrier", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "perform the arrive operation on an mbarrier";
+  let description = [{
+    The `ttng.arrive_barrier` operation performs the "arrive" operation on an
+    mbarrier object in shared memory. The operation requires a `count` attribute
+    of at least 1, and decreasing the pending arrival count of the mbarrier by
+    the specific count.
+
+    The operation accepts an optional predicate.
+
+    Example:
+
+    ```mlir
+    ttng.arrive_barrier %barrier, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    ttng.arrive_barrier %barrier, 1, %pred : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    ```
+  }];
+
+  let arguments = (ins
+    TTG_MemDescType:$alloc,
+    I32Attr:$count,
+    Optional<I1>:$pred
+  );
+
+  let assemblyFormat = [{
+    $alloc `,` $count (`,` $pred^)? attr-dict `:` qualified(type($alloc))
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$alloc, "uint32_t":$count), [{
+      return build($_builder, $_state, alloc, count, /*pred=*/Value());
+    }]>
+  ];
+
+  let hasVerifier = 1;
 }
 
 def TTNG_TensorDescToTMAPtrOp : TTNG_Op<"tensor_desc_to_tma_ptr", [Pure]> {
@@ -297,7 +351,7 @@ def TTNG_AsyncTMAScatterOp : TTNG_Op<"async_tma_scatter", [DeclareOpInterfaceMet
     The `ttng.async_tma_scatter` operation scatters multiple separately-indexed
     rows of data from local memory into global memory asynchronously. The
     operation scatters a 2D tensor in shared memory, laid out by core tensor
-    tiles (`hasLeadingOffset=true`) into separately indexed rows in global
+    tiles nvmma_shared layout into separately indexed rows in global
     memory at a given `y` offset.
   }];
 
@@ -325,12 +379,12 @@ def TTNG_TMAStoreWaitOp : TTNG_Op<"async_tma_store_wait"> {
   let assemblyFormat = "attr-dict";
 }
 
-def TTNG_TCGen5MMAOp : TTNG_Op<"tc_gen5_mma", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>, DotLike]> {
+def TTNG_TCGen5MMAOp : TTNG_Op<"tc_gen5_mma", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>, DeclareOpInterfaceMethods<DotOpInterface>, DeclareOpInterfaceMethods<MMAv5OpInterface>]> {
     let summary = "block level op mapping to tensorcore gen5 mma";
 
     let description = [{
         $d += matrix_multiply($a, $b).
-        If not barrier is given the op is assumed to be synchronous otherwise the op will trigger a commit/arrive on the given barrier.
+        If no barrier is given the op is assumed to be synchronous otherwise the op will trigger a commit/arrive on the given barrier.
         If there is a barrier the result will be safe to read after a barrier wait.
         If $two_ctas is set the op will execute a matmul across two contiguous CTAs, it will read the data distributed across the two CTAs.
         and syncronize both CTAs if the op is synchronous.
@@ -343,16 +397,17 @@ def TTNG_TCGen5MMAOp : TTNG_Op<"tc_gen5_mma", [DeclareOpInterfaceMethods<MemoryE
                          I1:$pred,
                          Optional<TTG_MemDescType>:$barrier,
                          OptionalAttr<UnitAttr>:$two_ctas);
+
     // TODO: improve printing format.
     let assemblyFormat = "$a`,` $b`,` $d`,` $useD`,` $pred (`,` $barrier^)? attr-dict `:` functional-type(operands, results)";
 }
 
-def TTNG_TCGen5MMAScaledOp : TTNG_Op<"tc_gen5_mma_scaled", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>, DotLike]> {
+def TTNG_TCGen5MMAScaledOp : TTNG_Op<"tc_gen5_mma_scaled", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>, DeclareOpInterfaceMethods<DotOpInterface>, DeclareOpInterfaceMethods<MMAv5OpInterface>]> {
     let summary = "block level op mapping to tensorcore gen5 mma";
 
     let description = [{
         $d += matrix_multiply(scale($lhs, $lhs_scale), scale(rlhs, $rhs_scale))
-        If not barrier is given the op is assumed to be synchronous otherwise the op will trigger a commit/arrive on the given barrier.
+        If no barrier is given the op is assumed to be synchronous otherwise the op will trigger a commit/arrive on the given barrier.
         If there is a barrier the result will be safe to read after a barrier wait.
     }];
 
@@ -366,6 +421,7 @@ def TTNG_TCGen5MMAScaledOp : TTNG_Op<"tc_gen5_mma_scaled", [DeclareOpInterfaceMe
                          I1:$useD,
                          I1:$pred,
                          Optional<TTG_MemDescType>:$barrier);
+
     // TODO: improve printing format.
     let assemblyFormat = "$a `,` $b `,` $d `,` $a_scale `,` $b_scale `,` $useD`,` $pred `lhs` `=` $a_type `rhs` `=` $b_type (`,` $barrier^)? attr-dict `:` functional-type(operands, results)";
 }
@@ -396,7 +452,7 @@ def TTNG_TMEMStoreOp : TTNG_Op<"tmem_store", [MemoryEffects<[MemWrite]>]> {
   let hasVerifier = 1;
 }
 
-def TTNG_TMEMAllocOp : TTNG_Op<"tmem_alloc", [MemoryEffects<[MemWrite]>]> {
+def TTNG_TMEMAllocOp : TTNG_Op<"tmem_alloc", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "allocate tensor memory";
   let description = [{
     This operation allocates buffer in tensor memory and return a descriptor
@@ -407,13 +463,15 @@ def TTNG_TMEMAllocOp : TTNG_Op<"tmem_alloc", [MemoryEffects<[MemWrite]>]> {
   }];
   let arguments = (ins Optional<TT_Tensor>:$src);
 
-  let assemblyFormat = [{$src attr-dict `:` functional-type(operands, results)}];
+  let assemblyFormat = [{
+    ($src^)? attr-dict `:` functional-type(operands, results)
+  }];
 
   let results = (outs TTG_MemDescType:$result);
   let hasVerifier = 1;
 }
 
-def TTNG_TMEMCopyOp : TTNG_Op<"tmem_copy", [MemoryEffects<[MemWrite]>]> {
+def TTNG_TMEMCopyOp : TTNG_Op<"tmem_copy", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Initiate an asynchronous copy operation from shared memory to the Tensor Memory.";
 
   let description = [{

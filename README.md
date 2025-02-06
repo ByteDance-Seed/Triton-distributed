@@ -1,286 +1,251 @@
 <div align="center">
-  <img src="https://lh5.googleusercontent.com/wzQKEsTFkrgNQO9JjhGH5wFvslJr1saLtLaJ_a6Fp_gNENpvt3VG7BmztwngU9hFJaU4CPwGiw1opQtDvTkLrxWRbO_a12Q-pdESWHgtmheIHcPbOL5ZMC4TSiJVe5ty1w=w3517" alt="Triton logo">
+ 👋 Hi, everyone!
+    <br>
+    We are <b>ByteDance Seed team.</b>
 </div>
 
-| **`Documentation`** | **`Nightly Wheels`** |
-|-------------------- | -------------------- |
-| [![Documentation](https://github.com/triton-lang/triton/actions/workflows/documentation.yml/badge.svg)](https://triton-lang.org/) | [![Wheels](https://github.com/triton-lang/triton/actions/workflows/wheels.yml/badge.svg?branch=release/2.0.x)](https://github.com/triton-lang/triton/actions/workflows/wheels.yml) |
+<p align="center">
+  You can get to know us better through the following channels👇
+  <br>
+  <a href="https://team.doubao.com/">
+    <img src="https://img.shields.io/badge/Website-%231e37ff?style=for-the-badge&logo=bytedance&logoColor=white"></a>
+  <a href="https://github.com/user-attachments/assets/93481cda-a7f3-47f3-b333-fe6b3da86b78">
+    <img src="https://img.shields.io/badge/WeChat-07C160?style=for-the-badge&logo=wechat&logoColor=white"></a>
+ <a href="https://www.xiaohongshu.com/user/profile/668e7e15000000000303157d?xsec_token=ABl2-aqekpytY6A8TuxjrwnZskU-6BsMRE_ufQQaSAvjc%3D&xsec_source=pc_search">
+    <img src="https://img.shields.io/badge/Xiaohongshu-%23FF2442?style=for-the-badge&logo=xiaohongshu&logoColor=white"></a>
+  <a href="https://www.zhihu.com/org/dou-bao-da-mo-xing-tuan-dui/">
+    <img src="https://img.shields.io/badge/zhihu-%230084FF?style=for-the-badge&logo=zhihu&logoColor=white"></a>
+</p>
 
-# Triton
+![seed logo](https://github.com/user-attachments/assets/c42e675e-497c-4508-8bb9-093ad4d1f216)
 
-This is the development repository of Triton, a language and compiler for writing highly efficient custom Deep-Learning primitives. The aim of Triton is to provide an open-source environment to write fast code at higher productivity than CUDA, but also with higher flexibility than other existing DSLs.
+# Triton-distributed
 
-The foundations of this project are described in the following MAPL2019 publication: [Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations](http://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf). Please consider citing this work if you use Triton!
+<!-- <p align="center">
+  <a href="https://github.com/bytedance/flux">
+    <img src="https://img.shields.io/badge/Triton-distributed-Project Page-yellow"></a>
+  <a href="https://arxiv.org/pdf/xxxx.xxxx">
+    <img src="https://img.shields.io/badge/Triton-distributed-Tech Report-red"></a>
+  <br>
+  <a href="https://github.com/user-attachments/assets/d3fcb3bf-466b-4efe-8c3f-5f85258202ae">
+    <img src="https://img.shields.io/badge/Triton-distributed-Wechat Communication Group-07C160"></a>
+  <a href="XXX">
+    <img src="https://img.shields.io/badge/License-MIT-blue"></a>
+</p> -->
 
-The [official documentation](https://triton-lang.org) contains installation instructions and tutorials.  See also these third-party [Triton puzzles](https://github.com/srush/Triton-Puzzles), which can all be run using the Triton interpreter -- no GPU required.
+[Original Triton README](upstream-README.md) | [README in Chinese](README-cn.md)
 
-# Quick Installation
+Triton-distributed is a distributed compiler designed for computation-communication overlapping, which is based on OpenAI Triton.
 
-You can install the latest stable release of Triton from pip:
+Using Triton-distributed, programmers are able to develop efficient kernels comparable to highly-optimized libraries (including [Distributed-GEMM](https://github.com/NVIDIA/cutlass/tree/main/examples/65_distributed_gemm) and [FLUX](https://github.com/bytedance/flux/blob/main/README.md)).
+Triton-distributed currently mainly targets Nvidia GPU and AMD GPU. It can also be ported to other hardware platforms.
+Feel free to contact us if you want to use Triton-distributed on your own hardware.
 
-```shell
-pip install triton
+## Getting started
+### Install Triton-distributed from source
+#### The best practice to use Triton-distributed:
+- Python 3.9 (suggest using virtual environment)
+- CUDA 12.4
+- Torch 2.4
+
+Dependencies with other versions may also work well, but this is not guaranteed. If you find any problem in installing, please tell us in Issues.
+
+#### Steps:
+1. Clone Triton-distributed to your own path (e.g., `/home/Triton-distributed`)
+2. Update submodules
+    ```sh
+    git submodule update --init --recursive
+    ```
+3. Install dependencies
+    ```sh
+    pip3 install torch==2.4
+    pip3 install black "clang-format==19.1.2" pre-commit ruff yapf==0.43
+    pip3 install ninja cmake wheel pybind11 cuda-python==12.4 numpy chardet pytest
+    ```
+4. Apply NVSHMEM fix
+(Disclaimer: This step is because of NVSHMEM license requirements, it is illegal to release any modified codes or patch.)
+
+    1. Download NVSHMEM 3.2.5 Source Code [NVSHMEM Open Source Packages](https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz)
+    2. Extract to designated location
+        ```sh
+        mkdir -p /home/Triton-distributed/third_party/nvshmem
+        tar -xvf nvshmem_src_3.2.5-1.txz -C /home/Triton-distributed/third_party/nvshmem/ --strip-components=1
+        ```
+    3. Bitcode Bug Fix: [BUG with nvshmem 3.2.5 for bitcode compiling](https://forums.developer.nvidia.com/t/bug-with-nvshmem-3-2-5-for-bitcode-compiling/327847)
+
+       File: ```src/include/non_abi/device/common/nvshmemi_common_device.cuh``` (Line 287)
+       ```cpp
+        - dst = (void *)(dst_p + nelems);
+        - src = (void *)(src_p + nelems);
+
+        +#ifdef __clang_llvm_bitcode_lib__
+        +    dst = (void *)(dst_p + nelems * 4);
+        +    src = (void *)(src_p + nelems * 4);
+        +#else
+        +    dst = (void *)(dst_p + nelems);
+        +    src = (void *)(src_p + nelems);
+        +#endif
+        ```
+    4. Clang Compilation Error Fix
+
+       File: ```src/include/device_host/nvshmem_common.cuh``` (Line 41)
+       ```cpp
+        - __device__ int __nvvm_reflect(const char *s);
+        + __device__ int __nvvm_reflect(const void *s);
+       ```
+
+5. Build
+    ```sh
+    cd /home/Triton-distributed
+    export USE_TRITON_DISTRIBUTED_AOT=0
+    pip3 install -e python --verbose --no-build-isolation
+    ```
+
+    If you want to use AOT, then
+    ```sh
+    export USE_TRITON_DISTRIBUTED_AOT=1
+    pip3 install -e python --verbose --no-build-isolation
+    ```
+    (Note: You have to first build non-AOT version before building AOT version)
+6. Setup environment variables (Do this step at the beginning every time you use Triton-distributed)
+    ```sh
+    cd /home/Triton-distributed
+    source scripts/setenv.sh
+    ```
+
+### Test your installation
+#### AllGather GEMM example on single node
+This example runs on a single node with 8 H800 GPUs.
+```sh
+bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_ag_gemm_intra_node.py --case correctness_tma
+```
+#### GEMM ReduceScatter example on single node
+This example runs on a single node with 8 H800 GPUs.
+```sh
+bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_gemm_rs_multi_node.py 8192 8192 29568
+```
+#### NVSHMEM example in Triton-distributed
+```sh
+bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_nvshmem_api.py
 ```
 
-Binary wheels are available for CPython 3.9-3.13.
+### How to use Triton-distributed
+Triton-distributed provides a set of easy-to use primitives to support the development of distributed compute-communication overlapping kernels. The primitives are divided into low-level primitives and high-level primitives. Currently, we have released our low-level primitives, and we plan to release high-level primitives in future.
 
-# Enabling Blackwell Support
+All the primitives are exposed by `triton.distributed.language`
+#### Low-level primitives
+##### Context Querying Primitives
+```py
+rank(axis=-1, _builder=None)
+num_ranks(axis=-1, _builder=None)
+symm_at(ptr, rank, _builder=None)
 
-The main branch now features support for NVIDIA Blackwell GPUs using 5th
-generation tensor cores. To enable this, you will need two additional steps:
+```
+##### Singal Control Primitives
+```py
+wait(barrierPtrs, numBarriers, scope: str, semantic: str, _builder=None)
+consume_token(value, token, _builder=None)
+notify(ptr, rank, signal=1, sig_op="set", comm_scope="inter_node", _builder=None)
+```
+##### NVSHMEM-related Primitives
 
-1. Build a pre-release PyTorch from source with CUDA 12.8
-2. Build triton from the latest source
+Besides the primitives, Triton-distributed also expose all the NVSHMEM primitives to Python, allowing users to program communication kernels purely in Python.
 
-
-First, to build pytorch you need to have CUDA 12.8 installed locally. If not,
-follow the [instructions for your platform](https://developer.nvidia.com/cuda-downloads)
-```bash
-# Clone and checkout pytorch 2.6 release candidate
-git clone https://github.com/pytorch/pytorch
-cd pytorch
-git checkout v2.6.0-rc9
-git submodule sync
-git submodule update --init --recursive -j 8
-
-# Install build dependencies (assumes you already have a system compiler)
-pip install -r requirements.txt
-pip install mkl-static mkl-include wheel
-
-# Build PyTorch (will take a long time)
-export CUDA_HOME=/usr/local/cuda-12.8
-export CUDA_PATH=$CUDA_HOME
-export TORCH_CUDA_ARCH_LIST=Blackwell
-python setup.py develop
-
-# Optional, package build into a wheel to install on other machines.
-python setup.py bdist_wheel
-ls dist  # Wheel should be output in this directory
+All the NVSHMEM-related device-side primitives are exposed by `triton.language.extra.libshmem_device`
+```py
+my_pe()
+n_pes()
+int_p(dest, value, pe)
+remote_ptr(local_ptr, pe)
+barrier_all()
+barrier_all_block()
+barrier_all_warp()
+sync_all()
+sync_all_block()
+sync_all_warp()
+quiet()
+fence()
+getmem_nbi_block(dest, source, bytes, pe)
+getmem_block(dest, source, bytes, pe)
+getmem_nbi_warp(dest, source, bytes, pe)
+getmem_warp(dest, source, bytes, pe)
+getmem_nbi(dest, source, bytes, pe)
+getmem(dest, source, bytes, pe)
+putmem_block(dest, source, bytes, pe)
+putmem_nbi_block(dest, source, bytes, pe)
+putmem_warp(dest, source, bytes, pe)
+putmem_nbi_warp(dest, source, bytes, pe)
+putmem(dest, source, bytes, pe)
+putmem_nbi(dest, source, bytes, pe)
+putmem_signal_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe)
+putmem_signal(dest, source, bytes, sig_addr, signal, sig_op, pe)
+putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe)
+putmem_signal_block(dest, source, bytes, sig_addr, signal, sig_op, pe)
+putmem_signal_nbi_warp(dest, source, bytes, sig_addr, signal, sig_op, pe)
+putmem_signal_warp(dest, source, bytes, sig_addr, signal, sig_op, pe)
+signal_op(sig_addr, signal, sig_op, pe)
+signal_wait_until(sig_addr, cmp_, cmp_val)
 ```
 
-Note that if you use the domain libraries (`torchvision`, `torchtext`,
-`torchaudio`, etc.) these will need to be built from source as well, otherwise
-their custom PyTorch extensions will not work.
-
-Finally, follow the instructions below to install triton from source.
-
-# Install from source
-
-```shell
-git clone https://github.com/triton-lang/triton.git
-cd triton
-
-pip install ninja cmake wheel pybind11 # build-time dependencies
-pip install -e python
+Using these primitives, users can program compute-communication kernels easily. For example, a ring-put example is shown here:
+```py
+@triton.jit
+def ring_put(ptr):
+    mype = libshmem_device.my_pe()
+    npes = libshmem_device.n_pes()
+    peer = (mype + 1) % npes
+    libshmem_device.int_p(ptr, mype, peer)
 ```
 
-Or with a virtualenv:
+#### High-level primitives
+To provide better programming experience, we also provide a set of high-level primitives for communication and signal control. These primitives, as decribed in our [MLSys 2025 paper](https://mlsys.org/virtual/2025/poster/2969), use a tile-centric design philosophy. These high-level primitives will be released soon after MLSys 2025.
 
-```shell
-git clone https://github.com/triton-lang/triton.git
-cd triton
+## Roadmaps
+### Functionalities
+- [x] Release low-level primitives
+- [ ] Release high-level primitives
+### Kernels
+- [x] Release single-node GEMM TP overlapping kernels
+- [x] Release single-node MoE TP overlapping kernels
+- [x] Release single-node distributed Flash-Decoding kernels
+- [ ] Release single-node MoE EP overlapping kernels
+- [x] Release cross-node GEMM TP overlapping kernels
+- [x] Release cross-node MoE TP overlapping kernels
+- [x] Release cross-node distributed Flash-Decoding kernels
+- [x] Release cross-node EP all-to-all kernels (similar to [DeepEP](https://github.com/deepseek-ai/DeepEP))
+### Backends
+- [x] Nvidia SM90a support
+- [x] Nvidia SM80 support
+- [ ] Nvidia SM89 support
+- [x] AMD CDNA3 support
+### Performance
+- [ ] Performance report
 
-python -m venv .venv --prompt triton
-source .venv/bin/activate
+## License
+The Triton-distributed project is under MIT license.
+Part of our code is under Apache-2.0 License:
+- `third_party/distributed/distributed/kernels/flash_decode.py`
+Triton's original code is partially under Apache-2.0 Linces, these files include:
+- `include/triton/Dialect/TritonGPU/Transforms/PipelineExpander.h`
+- `lib/Dialect/TritonGPU/Transforms/Pipeliner/PipelineExpander.cpp`
+- `python/triton/_C/include/triton/Dialect/TritonGPU/Transforms/PipelineExpander.h`
+- `utils/generate-test-checks.py`
 
-pip install ninja cmake wheel pybind11 # build-time dependencies
-pip install -e python
+
+## Citation
+If you use Triton-distributed in a scientific publication, we encourage you to add the following reference to the related papers:
+```bibtex
+@misc{zheng2025tilelink,
+      title={TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives},
+      author={Size Zheng, Jin Fang, Xuegui Zheng, Qi Hou, Wenlei Bao, Ningxin Zheng, Ziheng Jiang, Dongyang Wang, Jianxi Ye, Haibin Lin, Li-Wen Chang, Xin Liu},
+      year={2025},
+}
 ```
 
-# Building with a custom LLVM
+# About [ByteDance Seed Team](https://team.doubao.com/)
 
-Triton uses LLVM to generate code for GPUs and CPUs.  Normally, the Triton build
-downloads a prebuilt LLVM, but you can also build LLVM from source and use that.
+Founded in 2023, ByteDance Seed Team is dedicated to crafting the industry's most advanced AI foundation models. The team aspires to become a world-class research team and make significant contributions to the advancement of science and society.
 
-LLVM does not have a stable API, so the Triton build will not work at an
-arbitrary LLVM version.
+# Join the Discussion Group
 
-1. Find the version of LLVM that Triton builds against.  Check
-`cmake/llvm-hash.txt` to see the current version. For example, if it says:
-       49af6502c6dcb4a7f7520178bd14df396f78240c
-
-   This means that the version of Triton you have builds against
-   [LLVM](https://github.com/llvm/llvm-project) 49af6502.
-
-2. `git checkout` LLVM at this revision.  Optionally, make additional
-   modifications to LLVM.
-
-3. [Build LLVM](https://llvm.org/docs/CMake.html).  For example, you might run
-
-       $ cd $HOME/llvm-project  # your clone of LLVM.
-       $ mkdir build
-       $ cd build
-       $ cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON ../llvm -DLLVM_ENABLE_PROJECTS="mlir;llvm" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU"
-       $ ninja
-
-4. Grab a snack, this will take a while.
-
-5. Build Triton as above, but set the following environment variables.
-
-       # Modify as appropriate to point to your LLVM build.
-       $ export LLVM_BUILD_DIR=$HOME/llvm-project/build
-
-       $ cd <triton install>
-       $ LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include \
-         LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib \
-         LLVM_SYSPATH=$LLVM_BUILD_DIR \
-         pip install -e python
-
-# Tips for building
-
-- Set `TRITON_BUILD_WITH_CLANG_LLD=true` as an environment variable to use clang
-  and lld.  lld in particular results in faster builds.
-
-- Set `TRITON_BUILD_WITH_CCACHE=true` to build with ccache.
-
-- Set `TRITON_HOME=/some/path` to change the location of the `.triton`
-  directory where Triton's cache is located and downloads are stored
-  during the build. By default, this is the user's home directory. It
-  can be changed anytime.
-
-- Pass `--no-build-isolation` to `pip install` to make nop builds faster.
-  Without this, every invocation of `pip install` uses a different symlink to
-  cmake, and this forces ninja to rebuild most of the `.a` files.
-
-- vscode intellisense has some difficulty figuring out how to build Triton's C++
-  (probably because, in our build, users don't invoke cmake directly, but
-  instead use setup.py).  Teach vscode how to compile Triton as follows.
-
-    - Do a local build. Run command `pip install -e python`
-    - Get the full path to the `compile_commands.json` file produced by the build:
-      `find python/build -name 'compile_commands.json' | xargs readlink -f`.
-      You might get a full path similar to `/Users/{username}/triton/python/build/cmake.macosx-11.1-arm64-cpython-3.12/compile_commands.json`
-    - In vscode, install the
-      [C/C++
-      extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools),
-      then open the command palette (`Shift + Command + P` on Mac, or `Shift +
-      Ctrl + P` on Windows/Linux) and open `C/C++: Edit Configurations (UI)`.
-    - Open "Advanced Settings" and paste the full path to
-      `compile_commands.json` into the "Compile Commands" textbox.
-
-# Running tests
-
-There currently isn't a turnkey way to run all the Triton tests, but you can
-follow the following recipe.
-
-```shell
-# One-time setup.  Note this will reinstall local Triton because torch
-# overwrites it with the public version.
-$ make dev-install
-
-# To run all tests (requires a GPU)
-$ make test
-
-# Or, to run tests without a gpu
-$ make test-nogpu
-```
-
-# Tips for hacking
-
-For detailed instructions on how to debug Triton's frontend, please refer to this [tutorial](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html). The following includes additional tips for hacking on Triton's backend.
-
-**Helpful environment variables**
-
-- `MLIR_ENABLE_DUMP=1` dumps the IR before every MLIR pass Triton runs, for all
-   kernels. Use `MLIR_ENABLE_DUMP=kernelName` to dump for a specific kernel only.
-  - Triton cache can interfere with the dump. In cases where `MLIR_ENABLE_DUMP=1` does not work, try cleaning your triton cache: `rm -r ~/.triton/cache/*`
-- `MLIR_DUMP_PATH` specifies where `MLIR_ENABLE_DUMP` will dump to. If unset will dump to stderr.
-- `LLVM_IR_ENABLE_DUMP=1` dumps the IR before every pass run over the LLVM IR.
-- `TRITON_REPRODUCER_PATH=<reproducer_path>` will generate an MLIR reproducer file
-  at `<reproducer_path>` before each MLIR compiler stage. If any of the stages fail,
-  `<reproducer_path>` will be a local MLIR reproducer captured right before the failing pass.
-- `TRITON_INTERPRET=1` uses the Triton interpreter instead of running on the
-  GPU.  You can insert Python breakpoints in your kernel code!
-- `TRITON_ENABLE_LLVM_DEBUG=1` passes `-debug` to LLVM, printing a lot of
-  debugging information to stdout.  If this is too noisy, run with just
-  `TRITON_LLVM_DEBUG_ONLY` instead to limit the output.
-
-  An alternative way to reduce output noisiness is running with
-  `LLVM_IR_ENABLE_DUMP=1`, extract the IR before the LLVM pass of interest, and
-  then run LLVM's `opt` standalone, perhaps passing `-debug-only=foo` on the
-  command line.
-- `TRITON_LLVM_DEBUG_ONLY=<comma-separated>` is the equivalent of LLVM's
-  `-debug-only` command-line option. This limits the LLVM debug output to
-  specific pass or component names (which are specified using `#define
-  DEBUG_TYPE` throughout LLVM and Triton) in order to allow the debug output to
-  be less noisy. `TRITON_LLVM_DEBUG_ONLY` allows for one or more comma
-  separated values to be specified (eg
-  `TRITON_LLVM_DEBUG_ONLY="tritongpu-remove-layout-conversions"` or
-  `TRITON_LLVM_DEBUG_ONLY="tritongpu-remove-layout-conversions,regalloc"`).
-- `TRITON_ENABLE_ASAN=1` invokes the LLVM address sanitizer for
-  memory leak and out of bounds access detection. Currently only supported on the AMD
-  backend. This must be run using the ASAN libraries documented [here](https://rocm.docs.amd.com/projects/llvm-project/en/latest/conceptual/using-gpu-sanitizer.html).
-
-  When enabling the address sanitizer it is recommended to disable various memory caching strategies
-  both within the ROCm stack and PyTorch. This will give the address sanitizer the best chance at finding the
-  memory fault where it originates. See this [test](https://github.com/triton-lang/triton/blob/main/third_party/amd/python/test/test_address_sanitizer.py) for more details.
-
-- `USE_IR_LOC={ttir,ttgir}` reparses the IR such that the location information
-  will be the line number of the IR file with that particular extension,
-  instead of line number of the python file. This can provide a direct mapping
-  from the IR to llir/ptx. When used with performance tools, it can provide a
-  breakdown on IR instructions.
-- `TRITON_PRINT_AUTOTUNING=1` prints out the best autotuning config and total time
-  spent for each kernel after autotuning is complete.
-- `DISABLE_LLVM_OPT` will disable llvm optimizations for make_llir and make_ptx
-  if its value is true when parsing as Bool. Otherwise, it will be parsed as a list
-  of flags to disable llvm optimizations. One usage case is
-  `DISABLE_LLVM_OPT="disable-lsr"`
-  Loop strength reduction is known to cause up to 10% performance changes for
-  certain kernels with register pressure.
-- `TRITON_ALWAYS_COMPILE=1` forces to compile kernels regardless of cache hit.
-- `MLIR_ENABLE_TIMING` dumps the timing information for each MLIR pass.
-- `LLVM_ENABLE_TIMING` dumps the timing information for each LLVM pass.
-- `TRITON_DEFAULT_FP_FUSION` overrides the default behavior of allowing fp fusion (mul+add->fma).
-- `MLIR_ENABLE_DIAGNOSTICS=<comma-separated>` controls diagnostic emission in MLIR.
-  Options are: `warnings`, `remarks`, `stacktraces`, `operations`.
-  Use comma-separated values to customize output. For example,
-  `MLIR_ENABLE_DIAGNOSTICS=remarks,operations` enables remarks and IR operations,
-  while `MLIR_ENABLE_DIAGNOSTICS=warnings,stacktraces` enables warnings with
-  stacktraces. By default, only errors are shown. Setting `warnings` includes
-  errors and warnings; `remarks` includes errors, warnings, and remarks.
-- `MLIR_ENABLE_REMARK` is deprecated. Please use `MLIR_ENABLE_DIAGNOSTICS=remarks`.
-- `TRITON_KERNEL_DUMP` enables the dumping of the IR from each compilation stage and the final ptx/amdgcn.
-- `TRITON_DUMP_DIR` specifies the directory to save the dumped IR and ptx/amdgcn when `TRITON_KERNEL_DUMP` is set to 1.
-- `TRITON_KERNEL_OVERRIDE` enables the override of the compiled kernel with a user-specified IR/ptx/amdgcn at the beginning of each compilation stage.
-- `TRITON_OVERRIDE_DIR` specifies the directory from which to load the IR/ptx/amdgcn files when `TRITON_KERNEL_OVERRIDE` is set to 1.
-
-**Kernel Override Steps**
-
-```bash
-export TRITON_ALWAYS_COMPILE=1
-export TRITON_KERNEL_DUMP=1
-export TRITON_DUMP_DIR=<dump_dir>
-export TRITON_KERNEL_OVERRIDE=1
-export TRITON_OVERRIDE_DIR=<override_dir>
-# Step 1: Run the kernel once to dump kernel's IRs and ptx/amdgcn in $TRITON_DUMP_DIR
-# Step 2: Copy $TRITON_DUMP_DIR/<kernel_hash> to $TRITON_OVERRIDE_DIR
-# Step 3: Delete the stages that you do not want to override and modify the stage you do want to override
-# Step 4: Run the kernel again to see the overridden result
-```
-
-
-# Changelog
-
-Version 2.0 is out! New features include:
-
-- Many, many bug fixes
-- Performance improvements
-- Backend rewritten to use MLIR
-- Support for kernels that contain back-to-back matmuls (e.g., flash attention)
-
-# Contributing
-
-Community contributions are more than welcome, whether it be to fix bugs or to add new features at [github](https://github.com/triton-lang/triton/). For more detailed instructions, please visit our [contributor's guide](CONTRIBUTING.md).
-
-# Compatibility
-
-Supported Platforms:
-
-- Linux
-
-Supported Hardware:
-
-- NVIDIA GPUs (Compute Capability 8.0+)
-- AMD GPUs (ROCm 6.2+)
-- Under development: CPUs
+![discussion-group](asset/wechat-group-temporal.png)
