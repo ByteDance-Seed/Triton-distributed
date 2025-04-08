@@ -52,6 +52,7 @@ Triton-distributed provides a set of easy-to use primitives to support the devel
 [Triton-distributed Primitives](docs/distributed/primitives.md)
 
 Using these primitives, users can program communication kernels easily. For example, a low-latency AllToAll (with better latency than [DeepEP](https://github.com/deepseek-ai/DeepEP) for inference) is shown below.
+The performance of this example on 32 H800 GPUs is 137us (128 tokens per rank, topk=8, hidden_size=7168, dtype=fp8), while DeepEP is 182 us (note: DeepEP doesn't use NVLink for inference).
 ```py
 @triton.jit
 def all_to_all_kernel(
@@ -145,10 +146,10 @@ Also, users can combine the communication part with computation part to design o
 Triton-distributed can achieve comparable or better performance than hand-tuned libraries.
 
 
-### AllGather GEMM on single nodes of H800x8
+### AllGather GEMM on single node of H800x8
 ![Ag-GEMM-inter-node](asset/ag-gemm-intra-node.png)
 
-### GEMM ReduceScatter on single nodes of H800x8
+### GEMM ReduceScatter on single node of H800x8
 ![Ag-GEMM-inter-node](asset/gemm-rs-intranode-perf.png)
 
 ### AllGather GEMM on 2 nodes of H800x8
@@ -158,6 +159,7 @@ Triton-distributed can achieve comparable or better performance than hand-tuned 
 ![GEMM-Rs-inter-node](asset/gemm-rs-inter-node.png)
 
 ### Scaling of Distributed Flash-Decode from 1 GPU to 32 GPUs
+The batch size is 1 (one query) for decoding.
 ![flash-decode-inter-node](asset/flash-decode-scaling.png)
 
 ### Performance on Other Platforms
@@ -168,6 +170,8 @@ Triton-distributed can achieve comparable or better performance than hand-tuned 
 ### Functionalities
 - [x] Release low-level primitives
 - [ ] Release high-level primitives
+- [ ] Tutorials
+- [ ] Pre-built binary
 ### Kernels
 - [x] Release single-node GEMM TP overlapping kernels
 - [x] Release single-node MoE TP overlapping kernels
@@ -179,10 +183,16 @@ Triton-distributed can achieve comparable or better performance than hand-tuned 
 - [x] Release cross-node EP all-to-all kernels (similar to [DeepEP](https://github.com/deepseek-ai/DeepEP))
 - [ ] Provide tutorials for kernel implementation
 ### Backends
+Computation
 - [x] Nvidia SM90a support
 - [x] Nvidia SM80 support
-- [ ] Nvidia SM89 support
+- [x] Nvidia SM89 support
 - [x] AMD CDNA3 support
+
+Communication
+- [x] NVLink
+- [x] IB
+- [ ] PCIe 
 ### Performance
 - [ ] Performance report
 

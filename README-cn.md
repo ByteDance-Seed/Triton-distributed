@@ -49,7 +49,7 @@ Triton-distributed 提供了一套易于使用的原语，用于支持开发计�
 
 [Triton-distributed 原语](docs/distributed/primitives.md)
 
-使用这些原语，用户可以轻松编写通信kernel。例如，以下展示了一个低延迟的AllToAll通信操作（在推理场景下，其延迟表现优于[DeepEP](https://github.com/deepseek-ai/DeepEP)）。
+使用这些原语，用户可以轻松编写通信kernel。例如，以下展示了一个低延迟的AllToAll通信操作（在推理场景下，其延迟表现优于[DeepEP](https://github.com/deepseek-ai/DeepEP)）。这个例子在32卡H800集群中性能是137微秒（每个卡128 token, topk=8, hidden_size=7168, 数据类型是fp8），DeepEP是182微秒（DeepEP推理不用NVLink）
 ```py
 @triton.jit
 def all_to_all_kernel(
@@ -161,10 +161,12 @@ Triton-distributed 可以达到和手写分布式算子库接近的性能，有�
 ### 其他平台性能
 [AMD GPUs](docs/distributed/amd-perf.md)
 
-## Roadmap
+## Roadmaps
 ### 功能
 - [x] Release low-level primitives
 - [ ] Release high-level primitives
+- [ ] Tutorials
+- [ ] Pre-built binary
 ### Kernels
 - [x] Release single-node GEMM TP overlapping kernels
 - [x] Release single-node MoE TP overlapping kernels
@@ -175,12 +177,18 @@ Triton-distributed 可以达到和手写分布式算子库接近的性能，有�
 - [x] Release cross-node distributed Flash-Decoding kernels
 - [x] Release cross-node EP all-to-all kernels (similar to [DeepEP](https://github.com/deepseek-ai/DeepEP))
 - [ ] Provide tutorials for kernel implementation
-
 ### 后端
+计算能力
 - [x] Nvidia SM90a support
 - [x] Nvidia SM80 support
-- [ ] Nvidia SM89 support
+- [x] Nvidia SM89 support
 - [x] AMD CDNA3 support
+
+通信能力
+- [x] NVLink
+- [x] IB
+- [ ] PCIe 
+
 ### 性能
 - [ ] Performance report
 
