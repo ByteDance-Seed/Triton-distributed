@@ -48,8 +48,8 @@
 // ========================================   #1 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-load_acquire_workgroup(uint64_t [[clang::opencl_global]] * input) {
+__attribute__((used, device)) int
+load_acquire_workgroup(int [[clang::opencl_global]] * input) {
   return __hip_atomic_load(input, __ATOMIC_ACQUIRE,
                            __HIP_MEMORY_SCOPE_WORKGROUP);
 }
@@ -58,8 +58,8 @@ load_acquire_workgroup(uint64_t [[clang::opencl_global]] * input) {
 // ========================================   #2 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-load_relaxed_workgroup(uint64_t [[clang::opencl_global]] * input) {
+__attribute__((used, device)) int
+load_relaxed_workgroup(int [[clang::opencl_global]] * input) {
   return __hip_atomic_load(input, __ATOMIC_RELAXED,
                            __HIP_MEMORY_SCOPE_WORKGROUP);
 }
@@ -68,8 +68,8 @@ load_relaxed_workgroup(uint64_t [[clang::opencl_global]] * input) {
 // ========================================   #3 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-load_acquire_agent(uint64_t [[clang::opencl_global]] * input) {
+__attribute__((used, device)) int
+load_acquire_agent(int [[clang::opencl_global]] * input) {
   return __hip_atomic_load(input, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
 }
 
@@ -77,8 +77,8 @@ load_acquire_agent(uint64_t [[clang::opencl_global]] * input) {
 // ========================================   #4 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-load_relaxed_agent(uint64_t [[clang::opencl_global]] * input) {
+__attribute__((used, device)) int
+load_relaxed_agent(int [[clang::opencl_global]] * input) {
   return __hip_atomic_load(input, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
 }
 
@@ -104,9 +104,9 @@ load_relaxed_system(int [[clang::opencl_global]] * input) {
 // ========================================   #7 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-store_release_workgroup(uint64_t [[clang::opencl_global]] * input) {
-  uint64_t value{1};
+__attribute__((used, device)) int
+store_release_workgroup(int [[clang::opencl_global]] * input) {
+  int value{1};
   __hip_atomic_store(input, value, __ATOMIC_RELEASE,
                      __HIP_MEMORY_SCOPE_WORKGROUP);
   return *input;
@@ -116,9 +116,9 @@ store_release_workgroup(uint64_t [[clang::opencl_global]] * input) {
 // ========================================   #8 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-store_relaxed_workgroup(uint64_t [[clang::opencl_global]] * input) {
-  uint64_t value{1};
+__attribute__((used, device)) int
+store_relaxed_workgroup(int [[clang::opencl_global]] * input) {
+  int value{1};
   __hip_atomic_store(input, value, __ATOMIC_RELAXED,
                      __HIP_MEMORY_SCOPE_WORKGROUP);
   return *input;
@@ -128,9 +128,9 @@ store_relaxed_workgroup(uint64_t [[clang::opencl_global]] * input) {
 // ========================================   #9 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-store_release_agent(uint64_t [[clang::opencl_global]] * input) {
-  uint64_t value{1};
+__attribute__((used, device)) int
+store_release_agent(int [[clang::opencl_global]] * input) {
+  int value{1};
   __hip_atomic_store(input, value, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
   return *input;
 }
@@ -139,9 +139,9 @@ store_release_agent(uint64_t [[clang::opencl_global]] * input) {
 /// =====================================   #10 ===============================
 // =============================================================================
 
-__attribute__((used, device)) uint64_t
-store_relaxed_agent(uint64_t [[clang::opencl_global]] * input) {
-  uint64_t value{1};
+__attribute__((used, device)) int
+store_relaxed_agent(int [[clang::opencl_global]] * input) {
+  int value{1};
   __hip_atomic_store(input, value, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
   return *input;
 }

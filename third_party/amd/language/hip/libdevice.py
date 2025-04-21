@@ -495,28 +495,28 @@ def __syncthreads(_builder=None):
 @core.extern
 def load_acquire_workgroup(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_load_acquire_workgroup", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_load_acquire_workgroup", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
 @core.extern
 def load_relaxed_workgroup(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_load_relaxed_workgroup", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_load_relaxed_workgroup", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
 @core.extern
 def load_acquire_agent(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_load_acquire_agent", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_load_acquire_agent", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
 @core.extern
 def load_relaxed_agent(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_load_relaxed_agent", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_load_relaxed_agent", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
@@ -537,14 +537,14 @@ def load_relaxed_system(arg0, _builder=None):
 @core.extern
 def store_release_workgroup(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_store_release_workgroup", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_store_release_workgroup", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
 @core.extern
 def store_relaxed_workgroup(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_store_relaxed_workgroup", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_store_relaxed_workgroup", core.int32),
     }, is_pure=False, _builder=_builder)
 
 
@@ -558,7 +558,7 @@ def store_release_agent(arg0, arg1, _builder=None):
 @core.extern
 def store_relaxed_agent(arg0, _builder=None):
     return core.extern_elementwise("", "", [arg0], {
-        (core.pointer_type(core.uint64), ): ("__triton_hip_store_relaxed_agent", core.uint64),
+        (core.pointer_type(core.int32), ): ("__triton_hip_store_relaxed_agent", core.int32),
     }, is_pure=False, _builder=_builder)
 
 

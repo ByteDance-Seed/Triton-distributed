@@ -247,24 +247,24 @@ private:
     } else if (calleeName == "__triton_hip_load_acquire_workgroup") {
       assert(operands.size() == 1);
       replacementOp =
-          buildAtomicLoad(i64_ty, operands[0], 8, LLVM::AtomicOrdering::acquire,
+          buildAtomicLoad(i32_ty, operands[0], 8, LLVM::AtomicOrdering::acquire,
                           "workgroup-one-as");
     } else if (calleeName == "__triton_hip_load_relaxed_workgroup") {
       assert(operands.size() == 1);
       replacementOp =
-          buildAtomicLoad(i64_ty, operands[0], 8,
+          buildAtomicLoad(i32_ty, operands[0], 8,
                           LLVM::AtomicOrdering::monotonic, "workgroup-one-as");
     }
 
     else if (calleeName == "__triton_hip_load_acquire_agent") {
       assert(operands.size() == 1);
       replacementOp =
-          buildAtomicLoad(i64_ty, operands[0], 8, LLVM::AtomicOrdering::acquire,
+          buildAtomicLoad(i32_ty, operands[0], 8, LLVM::AtomicOrdering::acquire,
                           "agent-one-as");
     } else if (calleeName == "__triton_hip_load_relaxed_agent") {
       assert(operands.size() == 1);
       replacementOp =
-          buildAtomicLoad(i64_ty, operands[0], 8,
+          buildAtomicLoad(i32_ty, operands[0], 8,
                           LLVM::AtomicOrdering::monotonic, "agent-one-as");
     } else if (calleeName == "__triton_hip_load_acquire_system") {
       assert(operands.size() == 1);
@@ -279,14 +279,14 @@ private:
     else if (calleeName == "__triton_hip_store_release_workgroup") {
       assert(operands.size() == 1);
       Value one = rewriter.create<LLVM::ConstantOp>(
-          loc, i64_ty, IntegerAttr::get(i64_ty, 1));
+          loc, i32_ty, IntegerAttr::get(i32_ty, 1));
       (void)buildAtomicStore(one, operands[0], 8, LLVM::AtomicOrdering::release,
                              "workgroup-one-as");
       replacementOp = one.getDefiningOp();
     } else if (calleeName == "__triton_hip_store_relaxed_workgroup") {
       assert(operands.size() == 1);
       Value one = rewriter.create<LLVM::ConstantOp>(
-          loc, i64_ty, IntegerAttr::get(i64_ty, 1));
+          loc, i32_ty, IntegerAttr::get(i32_ty, 1));
       (void)buildAtomicStore(one, operands[0], 8,
                              LLVM::AtomicOrdering::monotonic,
                              "workgroup-one-as");
@@ -301,7 +301,7 @@ private:
     } else if (calleeName == "__triton_hip_store_relaxed_agent") {
       assert(operands.size() == 1);
       Value one = rewriter.create<LLVM::ConstantOp>(
-          loc, i64_ty, IntegerAttr::get(i64_ty, 1));
+          loc, i32_ty, IntegerAttr::get(i32_ty, 1));
       (void)buildAtomicStore(one, operands[0], 8,
                              LLVM::AtomicOrdering::monotonic, "agent-one-as");
       replacementOp = one.getDefiningOp();
