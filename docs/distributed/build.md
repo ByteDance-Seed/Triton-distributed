@@ -153,3 +153,39 @@ bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/t
 bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/test_moe_reduce_rs_intra_node.py 8192 2048 1536 32 2
 bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/test_moe_reduce_rs_intra_node.py 8192 2048 1536 32 2 --check
 ```
+
+## To use Triton-distributed with the AMD backend:
+- Starting from the rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.4 Docker container
+#### Steps:
+1. Clone the repo
+```sh
+git clone https://github.com/ByteDance-Seed/Triton-distributed.git
+```
+2. Update submodules
+```sh
+cd Triton-distributed/
+git submodule update --init --recursive
+```
+3. Install dependencies
+```sh
+sudo apt-get update -y
+sudo apt install -y libopenmpi-dev
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --no-deps
+./third_party/rocshmem_bind/build.sh
+python3 -m pip install -i https://test.pypi.org/simple hip-python~=6.3.2 (or whatever Rocm version you have)
+pip3 install pybind11
+```
+4. Build Triton-distributed
+```sh
+pip3 install -e python --verbose --no-build-isolation
+```
+### Test your installation
+#### GEMM ReduceScatter example on single node
+```sh
+bash ./third_party/distributed/launch_amd.sh ./third_party/distributed/distributed/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
+ ```
+and see the following (reduced) output
+```sh
+torchrun --node_rank=0 --nproc_per_node=8 --nnodes=1 ./third_party/distributed/distributed/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
+✅ Triton and Torch match
+```
