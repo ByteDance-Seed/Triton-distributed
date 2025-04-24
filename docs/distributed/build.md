@@ -1,6 +1,6 @@
 # Build Triton-distributed
 
-#### The best practice to use Triton-distributed with the Nvidia backend:
+## The best practice to use Triton-distributed with the Nvidia backend:
 - Python 3.9 (suggest using virtual environment)
 - CUDA 12.4
 - Torch 2.4.1
@@ -8,7 +8,7 @@
 
 Dependencies with other versions may also work well, but this is not guaranteed. If you find any problem in installing, please tell us in Issues.
 
-#### Steps:
+### Steps:
 1. Clone Triton-distributed to your own path (e.g., `/home/Triton-distributed`)
 2. Update submodules
     ```sh
@@ -154,7 +154,7 @@ bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/t
 bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/test_moe_reduce_rs_intra_node.py 8192 2048 1536 32 2 --check
 ```
 
-#### To use Triton-distributed with the AMD backend:
+## To use Triton-distributed with the AMD backend:
 - Starting from the rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.4 Docker container
 #### Steps:
 1. Clone the repo
