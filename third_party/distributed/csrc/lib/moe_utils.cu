@@ -203,9 +203,13 @@ __global__ void __launch_bounds__(kNumThreads, 1)
   int tid = (threadIdx.x * blockDim.y * blockDim.z + threadIdx.y * blockDim.z +
              threadIdx.z);
   unsigned int counter;
-  __shared__ int32_t tokens_cnts_per_expert[kNumMaxExperts];
-  __shared__ int32_t tokens_cnts_per_thread[kNumThreads][kNumMaxExperts];
-  __shared__ int32_t tokens_cumsum_per_thread[kNumThreads][kNumMaxExperts];
+
+  extern __shared__ int32_t smem[];
+  using MaxExpertsArray = int32_t[kNumMaxExperts];
+
+  int32_t* tokens_cnts_per_expert = smem;
+  MaxExpertsArray* tokens_cnts_per_thread = reinterpret_cast<MaxExpertsArray*>(smem + kNumMaxExperts);
+  MaxExpertsArray* tokens_cumsum_per_thread = tokens_cnts_per_thread + kNumThreads;
 
   const size_t tokens_per_thread = CEILDIV(num_tokens_per_rank, nthreads);
   // each block calculate one rank
@@ -310,6 +314,11 @@ void moe_ag_scatter_align_block_size_parallel_op(
 
   constexpr int THREAD_NUM = 64;
   constexpr int MAX_EXPERT = 256;
+  constexpr int MAX_SMEM_BYTES = sizeof(int32_t) * (MAX_EXPERT + 2 * THREAD_NUM * MAX_EXPERT);
+
+#if defined(__CUDA_ARCH__) && !((__CUDA_ARCH__ == 800) || (__CUDA_ARCH__ >= 900))
+  #error "Unsupported __CUDA_ARCH__: only sm_80 (800) or sm_90+ are allowed";
+#endif
   int cta_num = num_ranks;
   dim3 grid_dim(cta_num);
   dim3 block_dim(THREAD_NUM);
@@ -323,8 +332,11 @@ void moe_ag_scatter_align_block_size_parallel_op(
              sizeof(unsigned int) * num_ranks * (num_experts + 1));
   CUDA_CHECK(cudaDeviceSynchronize());
 
+
+  cudaFuncSetAttribute(moe_ag_scatter_align_block_size_parallel_kernel<THREAD_NUM, MAX_EXPERT>, cudaFuncAttributeMaxDynamicSharedMemorySize, MAX_SMEM_BYTES);
+
   moe_ag_scatter_align_block_size_parallel_kernel<THREAD_NUM, MAX_EXPERT>
-      <<<grid_dim, block_dim, 0, (cudaStream_t)moe_stream>>>(
+      <<<grid_dim, block_dim, MAX_SMEM_BYTES, (cudaStream_t)moe_stream>>>(
           (int64_t *)topk_ids.data_ptr(), topk, num_experts, num_ranks,
           num_tokens_per_rank, block_size, expert_cumsum_per_rank, counter_d,
           (int32_t *)sorted_token_ids.data_ptr(),
