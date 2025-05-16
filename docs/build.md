@@ -156,4 +156,4 @@ bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/t
 # moe rs
 bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/test_moe_reduce_rs_intra_node.py 8192 2048 1536 32 2
 bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/test_moe_reduce_rs_intra_node.py 8192 2048 1536 32 2 --check
-``
+```
