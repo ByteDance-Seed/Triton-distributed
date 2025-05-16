@@ -9,6 +9,8 @@ else
   install_path=$1
 fi
 
+hip_cmake_path="/opt/rocm/lib/cmake/hip;/opt/rocm/lib/cmake/rocprim;/opt/rocm/lib/cmake/rocthrust"
+
 src_path=$(dirname "$(realpath $0)")/../../../3rdparty/rocshmem/
 
 cmake \
@@ -29,6 +31,7 @@ cmake \
     -DUSE_SINGLE_NODE=ON \
     -DUSE_HOST_SIDE_HDP_FLUSH=OFF \
     -DBUILD_LOCAL_GPU_TARGET_ONLY=ON \
+    -DCMAKE_PREFIX_PATH="$hip_cmake_path" \
     $src_path
 cmake --build . --parallel
 cmake --install .
