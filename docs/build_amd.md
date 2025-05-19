@@ -31,7 +31,6 @@ Dependencies with other versions may also work well, but this is not guaranteed.
 Make sure following repositories granted permission to clone submodules
 
 ```
-# /workspace/3rdparty/ point to the parent folder you cloned for `Triton-distributed`
 export TRITON_DIST_HOME=$(readlink -f `pwd`)
 
 git config --global --add safe.directory $TRITON_DIST_HOME/Triton-distributed/3rdparty/rocshmem
