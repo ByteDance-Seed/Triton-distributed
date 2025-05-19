@@ -46,5 +46,8 @@ def copy_apply_patches():
         for file in files:
             source_file = os.path.join(root, file)
             target_file = os.path.join(target_dir, file)
-            shutil.copy2(source_file, target_file)
+            try:
+                shutil.copy2(source_file, target_file)
+            except Exception:
+                shutil.copyfile(source_file, target_file)
             print(f"Copied {source_file} to {target_file}")
