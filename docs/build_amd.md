@@ -43,8 +43,6 @@ git submodule update --init --recursive
 
 > python3 python/setup.py build_ext
 
-![build_amd](../asset/build_amd_snapshot.png)
-
 ## Test
 
 Currently only single node build supported, multi-node build will be supported soon.
@@ -53,5 +51,3 @@ Currently only single node build supported, multi-node build will be supported s
   ```
   bash ./scripts/launch_amd.sh python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
   ```
-
-  ![build_amd](../asset/test_amd_single_node_build.png)
