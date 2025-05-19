@@ -32,9 +32,11 @@ Make sure following repositories granted permission to clone submodules
 
 ```
 # /workspace/3rdparty/ point to the parent folder you cloned for `Triton-distributed`
-git config --global --add safe.directory /workspace/3rdparty/Triton-distributed/3rdparty/rocshmem
-git config --global --add safe.directory /workspace/3rdparty/Triton-distributed/3rdparty/triton
-git config --global --add safe.directory /workspace/3rdparty/Triton-distributed
+export TRITON_DIST_HOME=$(readlink -f `pwd`)
+
+git config --global --add safe.directory $TRITON_DIST_HOME/Triton-distributed/3rdparty/rocshmem
+git config --global --add safe.directory $TRITON_DIST_HOME/Triton-distributed/3rdparty/triton
+git config --global --add safe.directory $TRITON_DIST_HOME/Triton-distributed
 
 git submodule update --init --recursive
 ```
