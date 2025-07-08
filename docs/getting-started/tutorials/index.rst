@@ -26,3 +26,8 @@ It is recommended that you first read the technique report, which contains desig
 9. [Overlapping]: `AllGather GEMM overlapping on AMD <http://https://github.com/ByteDance-Seed/Triton-distributed/blob/main/tutorials/09-AMD-overlapping-allgather-gemm.py>`_
 
 10. [Overlapping]: `GEMM ReduceScatter overlapping on AMD <http://https://github.com/ByteDance-Seed/Triton-distributed/blob/main/tutorials/10-AMD-overlapping-gemm-reduce-scatter.py>`_
+
+.. toctree::
+   :hidden:
+
+   /getting-started/tutorials/01-distributed-notify-wait
