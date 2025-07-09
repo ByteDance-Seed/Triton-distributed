@@ -31,3 +31,4 @@ It is recommended that you first read the technique report, which contains desig
    :hidden:
 
    /getting-started/tutorials/01-distributed-notify-wait
+   /getting-started/tutorials/02-intra-node-allgather
