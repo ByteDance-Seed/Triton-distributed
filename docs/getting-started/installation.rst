@@ -73,6 +73,7 @@ Steps:
    Then you can build Triton-distributed.
 
    .. code-block:: sh
+   
       # Remove triton installed with torch
       pip uninstall triton
       pip uninstall triton_dist # remove previous triton-dist
