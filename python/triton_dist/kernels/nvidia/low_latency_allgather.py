@@ -22,27 +22,26 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from triton_dist import pynvshmem
 import torch
-import torch.distributed
 from dataclasses import dataclass
 from typing import List
 
 import triton
 import triton.language as tl
-from triton.language.extra import libshmem_device
+from triton_dist.language.extra import libshmem_device
 
 from triton.language.extra.cuda.language_extra import (
     __syncthreads,
+    pack_b32_v2,
     tid,
     ntid,
     load_v4_u32,
     load_v2_b64,
-    store_v2_u32,
+    st_v2_u32,
     st,
     multimem_st_b64,
-    multimem_st_v2_b32,
 )
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 @triton.jit(do_not_specialize=["rank", "signal_target"])
@@ -543,7 +542,7 @@ def _recv_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
         data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
         while flag1 != ll_flag or flag2 != ll_flag:
             data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
-        store_v2_u32(dest_ptr + n * 2, data1, data2)
+        st_v2_u32(dest_ptr + n * 2, data1, data2)
 
 
 @triton.jit(do_not_specialize=["ll_flag"])
@@ -583,7 +582,7 @@ def _recv_ll_and_multimem_st_block(dest_ptr, src_ptr, num_ints, ll_flag):
         data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
         while flag1 != ll_flag or flag2 != ll_flag:
             data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
-        multimem_st_v2_b32(dest_mc_ptr + n * 2, data1, data2)
+        multimem_st_b64(dest_mc_ptr + n * 2, pack_b32_v2(data1, data2))
 
 
 @triton.jit(do_not_specialize=["ll_flag"])
@@ -602,8 +601,8 @@ def _recv_ll_and_multimem_st_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
         data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
         while flag1 != ll_flag or flag2 != ll_flag:
             data1, flag1, data2, flag2 = load_v4_u32(src_ptr + n * 4)
-        multimem_st_v2_b32(dest_mc_ptr + n * 4, data1, flag1)
-        multimem_st_v2_b32(dest_mc_ptr + n * 4 + 2, data2, flag2)
+        multimem_st_b64(dest_mc_ptr + n * 4, pack_b32_v2(data1, flag1))
+        multimem_st_b64(dest_mc_ptr + n * 4 + 2, pack_b32_v2(data2, flag2))
 
 
 @triton.jit
@@ -797,11 +796,16 @@ class FastAllGatherContext:
         self.num_nodes = num_nodes
         self.signal_target = signal_target
 
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.signal_tensor)
+        for ll_buffer in self.ll_buffers:
+            nvshmem_free_tensor_sync(ll_buffer)
+
 
 def create_fast_allgather_context(rank, node, num_ranks, num_nodes, max_buffer_size: int = 2 * 32 * 1024 * 1024):
-    signal_tensor = pynvshmem.nvshmem_create_tensor((num_ranks, ), torch.uint64)
+    signal_tensor = nvshmem_create_tensor((num_ranks, ), NVSHMEM_SIGNAL_DTYPE)
     signal_tensor.zero_()
-    ll_buffers = [pynvshmem.nvshmem_create_tensor((max_buffer_size, ), torch.int8) for _ in range(2)]
+    ll_buffers = [nvshmem_create_tensor((max_buffer_size, ), torch.int8) for _ in range(2)]
     grid_barrier = torch.zeros((1, ), dtype=torch.uint32, device="cuda")
 
     ctx = FastAllGatherContext(

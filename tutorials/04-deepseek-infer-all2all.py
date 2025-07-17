@@ -55,7 +55,7 @@ At the core of our implementation are low-level primitives that manage the commu
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/04-deepseek-infer-all2all.py
+    bash ./scripts/launch.sh ./tutorials/04-deepseek-infer-all2all.py
 
 """
 import os
@@ -66,10 +66,10 @@ import triton.language as tl
 import random
 import argparse
 
-from triton_dist import pynvshmem
-from triton.language.extra import libshmem_device
+import nvshmem.core
+from triton_dist.language.extra import libshmem_device
 from triton.language.extra.cuda.language_extra import tid
-from triton_dist.utils import dist_print, initialize_distributed
+from triton_dist.utils import dist_print, initialize_distributed, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 @triton.jit
@@ -432,18 +432,17 @@ if __name__ == "__main__":
     #   the number of tokens received by each expert for subsequent calculations and communication.
     #
     # 3. The signal buffer is used to notify the target rank that the data is already ready.
-    #   `pynvshmem.nvshmem_create_tensor` is the low-level API to create shared memory
+    #   `nvshmem_create_tensor` is the low-level API to create shared memory
     #   between different devices (see https://docs.nvidia.com/nvshmem/api/gen/mem-model.html#memory-model).
     #   `WORLD_SIZE * 2` is for double buffer.
     #
-    send_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([MAX_NUM_TOKENS, args.N], DTYPE)
-    recv_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * MAX_NUM_TOKENS * 2, args.N], DTYPE)
-    scale_send_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([MAX_NUM_TOKENS, NUM_GROUPS], torch.float32)
-    scale_recv_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * MAX_NUM_TOKENS * 2, NUM_GROUPS],
-                                                                   torch.float32)
-    split_send_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([args.G + WORLD_SIZE], torch.int32)
-    split_recv_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([(args.G + WORLD_SIZE) * 2], torch.int32)
-    signal_buf: torch.Tensor = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * 2], torch.uint64)
+    send_buf: torch.Tensor = nvshmem_create_tensor([MAX_NUM_TOKENS, args.N], DTYPE)
+    recv_buf: torch.Tensor = nvshmem_create_tensor([WORLD_SIZE * MAX_NUM_TOKENS * 2, args.N], DTYPE)
+    scale_send_buf: torch.Tensor = nvshmem_create_tensor([MAX_NUM_TOKENS, NUM_GROUPS], torch.float32)
+    scale_recv_buf: torch.Tensor = nvshmem_create_tensor([WORLD_SIZE * MAX_NUM_TOKENS * 2, NUM_GROUPS], torch.float32)
+    split_send_buf: torch.Tensor = nvshmem_create_tensor([args.G + WORLD_SIZE], torch.int32)
+    split_recv_buf: torch.Tensor = nvshmem_create_tensor([(args.G + WORLD_SIZE) * 2], torch.int32)
+    signal_buf: torch.Tensor = nvshmem_create_tensor([WORLD_SIZE * 2], NVSHMEM_SIGNAL_DTYPE)
     #####################
 
     act_pos = 1
@@ -534,11 +533,17 @@ if __name__ == "__main__":
             dist_print(f"❌ Round-{round} combine check failed! {e}")
             raise e
 
-    del send_buf
-    del recv_buf
-    del scale_send_buf
-    del scale_recv_buf
-    del split_send_buf
-    del split_recv_buf
-    del signal_buf
+    nvshmem_free_tensor_sync(send_buf)
+    nvshmem_free_tensor_sync(recv_buf)
+    nvshmem_free_tensor_sync(scale_send_buf)
+    nvshmem_free_tensor_sync(scale_recv_buf)
+    nvshmem_free_tensor_sync(split_send_buf)
+    nvshmem_free_tensor_sync(split_recv_buf)
+    nvshmem_free_tensor_sync(signal_buf)
+
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()
+
+# To run this tutorial
+# source ./scripts/sentenv.sh
+# bash ./scripts/launch.sh tutorials/04-deepseek-infer-all2all.py

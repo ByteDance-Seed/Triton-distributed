@@ -9,7 +9,7 @@ num_ranks(axis=-1, _builder=None)
 symm_at(ptr, rank, _builder=None)
 
 ```
-##### Singal Control Primitives
+##### Signal Control Primitives
 ```py
 wait(barrierPtrs, numBarriers, scope: str, semantic: str, _builder=None)
 consume_token(value, token, _builder=None)

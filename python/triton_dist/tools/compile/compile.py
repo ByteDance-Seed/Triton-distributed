@@ -177,6 +177,21 @@ def _make_const_sig(src: triton.compiler.ASTSource) -> str:
     return "x".join([str(v) for v in constants])
 
 
+def get_global_scratch_def(ccinfo: triton.compiler.CompiledKernel) -> str:
+    global_scratch_size = ccinfo.metadata.global_scratch_size
+    res = "CUdeviceptr global_scratch = 0"
+    if global_scratch_size > 0:
+        res += f";\nCUDA_CHECK(cuMemAlloc(&global_scratch,{global_scratch_size}))"
+    return res
+
+
+def get_exit_cleanup(ccinfo: triton.compiler.CompiledKernel) -> str:
+    if ccinfo.metadata.global_scratch_size > 0:
+        return "CUDA_CHECK(cuMemFree(global_scratch))"
+    else:
+        return ""
+
+
 def materialize_c_params(
     kernel,
     hints,
@@ -228,10 +243,14 @@ def materialize_c_params(
             f"{ty_to_cpp(signature[i])} {kernel.arg_names[i]}" for i in signature.keys()
             if not src.fn.params[i].is_constexpr
         ]),
+        "global_scratch_def":
+        get_global_scratch_def(ccinfo),
+        "exit_cleanup":
+        get_exit_cleanup(ccinfo),
         "arg_pointers":
-        ", ".join([f"&{arg}" for arg in arg_names]),
+        ", ".join([f"&{arg}" for arg in arg_names] + ["&global_scratch"]),
         "num_args":
-        len(arg_names),
+        len(arg_names) + 1,
         "kernel_docstring":
         doc_string,
         "shared":

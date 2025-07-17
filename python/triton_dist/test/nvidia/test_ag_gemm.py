@@ -22,23 +22,16 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-from triton_dist.autotuner import contextual_autotune
-from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
-
 import argparse
 import os
 import sys
-import datetime
-import numpy as np
 
-from triton_dist import pynvshmem
+import nvshmem.core
+import torch
 
-from triton_dist.utils import (
-    perf_func,
-    dist_print,
-    group_profile,
-)
+from triton_dist.autotuner import contextual_autotune
+from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
+from triton_dist.utils import (assert_allclose, dist_print, group_profile, initialize_distributed, perf_func, TP_GROUP)
 
 ALL_TESTS = {}
 
@@ -93,8 +86,9 @@ def test_ag_gemm(args, autotune=False):
     B = torch.randn([N_per_rank, K], dtype=dtype, device=device)
 
     debug = args.debug
-
-    ctx = create_ag_gemm_context(A, B, rank, num_ranks, max_M=M, for_correctness=debug)
+    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+    ctx = create_ag_gemm_context(A, B, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE, max_M=M,
+                                 for_correctness=debug)
     if rank == 0:
         print(f"all gather with: {ctx.all_gather_method}")
 
@@ -112,12 +106,12 @@ def test_ag_gemm(args, autotune=False):
         os.environ["TRITON_ALWAYS_COMPILE"] = "0"
         os.environ["MLIR_ENABLE_DUMP"] = "0"
 
-    with group_profile("ag_gemm_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=TP_GROUP):
+    with group_profile("ag_gemm_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=args.default_group):
         for i in range(5):
             # every time, use a new input data to check correctness
             A.random_()
             B.random_()
-            ctx.workspace_tensor[:M].random_()
+            ctx.symm_workspace[:M].random_()
             C = func()
 
     ag_A = torch.empty([M, K], dtype=dtype, device=device)
@@ -131,16 +125,7 @@ def test_ag_gemm(args, autotune=False):
         torch.distributed.barrier(args.default_group)
         if rank == i:
             print(f"Rank {rank}")
-            if not torch.allclose(C_golden, C, atol=1e-3, rtol=1e-3):
-                print("Golden")
-                print(C_golden)
-                print("Output")
-                print(C)
-                print("Max diff", torch.max(torch.abs(C_golden - C)))
-                print("Avg diff", torch.mean(torch.abs(C_golden - C)))
-                print("Wrong Answer!")
-            else:
-                print("Pass!")
+            assert_allclose(C_golden, C, atol=1e-3, rtol=1e-3)
 
 
 register_test("correctness_autotune")(lambda args: test_ag_gemm(args, autotune=True))
@@ -179,11 +164,9 @@ def test_perf_ag_gemm_tma(args, autotune=False):
     B = torch.randn([N_per_rank, K], dtype=dtype, device=device)
 
     ag_intranode_stream = torch.cuda.Stream(priority=-1)
-    gemm_stream = torch.cuda.Stream()
 
     ctx = create_ag_gemm_context(A, B, rank, num_ranks, max_M=M, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                 stages=stages, for_correctness=False, ag_intranode_stream=ag_intranode_stream,
-                                 gemm_stream=gemm_stream)
+                                 stages=stages, for_correctness=False, ag_intranode_stream=ag_intranode_stream)
 
     def func():
         return ag_gemm(A, B, ctx=ctx, persistent=args.persistent, autotune=autotune)
@@ -195,7 +178,7 @@ def test_perf_ag_gemm_tma(args, autotune=False):
     C, duration_ms = perf_func(func, iters=10, warmup_iters=5)
     dist_print(f"rank{RANK}: {duration_ms:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
-    with group_profile("ag_gemm_perf_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=TP_GROUP):
+    with group_profile("ag_gemm_perf_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=args.default_group):
         for i in range(20):
             func()
     ag_A = torch.empty([M, K], dtype=dtype, device=device)
@@ -216,30 +199,7 @@ if __name__ == "__main__":
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.manual_seed(3 + RANK)
-    torch.cuda.manual_seed_all(3 + RANK)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + RANK)
-
-    current_stream = torch.cuda.current_stream()
-    torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    initialize_distributed()
 
     args = get_args()
     if torch.cuda.get_device_capability() < (9, 0):
@@ -247,7 +207,7 @@ if __name__ == "__main__":
             print("Persistent is not supported on device with capability < (9, 0). exit...")
             sys.exit()
 
-    args.default_group = TP_GROUP
+    args.default_group = TP_GROUP()
     args.rank = RANK
     args.num_ranks = WORLD_SIZE
     if args.list:
@@ -256,4 +216,5 @@ if __name__ == "__main__":
     func = ALL_TESTS[args.case]
     func(args)
 
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

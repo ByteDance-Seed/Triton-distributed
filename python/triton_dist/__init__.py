@@ -26,3 +26,4 @@
 # forward import torch to load libtorch_cpu.so and libtorch_cuda.so
 import torch  # noqa: F401
 # yapf: enable
+from . import language  # noqa: F401

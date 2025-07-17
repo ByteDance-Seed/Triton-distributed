@@ -35,7 +35,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/05-intra-node-reduce-scatter.py
+    bash ./scripts/launch.sh ./tutorials/05-intra-node-reduce-scatter.py
 
 """
 
@@ -43,14 +43,12 @@ import torch
 import triton
 import triton.language as tl
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block
-from triton_dist.utils import p2p_native_atomic_required
+from triton_dist.utils import nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync, p2p_native_atomic_required, nvshmem_create_tensor
 from typing import List, Optional
-from triton_dist import pynvshmem
 import triton_dist
+import nvshmem.core
 
 import os
-
-SIGNAL_DTYPE = torch.uint64
 
 ################### triton kernel ####################
 
@@ -226,23 +224,26 @@ if __name__ == "__main__":
 
     input = torch.rand((M, N), dtype=dtype).cuda()
 
-    scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([M, N], dtype)
-    sync_buf = pynvshmem.nvshmem_create_tensor([
-        LOCAL_WORLD_SIZE,
-    ], torch.int32)
-    sync_buf.fill_(0)
+    symm_scatter_bufs = nvshmem_create_tensors([M, N], dtype, RANK, LOCAL_WORLD_SIZE)
+    symm_sync_buf = nvshmem_create_tensor((LOCAL_WORLD_SIZE, ), dtype=torch.int32)
+    symm_sync_buf.fill_(0)
 
     torch_output = torch_rs(input, TP_GROUP)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
-    dist_triton_output = reducer_scatter_intra_node(input, scatter_bufs, sync_buf, LOCAL_RANK, LOCAL_WORLD_SIZE)
+    dist_triton_output = reducer_scatter_intra_node(input, symm_scatter_bufs, symm_sync_buf, LOCAL_RANK,
+                                                    LOCAL_WORLD_SIZE)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     torch.cuda.synchronize()
 
     atol, rtol = 6e-2, 6e-2
     torch.testing.assert_close(torch_output, dist_triton_output, atol=atol, rtol=rtol)
     torch.cuda.synchronize()
     print(f"RANK {LOCAL_RANK}: pass!")
+
+    nvshmem_free_tensor_sync(symm_sync_buf)
+    nvshmem_free_tensor_sync(symm_scatter_bufs[LOCAL_RANK])
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

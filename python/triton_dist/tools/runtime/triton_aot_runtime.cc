@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <map>
 #include <mutex>
+#include <stdio.h>
 
 #ifdef __cplusplus
 #define TRITON_DIST_EXTERN extern "C" __attribute__((visibility("hidden")))

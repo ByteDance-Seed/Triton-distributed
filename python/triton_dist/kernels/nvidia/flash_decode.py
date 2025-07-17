@@ -999,6 +999,7 @@ def gqa_fwd_batch_decode_persistent(q, k_cache, v_cache, workspace, q_lens, kv_l
         v_head_dim,
         num_warps=8,
         num_stages=2,
+        launch_cooperative_grid=True,
     )
 
     return output_combine

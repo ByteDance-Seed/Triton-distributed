@@ -22,29 +22,24 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-import random
-
-from triton_dist.kernels.nvidia import create_gemm_rs_context, gemm_rs
-
 import argparse
 import os
-from typing import Optional
-import datetime
-import numpy as np
-
+import random
 from functools import partial
+from typing import Optional
 
-from triton_dist import pynvshmem
+import torch
 
-from triton_dist.utils import (generate_data, perf_func, dist_print, group_profile, assert_allclose)
+from triton_dist.kernels.nvidia import create_gemm_rs_context, gemm_rs
+from triton_dist.utils import (assert_allclose, dist_print, generate_data, group_profile, initialize_distributed,
+                               nvshmem_barrier_all_on_stream, perf_func, finalize_distributed, TP_GROUP)
 
 
 def torch_gemm_rs(
     input: torch.Tensor,  # [M, local_k]
     weight: torch.Tensor,  # [N, local_K]
     bias: Optional[torch.Tensor],
-    TP_GROUP,
+    tp_group,
 ):
     M, local_K = input.shape
     N = weight.shape[0]
@@ -52,7 +47,7 @@ def torch_gemm_rs(
     if bias:
         output = output + bias
     rs_output = torch.empty((M // WORLD_SIZE, N), dtype=output.dtype, device=input.device)
-    torch.distributed.reduce_scatter_tensor(rs_output, output, group=TP_GROUP)
+    torch.distributed.reduce_scatter_tensor(rs_output, output, group=tp_group)
     return rs_output
 
 
@@ -67,6 +62,8 @@ class GemmRS(torch.nn.Module):
         input_dtype: torch.dtype,
         output_dtype: torch.dtype,
         local_world_size: int = -1,
+        persistent: bool = True,
+        fuse_scatter: bool = False,
     ):
         super().__init__()
         self.tp_group = tp_group
@@ -85,17 +82,18 @@ class GemmRS(torch.nn.Module):
 
         self.ctx = create_gemm_rs_context(max_M, N, self.rank, self.world_size, self.local_world_size, output_dtype,
                                           self.rs_stream)
+        self.fuse_scatter = fuse_scatter
+        self.persistent = persistent
 
     def forward(
         self,
         input: torch.Tensor,  # [M, local_K]
         weight: torch.Tensor,  # [N, local_K]
         bias: Optional[torch.Tensor] = None,
-        persistent: bool = True,
     ):
         assert input.shape[0] <= self.max_M and weight.shape[0] == self.N
 
-        return gemm_rs(input, weight, self.ctx, persistent)
+        return gemm_rs(input, weight, self.ctx, self.persistent, self.fuse_scatter)
 
 
 DTYPE_MAP = {
@@ -130,6 +128,8 @@ def parse_args():
     parser.add_argument("--persistent", action=argparse.BooleanOptionalAction,
                         default=torch.cuda.get_device_capability() >= (9, 0))
 
+    parser.add_argument("--fuse_scatter", action=argparse.BooleanOptionalAction, default=False)
+
     parser.add_argument(
         "--transpose_weight",
         dest="transpose_weight",
@@ -145,52 +145,29 @@ def parse_args():
 
 if __name__ == "__main__":
     # init
-    args = parse_args()
-
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 
     torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
 
+    args = parse_args()
+    initialize_distributed(args.seed)
     if torch.cuda.get_device_capability()[0] < 9:
         assert not args.persistent, "persistent is not supported on cuda < 9.0"
-
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.manual_seed(3 + RANK)
-    torch.cuda.manual_seed_all(3 + RANK)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + RANK)
-    random.seed(args.seed)
-
-    torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
 
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype
     atol = THRESHOLD_MAP[output_dtype]
     rtol = THRESHOLD_MAP[output_dtype]
 
-    assert args.M % TP_GROUP.size() == 0
-    assert args.K % TP_GROUP.size() == 0
-    local_K = args.K // TP_GROUP.size()
+    assert args.M % WORLD_SIZE == 0
+    assert args.K % WORLD_SIZE == 0
+    local_K = args.K // WORLD_SIZE
 
-    scale = TP_GROUP.rank() + 1
+    scale = RANK + 1
+    tp_group = TP_GROUP()
 
     def _make_data(M):
         data_config = [
@@ -203,7 +180,8 @@ if __name__ == "__main__":
         input, weight, bias = next(generator)
         return input, weight, bias
 
-    gemm_rs_op = GemmRS(TP_GROUP, args.M, args.N, args.K, input_dtype, output_dtype, LOCAL_WORLD_SIZE)
+    gemm_rs_op = GemmRS(tp_group, args.M, args.N, args.K, input_dtype, output_dtype, LOCAL_WORLD_SIZE, args.persistent,
+                        args.fuse_scatter)
 
     if args.check:
         for n in range(args.iters):
@@ -215,38 +193,35 @@ if __name__ == "__main__":
 
             # torch impl
             for input, weight, bias in input_list:
-                torch_out = torch_gemm_rs(
-                    input,
-                    weight,
-                    bias,
-                    TP_GROUP,
-                )
+                torch_out = torch_gemm_rs(input, weight, bias, tp_group)
                 torch_out_list.append(torch_out)
 
             # dist triton impl
             for input, weight, bias in input_list:
-                dist_out = gemm_rs_op.forward(input, weight, bias, args.persistent)
+                dist_out = gemm_rs_op.forward(input, weight, bias)
                 dist_out_list.append(dist_out)
             # verify
             for idx, (torch_out, dist_out) in enumerate(zip(torch_out_list, dist_out_list)):
                 assert_allclose(torch_out, dist_out, atol=atol, rtol=rtol, verbose=False)
         print(f"RANK[{RANK}]: pass.")
+
+        gemm_rs_op.ctx.finalize()
+        finalize_distributed()
         exit(0)
 
     input, weight, bias = _make_data(args.M)
     with group_profile(f"gemm_rs_{args.M}x{args.N}x{args.K}_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile,
-                       group=TP_GROUP):
-        torch_output, torch_perf = perf_func(partial(torch_gemm_rs, input, weight, bias, TP_GROUP), iters=args.iters,
+                       group=tp_group):
+        torch_output, torch_perf = perf_func(partial(torch_gemm_rs, input, weight, bias, tp_group), iters=args.iters,
                                              warmup_iters=args.warmup)
 
-        pynvshmem.nvshmem_barrier_all()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         torch.cuda.synchronize()
 
-        dist_triton_output, dist_triton_perf = perf_func(
-            partial(gemm_rs_op.forward, input, weight, bias, args.persistent), iters=args.iters,
-            warmup_iters=args.warmup)
+        dist_triton_output, dist_triton_perf = perf_func(partial(gemm_rs_op.forward, input, weight, bias),
+                                                         iters=args.iters, warmup_iters=args.warmup)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     torch.cuda.synchronize()
 
     atol, rtol = THRESHOLD_MAP[input_dtype], THRESHOLD_MAP[input_dtype]
@@ -256,4 +231,5 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
-    torch.distributed.destroy_process_group()
+    gemm_rs_op.ctx.finalize()
+    finalize_distributed()

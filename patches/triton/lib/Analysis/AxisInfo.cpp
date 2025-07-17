@@ -8,9 +8,12 @@
 
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
-#include "Dialect/Distributed/IR/Dialect.h"
+#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "axis-info"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -55,28 +58,6 @@ int64_t multiplyDivisor(int64_t lhs, int64_t rhs) {
     return maxDivisor;
   return lhs * rhs;
 }
-
-class AxisInfoVisitor {
-public:
-  AxisInfoVisitor() = default;
-  virtual ~AxisInfoVisitor() = default;
-
-  static bool isContiguousDim(const AxisInfo &info, ArrayRef<int64_t> shape,
-                              int dim) {
-    return info.getContiguity(dim) == shape[dim];
-  }
-
-  static bool isConstantDim(const AxisInfo &info, ArrayRef<int64_t> shape,
-                            int dim) {
-    return info.getConstancy(dim) == shape[dim];
-  }
-
-  virtual AxisInfo
-  getAxisInfo(Operation *op,
-              ArrayRef<const dataflow::Lattice<AxisInfo> *> operands) = 0;
-
-  virtual bool match(Operation *op) = 0;
-};
 
 // Base class for all operations
 template <typename OpTy> class AxisInfoVisitorImpl : public AxisInfoVisitor {
@@ -151,25 +132,6 @@ protected:
   }
 };
 
-class AxisInfoVisitorList {
-public:
-  template <typename... Ts, typename = std::enable_if_t<sizeof...(Ts) != 0>>
-  void append() {
-    (visitors.emplace_back(std::make_unique<Ts>()), ...);
-  }
-
-  AxisInfo apply(Operation *op,
-                 ArrayRef<const dataflow::Lattice<AxisInfo> *> operands) {
-    for (auto &visitor : visitors)
-      if (visitor->match(op))
-        return visitor->getAxisInfo(op, operands);
-    return AxisInfo();
-  }
-
-private:
-  std::vector<std::unique_ptr<AxisInfoVisitor>> visitors;
-};
-
 class AxisInfoAnalysis : public dataflow::SparseForwardDataFlowAnalysis<
                              dataflow::Lattice<AxisInfo>> {
 private:
@@ -197,7 +159,8 @@ private:
   }
 
 public:
-  AxisInfoAnalysis(DataFlowSolver &solver);
+  AxisInfoAnalysis(DataFlowSolver &solver,
+                   axisinfo::CallbackType callback = nullptr);
   using dataflow::SparseForwardDataFlowAnalysis<
       dataflow::Lattice<AxisInfo>>::getLatticeElement;
   using FuncAxisInfoMapT = DenseMap<FunctionOpInterface, AxisInfo>;
@@ -472,6 +435,13 @@ private:
     if (rhs.getConstantValue().has_value() &&
         rhs.getConstantValue().value() == 1)
       return lhs.getDivisibility(dim);
+    // Case 3: lhs has contiguity of 1 in this dimension and rhs is a power of 2
+    if (rhs.getConstantValue().has_value() &&
+        llvm::isPowerOf2_64(std::abs(rhs.getConstantValue().value())) &&
+        lhs.getContiguity(dim) == 1) {
+      int64_t absRhs = std::abs(rhs.getConstantValue().value());
+      return std::max<int64_t>(1, lhs.getDivisibility(dim) / absRhs);
+    }
     // otherwise: return 1
     return 1;
   }
@@ -1040,7 +1010,8 @@ public:
 // AxisInfoAnalysis
 //===----------------------------------------------------------------------===//
 
-AxisInfoAnalysis::AxisInfoAnalysis(DataFlowSolver &solver)
+AxisInfoAnalysis::AxisInfoAnalysis(DataFlowSolver &solver,
+                                   axisinfo::CallbackType callback)
     : dataflow::SparseForwardDataFlowAnalysis<dataflow::Lattice<AxisInfo>>(
           solver) {
   // UnrealizedConversionCast:
@@ -1082,6 +1053,9 @@ AxisInfoAnalysis::AxisInfoAnalysis(DataFlowSolver &solver)
   // Distributed ops
   visitors
       .append<BarrierOpAxisInfoVisitor<triton::distributed::ConsumeTokenOp>>();
+
+  if (callback)
+    callback(visitors);
 }
 
 LogicalResult AxisInfoAnalysis::visitOperation(
@@ -1351,9 +1325,10 @@ unsigned ModuleAxisInfoAnalysis::getMaskAlignment(Value mask) {
   return alignment;
 }
 
-void ModuleAxisInfoAnalysis::initialize(FunctionOpInterface funcOp) {
+void ModuleAxisInfoAnalysis::initialize(FunctionOpInterface funcOp,
+                                        axisinfo::CallbackType callback) {
   std::unique_ptr<DataFlowSolver> solver = createDataFlowSolver();
-  AxisInfoAnalysis *analysis = solver->load<AxisInfoAnalysis>();
+  AxisInfoAnalysis *analysis = solver->load<AxisInfoAnalysis>(callback);
   // Walk pre-order so analysis results can be propagated into nested isolated
   // regions.
   WalkResult result =

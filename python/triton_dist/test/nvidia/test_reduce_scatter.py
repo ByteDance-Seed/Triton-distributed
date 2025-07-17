@@ -26,15 +26,15 @@ import argparse
 import datetime
 import os
 
+import nvshmem.core
 import torch
 import torch.distributed
 
-from triton_dist import pynvshmem
 from triton_dist.kernels.nvidia.reduce_scatter import (create_reduce_scater_2d_ctx, reduce_scatter_2d_op,
                                                        reduce_scatter_ring_push_1d_intra_node_ce,
                                                        reduce_scatter_ring_push_1d_intra_node_sm,
                                                        reduce_scatter_ring_push_1d_intra_node_sm_rma)
-from triton_dist.utils import group_profile, perf_func, assert_allclose
+from triton_dist.utils import assert_allclose, group_profile, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_create_tensor, perf_func, sleep_async
 
 
 def fill_random(tensor: torch.Tensor):
@@ -51,18 +51,24 @@ def test_reduce_scatter_ring_push_1d_intra_node(M_per_rank, N, dtype: torch.dtyp
 
     M = M_per_rank * WORLD_SIZE
 
-    input_tensor = pynvshmem.nvshmem_create_tensor((M, N), dtype)
+    input_tensor = nvshmem_create_tensor((M, N), dtype)
     fill_random(input_tensor)
     if debug:
         input_tensor.fill_(RANK + 1)
-    symm_reduce_buffers = pynvshmem.nvshmem_create_tensor_list_intra_node((M, N), dtype)
+
+    symm_reduce_buffers = nvshmem_create_tensors((M, N), dtype, RANK, LOCAL_WORLD_SIZE)
+    symm_reduce_buffer = symm_reduce_buffers[LOCAL_RANK]
+
     input_flag = torch.ones((WORLD_SIZE, ), device="cuda", dtype=torch.int32)
-    symm_reduce_flags = pynvshmem.nvshmem_create_tensor_list_intra_node((WORLD_SIZE, ), torch.int32)
-    symm_reduce_flags[LOCAL_RANK].zero_()
+
+    symm_reduce_flags = nvshmem_create_tensors((WORLD_SIZE, ), torch.int32, RANK, LOCAL_WORLD_SIZE)
+    symm_reduce_flag = symm_reduce_flags[LOCAL_RANK]
+    symm_reduce_flag.zero_()
+
     if method != "ce":
         grid_barrier = torch.zeros((1, ), device="cuda", dtype=torch.int32)
 
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     ref_output = torch.empty((M_per_rank, N), dtype=dtype).cuda()
     torch.distributed.reduce_scatter_tensor(ref_output, input_tensor, group=TP_GROUP)
@@ -83,8 +89,8 @@ def test_reduce_scatter_ring_push_1d_intra_node(M_per_rank, N, dtype: torch.dtyp
                 WORLD_SIZE,
                 input_tensor,
                 input_flag,
-                symm_reduce_buffers[LOCAL_RANK],
-                symm_reduce_flags[LOCAL_RANK],
+                symm_reduce_buffer,
+                symm_reduce_flag,
                 grid_barrier,
                 num_sms=8,
             )
@@ -94,20 +100,20 @@ def test_reduce_scatter_ring_push_1d_intra_node(M_per_rank, N, dtype: torch.dtyp
                 WORLD_SIZE,
                 input_tensor,
                 input_flag,
-                symm_reduce_buffers[LOCAL_RANK],
-                symm_reduce_flags[LOCAL_RANK],
+                symm_reduce_buffer,
+                symm_reduce_flag,
                 grid_barrier,
                 num_sms=8,
             )
         else:
             raise Exception(f"Unsupported method {method}")
 
-        symm_reduce_flags[LOCAL_RANK].zero_()
-        pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+        symm_reduce_flag.zero_()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         return output
 
     output = _reduce_scatter_fn()
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     try:
         assert_allclose(output, ref_output, atol=0, rtol=0)
@@ -121,8 +127,8 @@ def test_reduce_scatter_ring_push_1d_intra_node(M_per_rank, N, dtype: torch.dtyp
     else:
         print(f"✅ RANK[{RANK}] check passed")
 
-    pynvshmem.nvshmem_barrier_all()
-    torch.cuda._sleep(1000000000)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+    sleep_async(1000)
     _run_id = os.environ.get("TORCHELASTIC_RUN_ID")
     with group_profile(f"reduce_scatter_1d_{method}_{M}x{N}_{_run_id}", group=TP_GROUP, do_prof=profile):
         _, duration_ms = perf_func(_reduce_scatter_fn, iters, warmup_iters)
@@ -141,7 +147,7 @@ def test_reduce_scatter_2d_op(M_per_rank, N, dtype, profile, warmup_iters=30, it
     torch.distributed.reduce_scatter_tensor(ref_output, input_tensor, group=TP_GROUP)
     ctx = create_reduce_scater_2d_ctx(M, N, RANK, WORLD_SIZE, LOCAL_WORLD_SIZE, dtype, overlap_with_gemm=True)
     ctx.scatter_signal_buf.fill_(1)
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     def _reduce_scatter_fn():
         output = reduce_scatter_2d_op(input_tensor, ctx)
@@ -163,7 +169,7 @@ def test_reduce_scatter_2d_op(M_per_rank, N, dtype, profile, warmup_iters=30, it
 
     _run_id = os.environ.get("TORCHELASTIC_RUN_ID")
     with group_profile(f"reduce_scatter_2d_{M}x{N}_{_run_id}", group=TP_GROUP, do_prof=profile):
-        torch.cuda._sleep(1000000000)  # in case CPU bound
+        sleep_async(1000)  # in case CPU bound
         _, duration_ms = perf_func(_reduce_scatter_fn, iters, warmup_iters)
 
     gbps = (lambda ms: input_tensor.nbytes * 1e-9 / (ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE)
@@ -206,7 +212,7 @@ if __name__ == "__main__":
     iters = args.iters
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     if LOCAL_WORLD_SIZE == WORLD_SIZE:
         for method in ["ce", "sm", "sm_rma"]:
@@ -219,4 +225,5 @@ if __name__ == "__main__":
                               debug=args.debug)
     torch.cuda.synchronize()
 
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

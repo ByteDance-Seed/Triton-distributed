@@ -23,19 +23,20 @@
 #
 ################################################################################
 
-import torch
-from typing import List, Optional
-
 import argparse
+import datetime
 import os
 import sys
-from cuda import cuda, cudart
-import datetime
+from typing import List, Optional
+
 import numpy as np
-from triton_dist import pynvshmem
+import torch
+from cuda import cuda, cudart
+import nvshmem.core
 
 from triton_dist.layers.nvidia import SpGQAFlashDecodeAttention
-from triton_dist.utils import perf_func, group_profile, dist_print
+from triton_dist.utils import (dist_print, group_profile, init_nvshmem_by_torch_process_group,
+                               nvshmem_barrier_all_on_stream, perf_func, sleep_async)
 
 ALL_TESTS = {}
 
@@ -249,7 +250,7 @@ def perf_decode(args):
                                            head_size, head_size, page_size=block_size, scale=scale, soft_cap=soft_cap,
                                            max_allowed_batch=1, thrink_buffer_threshold=500)
         torch.cuda.synchronize()
-        pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
         def func():
             return ths_op(query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor,
@@ -257,10 +258,10 @@ def perf_decode(args):
 
         perf_func(func, iters=100, warmup_iters=20)
 
-        pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
         with group_profile(f"sp_flash_decode_kv{kv_len_per_rank}", do_prof=args.profile, group=TP_GROUP):
-            torch.cuda._sleep(1000000000)  # in case CPU bound
+            sleep_async(1000)  # in case CPU bound
             _, time_ms = perf_func(
                 func,
                 warmup_iters=20,
@@ -300,7 +301,7 @@ if __name__ == "__main__":
 
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     args = get_args()
     args.default_group = TP_GROUP
@@ -314,4 +315,5 @@ if __name__ == "__main__":
     func = ALL_TESTS[args.case]
     func(args)
 
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

@@ -27,7 +27,6 @@ import torch
 
 import ctypes
 
-from triton_dist import pynvshmem
 from triton_dist.kernels.nvidia.ep_a2a import (
     kernel_combine_token,
     kernel_dispatch_token,
@@ -35,6 +34,7 @@ from triton_dist.kernels.nvidia.ep_a2a import (
     get_dispatch_send_reqs_for_target_node,
     get_ag_splits_and_recv_offset_for_dispatch,
 )
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 class EPAll2AllLayer(torch.nn.Module):
@@ -73,29 +73,25 @@ class EPAll2AllLayer(torch.nn.Module):
         self.node_id = self.rank // self.local_world_size
 
         # for dispatch
-        self.send_reqs_for_nodes = pynvshmem.nvshmem_create_tensor([self.nnodes, 2, max_tokens], self.offset_dtype)
+        self.send_reqs_for_nodes = nvshmem_create_tensor([self.nnodes, 2, max_tokens], self.offset_dtype)
         self.send_reqs_for_nodes.fill_(-1)
-        self.send_reqs_recv_bufs = pynvshmem.nvshmem_create_tensor([self.nnodes, 2, max_tokens], self.offset_dtype)
+        self.send_reqs_recv_bufs = nvshmem_create_tensor([self.nnodes, 2, max_tokens], self.offset_dtype)
         self.send_reqs_recv_bufs.fill_(-1)
         self.Alignment = 1024
 
         avg_tokens = max_tokens * topk
 
-        self.send_buf = pynvshmem.nvshmem_create_tensor([self.nnodes, max_tokens, hidden], dtype)
-        self.output_buf = pynvshmem.nvshmem_create_tensor([avg_tokens * 2, hidden], dtype)
-        self.signal_buf = pynvshmem.nvshmem_create_tensor([
-            world_size,
-        ], torch.uint64)
+        self.send_buf = nvshmem_create_tensor([self.nnodes, max_tokens, hidden], dtype)
+        self.output_buf = nvshmem_create_tensor([avg_tokens * 2, hidden], dtype)
+        self.signal_buf = nvshmem_create_tensor((world_size, ), NVSHMEM_SIGNAL_DTYPE)
         self.signal_buf.fill_(0)
-        self.top_indices_buf = pynvshmem.nvshmem_create_tensor([self.nnodes, max_tokens, topk], self.offset_dtype)
+        self.top_indices_buf = nvshmem_create_tensor([self.nnodes, max_tokens, topk], self.offset_dtype)
         self.counter = torch.zeros((self.nnodes, ), dtype=torch.int32).cuda()
         # dispatch preprocess, use push mode to reduce barrier_all
-        self.local_splits_buf = pynvshmem.nvshmem_create_tensor([self.num_tot_experts], self.offset_dtype)
+        self.local_splits_buf = nvshmem_create_tensor([self.num_tot_experts], self.offset_dtype)
         self.local_splits_buf.fill_(0)
-        self.full_splits_buf = pynvshmem.nvshmem_create_tensor([world_size, num_tot_experts], self.offset_dtype)
-        self.splits_signal_buf = pynvshmem.nvshmem_create_tensor([
-            world_size,
-        ], torch.uint64)
+        self.full_splits_buf = nvshmem_create_tensor([world_size, num_tot_experts], self.offset_dtype)
+        self.splits_signal_buf = nvshmem_create_tensor((world_size, ), NVSHMEM_SIGNAL_DTYPE)
         self.splits_signal_buf.fill_(0)
         self.cpu_default_val = -1
 
@@ -105,7 +101,19 @@ class EPAll2AllLayer(torch.nn.Module):
         self.num_dispatch_token_cur_rank = None  # save in dispatch stage
         self.num_input_tokens_per_rank = None
 
-        self.intra_node_reduce_buf = pynvshmem.nvshmem_create_tensor([self.nnodes, max_tokens, hidden], dtype)
+        self.intra_node_reduce_buf = nvshmem_create_tensor([self.nnodes, max_tokens, hidden], dtype)
+
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.send_reqs_for_nodes)
+        nvshmem_free_tensor_sync(self.send_reqs_recv_bufs)
+        nvshmem_free_tensor_sync(self.send_buf)
+        nvshmem_free_tensor_sync(self.output_buf)
+        nvshmem_free_tensor_sync(self.signal_buf)
+        nvshmem_free_tensor_sync(self.top_indices_buf)
+        nvshmem_free_tensor_sync(self.local_splits_buf)
+        nvshmem_free_tensor_sync(self.full_splits_buf)
+        nvshmem_free_tensor_sync(self.splits_signal_buf)
+        nvshmem_free_tensor_sync(self.intra_node_reduce_buf)
 
     def preprocess(self, input: torch.Tensor, exp_indices: torch.Tensor):
         token_node_idx = exp_indices // (self.experts_per_rank * self.local_world_size)
@@ -180,7 +188,7 @@ class EPAll2AllLayer(torch.nn.Module):
         if max_output_token_num > self.output_buf.shape[0]:
             torch.distributed.barrier()
             alloc_token = (max_output_token_num + self.Alignment - 1) // self.Alignment * self.Alignment * 2
-            self.output_buf = pynvshmem.nvshmem_create_tensor([alloc_token, self.hidden], self.dtype)
+            self.output_buf = nvshmem_create_tensor([alloc_token, self.hidden], self.dtype)
         cur_output_token_num = ctypes.c_int32.from_address(base_ptr + self.rank * elem_size).value
         return self.output_buf[:cur_output_token_num]
 
@@ -197,9 +205,9 @@ class EPAll2AllLayer(torch.nn.Module):
         output_buf = self.init_output_buffer(num_recv_tokens_per_rank)
         self.dispatch_token(recv_buf_offset_per_expert, num_input_tokens_per_rank)
         self.num_input_tokens_per_rank = num_input_tokens_per_rank
-        pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+        nvshmem_barrier_all_on_stream(current_stream)
         self.dispatch_postprocess()
-        pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+        nvshmem_barrier_all_on_stream(current_stream)
         # This copy is redundant and is only kept for stress testing, we can remove it during integration.
         copy_out = torch.empty(output_buf.shape, dtype=output_buf.dtype, device=output_buf.device)
         copy_out.copy_(output_buf)
@@ -232,9 +240,9 @@ class EPAll2AllLayer(torch.nn.Module):
     def combine(self, input):
         current_stream = torch.cuda.current_stream()
         self.send_buf.fill_(0)
-        pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+        nvshmem_barrier_all_on_stream(current_stream)
         self.output_buf[:input.shape[0]].copy_(input)
         reduce_buf = self.combine_token_intra_node_and_send(self.output_buf)
-        pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+        nvshmem_barrier_all_on_stream(current_stream)
         reduce_inter_node = reduce_buf.reshape(self.nnodes, self.max_tokens, self.hidden).sum(dim=0)
         return reduce_inter_node[:self.num_dispatch_token_cur_rank]

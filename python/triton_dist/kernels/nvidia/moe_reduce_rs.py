@@ -22,25 +22,24 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+from dataclasses import dataclass, field
+from typing import List, Optional
+
 import torch
+
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-
-from triton_dist import pynvshmem
-
-from typing import Optional, List
-
-from dataclasses import dataclass
-
-from triton_dist.kernels.nvidia.common_ops import wait_eq, set_signal, barrier_all_on_stream, BarrierAllContext
-from triton.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import (atomic_add, __syncthreads, tid, ntid)
-
+from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, tid, ntid, multimem_ld_reduce_v4,
+                                                       st_v4_b32)
+from triton_dist.kernels.nvidia.common_ops import (BarrierAllContext, barrier_all_on_stream, barrier_on_this_grid,
+                                                   set_signal, wait_eq)
+from triton_dist.kernels.nvidia.reduce_scatter import ring_reduce
+from triton_dist.language.extra import libshmem_device
+from triton_dist.kernels.nvidia.moe_utils import calc_gather_scatter_index_triton, reduce_topk_kernel
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, nvshmem_create_tensors, nvshmem_free_tensor_sync
 
 ################### helper functions ###################
-def ceil_div(a, b):
-    return (a + b - 1) // b
 
 
 def is_power_of_two(value):
@@ -60,26 +59,19 @@ def torch_dtype_to_triton_dtype(dtype):
         raise RuntimeError(f"unsupported dtype: {dtype}")
 
 
-@triton.jit
-def get_flat_tid():
-    tid_x, tid_y, tid_z = tid(0), tid(1), tid(2)
-    ntid_x, ntid_y = ntid(0), ntid(1)
-    return tid_z * ntid_y * ntid_x + tid_y * ntid_x + tid_x
-
-
 ################### compute ctx ###################
 @dataclass
 class MoEAgScatterGroupGemmPrecomputeContext:
-    full_topk_weight = None
-    full_topk_ids = None
-    full_sorted_token_ids = None
-    full_token_expert_ids = None
-    block_wait_barriers = None
-    rank_block_num = None
-    full_num_tokens_post_padded_list = None
+    full_topk_weight: torch.Tensor = None
+    full_topk_ids: torch.Tensor = None
+    full_sorted_token_ids: torch.Tensor = None
+    full_token_expert_ids: torch.Tensor = None
+    block_wait_barriers: torch.Tensor = None
+    rank_block_num: torch.Tensor = None
+    full_num_tokens_post_padded_list: torch.Tensor = None
     EM: int = 0
     full_numel: int = 0
-    TOP_K: int = 0
+    topk: int = 0
     BLOCK_M: int = 0
     num_tokens_per_rank: int = 0
 
@@ -119,7 +111,7 @@ def full_moe_align_block_size(
     num_iterations = num_ranks
     num_tokens_per_iteration = num_tokens_per_rank * topk_ids.shape[1]
     numel = num_tokens_per_iteration
-    tokens_per_thread = ceil_div(numel, num_experts)
+    tokens_per_thread = triton.cdiv(numel, num_experts)
 
     topk_ids_flatten = topk_ids.flatten()
 
@@ -147,7 +139,7 @@ def full_moe_align_block_size(
                 token_cnts[i, j] += token_cnts[i - 1, j]
 
         for i in range(1, num_experts + 1):
-            cumsum[i] = cumsum[i - 1] + ceil_div(token_cnts[num_experts, i - 1], block_size) * block_size
+            cumsum[i] = cumsum[i - 1] + triton.cdiv(token_cnts[num_experts, i - 1], block_size) * block_size
         num_tokens_post_pad[0] += cumsum[num_experts]
         rank_block_num[iter] = cumsum[num_experts] // block_size
 
@@ -213,7 +205,7 @@ def precompute_context_helper(
     (ctx.full_topk_ids, ctx.full_topk_weight) = select_experts(pg, num_ranks, topk, input_dtype, device, router_logits)
 
     E = num_experts
-    ctx.TOP_K = topk
+    ctx.topk = topk
     ctx.BLOCK_M = BLOCK_M
 
     (
@@ -251,12 +243,18 @@ class DataflowConfig:
 
 @dataclass
 class MoEReduceRSContext:
+    rank: int
+    world_size: int
+    local_rank: int = field(init=False)
+    local_world_size: int
+    nnodes: int = field(init=False)
+
     precompute_ctx: MoEAgScatterGroupGemmPrecomputeContext
 
-    rs_buffers: List[torch.Tensor]
-    rs_buffer_ptrs: torch.Tensor
-    rs_per_node_buffer: torch.Tensor
-    p2p_buffer: torch.Tensor
+    symm_rs_buffers: List[torch.Tensor]
+    symm_rs_buffer_ptrs: torch.Tensor
+    symm_rs_per_node_buffer: torch.Tensor
+    symm_p2p_buffer: torch.Tensor
     final_output_buffer: torch.Tensor
     barrier: BarrierAllContext
 
@@ -266,18 +264,32 @@ class MoEReduceRSContext:
 
     dataflow_config: DataflowConfig
 
-    barriers_gemm_scatter_counter: List[torch.Tensor]
-    barriers_gemm_scatter_counter_ptrs: torch.Tensor
-    barriers_gemm_scatter_ready: List[torch.Tensor]
-    barriers_gemm_scatter_ready_ptrs: torch.Tensor
-    barrier_gemm_scatter_counter: torch.Tensor
-    barrier_gemm_scatter_ready: torch.Tensor
-    rs_per_node_signal_buffer: torch.Tensor
+    symm_barrier_gemm_scatter_counter_ptrs: torch.Tensor
+    symm_barrier_gemm_scatter_counter: torch.Tensor
+    symm_barrier_gemm_scatter_ready_ptrs: torch.Tensor
+    symm_barrier_gemm_scatter_ready: torch.Tensor
+    symm_rs_per_node_signal: torch.Tensor
+
+    def __post_init__(self):
+        assert self.world_size % self.local_world_size == 0
+        self.local_rank = self.rank % self.local_world_size
+        self.nnodes = self.world_size // self.local_world_size
+
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.symm_rs_buffers[self.local_rank])
+        nvshmem_free_tensor_sync(self.symm_rs_per_node_buffer)
+        nvshmem_free_tensor_sync(self.symm_p2p_buffer)
+        nvshmem_free_tensor_sync(self.symm_barrier_gemm_scatter_counter)
+        nvshmem_free_tensor_sync(self.symm_barrier_gemm_scatter_ready)
+        nvshmem_free_tensor_sync(self.symm_rs_per_node_signal)
 
 
-def create_moe_rs_context(pg, local_rank, world_size, local_world_size, max_token_num, hidden_dim, num_experts, topk,
-                          input_dtype, output_dtype, device, moe_block_size, router_logits):
+def create_moe_rs_context(pg: torch.distributed.ProcessGroup, local_world_size, max_token_num, hidden_dim, num_experts,
+                          topk, input_dtype, output_dtype, device, moe_block_size, router_logits):
     num_tokens_per_rank = router_logits.shape[0]
+    world_size = pg.size()
+    rank = pg.rank()
+    local_rank = rank % local_world_size
     precompute_ctx = precompute_context_helper(
         pg,
         world_size,
@@ -290,16 +302,15 @@ def create_moe_rs_context(pg, local_rank, world_size, local_world_size, max_toke
         BLOCK_M=moe_block_size,
     )
 
-    rs_buffers: List[torch.Tensor] = pynvshmem.nvshmem_create_tensor_list_intra_node([max_token_num, hidden_dim],
-                                                                                     input_dtype)
-    rs_buffer_ptrs: torch.Tensor = torch.tensor([t.data_ptr() for t in rs_buffers], device=device)
+    symm_rs_buffers = nvshmem_create_tensors((max_token_num, hidden_dim), input_dtype, rank, local_world_size)
+    symm_rs_buffer_ptrs: torch.Tensor = torch.tensor([t.data_ptr() for t in symm_rs_buffers], device=device)
 
-    rs_per_node_buffer = pynvshmem.nvshmem_create_tensor(
-        [max_token_num // local_world_size, hidden_dim],
+    symm_rs_per_node_buffer = nvshmem_create_tensor(
+        (max_token_num // local_world_size, hidden_dim),
         input_dtype,
     )
-    p2p_buffer = pynvshmem.nvshmem_create_tensor(
-        [max_token_num // local_world_size, hidden_dim],
+    symm_p2p_buffer = nvshmem_create_tensor(
+        (max_token_num // local_world_size, hidden_dim),
         input_dtype,
     )
     final_output_buffer = torch.zeros(
@@ -323,38 +334,45 @@ def create_moe_rs_context(pg, local_rank, world_size, local_world_size, max_toke
     GEMM_BLOCK_K = 32
     dataflow_config = DataflowConfig(GEMM_BLOCK_M, GEMM_BLOCK_N, GEMM_BLOCK_K, 8, 4, 4, RS_BLOCK_M, RS_BLOCK_N)
 
-    # initialize barriers
-    with torch.device(torch.cuda.current_device()):
+    # gemm_scatter
+    symm_barrier_gemm_scatter_counters = nvshmem_create_tensors((world_size, 1), torch.int32, rank, local_world_size)
+    symm_barrier_gemm_scatter_counter = symm_barrier_gemm_scatter_counters[local_rank]
+    symm_barrier_gemm_scatter_counter.zero_()
+    symm_barrier_gemm_scatter_counter_ptrs = torch.tensor([t.data_ptr()
+                                                           for t in symm_barrier_gemm_scatter_counters]).cuda()
 
-        # gemm_scatter
+    symm_barrier_gemm_scatter_readys = nvshmem_create_tensors((world_size, 1), NVSHMEM_SIGNAL_DTYPE, rank,
+                                                              local_world_size)
+    symm_barrier_gemm_scatter_ready = symm_barrier_gemm_scatter_readys[local_rank]
+    symm_barrier_gemm_scatter_ready.zero_()
+    symm_barrier_gemm_scatter_ready_ptrs = torch.tensor([t.data_ptr() for t in symm_barrier_gemm_scatter_readys]).cuda()
 
-        barriers_gemm_scatter_counter: List[torch.Tensor] = pynvshmem.nvshmem_create_tensor_list_intra_node(
-            [world_size, 1], torch.int32)
+    # intra_node - p2p
+    symm_rs_per_node_signal = nvshmem_create_tensor((world_size, ), NVSHMEM_SIGNAL_DTYPE)
+    symm_rs_per_node_signal.zero_()
+    nvshmem_barrier_all_on_stream()
 
-        barriers_gemm_scatter_counter_ptrs = torch.tensor([ptr.data_ptr()
-                                                           for ptr in barriers_gemm_scatter_counter]).cuda()
-
-        barriers_gemm_scatter_ready: List[torch.Tensor] = pynvshmem.nvshmem_create_tensor_list_intra_node(
-            [world_size, 1], torch.uint64)
-
-        barriers_gemm_scatter_ready_ptrs = torch.tensor([ptr.data_ptr() for ptr in barriers_gemm_scatter_ready]).cuda()
-
-        barrier_gemm_scatter_counter = barriers_gemm_scatter_counter[local_rank]
-        barrier_gemm_scatter_ready = barriers_gemm_scatter_ready[local_rank]
-
-        barrier_gemm_scatter_counter.zero_()
-        barrier_gemm_scatter_ready.zero_()
-
-        # intra_node - p2p
-
-        rs_per_node_signal_buffer = pynvshmem.nvshmem_create_tensor([world_size], torch.uint64)
-        rs_per_node_signal_buffer.zero_()
-
-    return MoEReduceRSContext(precompute_ctx, rs_buffers, rs_buffer_ptrs, rs_per_node_buffer, p2p_buffer,
-                              final_output_buffer, barrier, rs_stream, reduction_stream, p2p_stream, dataflow_config,
-                              barriers_gemm_scatter_counter, barriers_gemm_scatter_counter_ptrs,
-                              barrier_gemm_scatter_ready, barriers_gemm_scatter_ready_ptrs,
-                              barrier_gemm_scatter_counter, barrier_gemm_scatter_ready, rs_per_node_signal_buffer)
+    return MoEReduceRSContext(
+        rank=rank,
+        world_size=world_size,
+        local_world_size=local_world_size,
+        precompute_ctx=precompute_ctx,
+        symm_rs_buffers=symm_rs_buffers,
+        symm_rs_buffer_ptrs=symm_rs_buffer_ptrs,
+        symm_rs_per_node_buffer=symm_rs_per_node_buffer,
+        symm_p2p_buffer=symm_p2p_buffer,
+        final_output_buffer=final_output_buffer,
+        barrier=barrier,
+        rs_stream=rs_stream,
+        reduction_stream=reduction_stream,
+        p2p_stream=p2p_stream,
+        dataflow_config=dataflow_config,
+        symm_barrier_gemm_scatter_counter_ptrs=symm_barrier_gemm_scatter_counter_ptrs,
+        symm_barrier_gemm_scatter_counter=symm_barrier_gemm_scatter_counter,
+        symm_barrier_gemm_scatter_ready_ptrs=symm_barrier_gemm_scatter_ready_ptrs,
+        symm_barrier_gemm_scatter_ready=symm_barrier_gemm_scatter_ready,
+        symm_rs_per_node_signal=symm_rs_per_node_signal,
+    )
 
 
 ################### triton kernel ###################
@@ -436,7 +454,7 @@ def kernel_producer_group_gemm_tp_scatter_input(
         )
         b = tl.load(
             b_ptrs,
-            mask=(offs_bn[None, :] < N and offs_k[:, None] < K_per_rank - k * BLOCK_K),
+            mask=(offs_bn[None, :] < N) & (offs_k[:, None] < K_per_rank - k * BLOCK_K),
         )
 
         accumulator += tl.dot(a, b)
@@ -618,51 +636,6 @@ def kernel_inter_node_p2p_for_same_local_rank(
         )
 
 
-@triton.jit
-def kernel_ring_reduce(
-    c_ptr,  # [M, N]
-    out_ptr,  # [M_per_split, N]
-    # shape of matrix
-    M_per_rank,
-    N,
-    begin_idx,
-    num_splits: tl.constexpr,
-    # reduce tile shape
-    BLOCK_SIZE_M: tl.constexpr = 256,
-    BLOCK_SIZE_N: tl.constexpr = 64,
-):
-    c_desc = tl.make_tensor_descriptor(
-        c_ptr,
-        shape=[M_per_rank * num_splits, N],
-        strides=[N, 1],
-        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
-    )
-    output_desc = tl.make_tensor_descriptor(
-        out_ptr,
-        shape=[M_per_rank, N],
-        strides=[N, 1],
-        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
-    )
-
-    pid = tl.program_id(axis=0)
-    num_pid = tl.num_programs(axis=0)
-    num_tiles_m = tl.cdiv(M_per_rank, BLOCK_SIZE_M)
-    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_tiles_m * num_tiles_n
-    for tile_id in range(pid, total_tiles, num_pid):
-        tile_id_m = tile_id // num_tiles_n
-        tile_id_n = tile_id % num_tiles_n
-        # accum = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=out_ptr.dtype.element_ty)
-        cur_rank = (begin_idx + 1) % num_splits
-        accum = c_desc.load([tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N])
-        for i in range(1, num_splits):
-            cur_rank = (i + begin_idx + 1) % num_splits
-            data = c_desc.load([tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N])
-            accum += data
-
-        output_desc.store([tile_id_m * BLOCK_SIZE_M, tile_id_n * BLOCK_SIZE_N], accum)
-
-
 ################### kernel calls ###################
 def topk_reduce_scatter_reduce_for_each_node(
     rank,
@@ -769,49 +742,10 @@ def p2p_inter_node(
             rs_per_node_signal_buf,
             num_warps=16,
         )
-        wait_eq(
-            rs_per_node_signal_buf[node_id].data_ptr(),
-            1,
-            stream,
-            require_i64=True,
-        )
+        wait_eq(rs_per_node_signal_buf[node_id].data_ptr(), 1, stream, require_i64=True)
         output[M_per_rank * node_id:M_per_rank * (node_id + 1)].copy_(input[M_per_rank * node_id:M_per_rank *
                                                                             (node_id + 1)])
     return output[:M_per_rank * nnodes]
-
-
-def ring_reduce(
-    input,  # [M_per_rank * nnodes, N]
-    output,  # [M_per_rank, N]
-    begin_idx,
-    num_splits,  # nnodes
-    stream,
-):
-    total_M, N = input.shape
-    M_per_split = total_M // num_splits
-    assert output.shape[0] == M_per_split and total_M % num_splits == 0
-
-    # TMA descriptors require a global memory allocation
-    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device="cuda", dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
-
-    grid = lambda META: (triton.cdiv(M_per_split, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
-    with torch.cuda.stream(stream):
-        kernel_ring_reduce[grid](
-            input,
-            output,
-            M_per_split,
-            N,
-            begin_idx,
-            num_splits,
-            BLOCK_SIZE_M=256,
-            BLOCK_SIZE_N=64,
-            num_warps=4,
-        )
-
-    return output
 
 
 def consumer_reduce_scatter_reduce_2d(
@@ -827,7 +761,7 @@ def consumer_reduce_scatter_reduce_2d(
     rs_per_node_buffer: torch.Tensor,
     p2p_buffer: torch.Tensor,
     barrier_gemm_scatter_ready: torch.Tensor,
-    rs_per_node_signal_buffer: torch.Tensor,
+    symm_rs_per_node_signal_buffer: torch.Tensor,
     barrier: BarrierAllContext,
     rs_stream: torch.cuda.Stream,
     reduction_stream: torch.cuda.Stream,
@@ -838,7 +772,7 @@ def consumer_reduce_scatter_reduce_2d(
     nnodes = world_size // local_world_size
 
     reduction_stream.wait_stream(rs_stream)
-    barrier_all_on_stream(None, rs_stream)
+    nvshmem_barrier_all_on_stream(rs_stream)
     p2p_stream.wait_stream(rs_stream)
     rs_result_intra_node = topk_reduce_scatter_reduce_for_each_node(
         rank,
@@ -852,7 +786,7 @@ def consumer_reduce_scatter_reduce_2d(
         rs_buffer_ptrs,
         rs_per_node_buffer,
         barrier_gemm_scatter_ready,
-        rs_per_node_signal_buffer,
+        symm_rs_per_node_signal_buffer,
         barrier,
         rs_stream,
         reduction_stream,
@@ -863,44 +797,40 @@ def consumer_reduce_scatter_reduce_2d(
         local_world_size,
         rs_result_intra_node,
         p2p_buffer,
-        rs_per_node_signal_buffer,
+        symm_rs_per_node_signal_buffer,
         p2p_stream,
     )
     rs_stream.wait_stream(p2p_stream)
-    barrier_all_on_stream(None, rs_stream)
+    nvshmem_barrier_all_on_stream(rs_stream)
     output = torch.empty((M_per_rank, N), dtype=local_tensor.dtype, device=local_tensor.device)
-    ring_reduce(
-        p2p_result,
-        output,
-        node_id,
-        nnodes,
-        rs_stream,
-    )
+    with torch.cuda.stream(rs_stream):
+        ring_reduce(
+            p2p_result,
+            output,
+            node_id,
+            nnodes,
+        )
     return output
 
 
-def moe_reduce_rs(
-    rank,
-    world_size,
-    local_world_size,
+def moe_reduce_rs_rowise(
+    rank: int,
+    world_size: int,
+    local_world_size: int,
     # input
     a: torch.Tensor,
     b: torch.Tensor,
     # context
     ctx: MoEReduceRSContext,
-    # option
-    dump_ir=False,
-    debug_sync=False,
-    do_initial_sync=True,
-    do_final_sync=True,
 ):
     padded_EM, K_per_rank = a.shape
     E = b.shape[0]
-    M = ctx.precompute_ctx.full_topk_ids.shape[0]
-    TOP_K = ctx.precompute_ctx.full_topk_ids.shape[1]
+    M, topk = ctx.precompute_ctx.full_topk_ids.shape
     dtype = a.dtype
-    assert (dtype == torch.float16 or dtype == torch.float8_e4m3fn), "Currently only used for float16 or float8_e4m3fn"
+    assert dtype in [torch.bfloat16, torch.float16], "Currently only used for float16 or bfloat16"
     assert a.dtype == b.dtype
+    assert a.ndim == 2 and a.is_cuda
+    assert b.ndim == 3 and b.is_cuda
 
     GEMM_BLOCK_M = ctx.dataflow_config.GEMM_BLOCK_M
     GEMM_BLOCK_N = ctx.dataflow_config.GEMM_BLOCK_N
@@ -909,79 +839,63 @@ def moe_reduce_rs(
     num_stages = ctx.dataflow_config.num_stages
     num_warps = ctx.dataflow_config.num_warps
 
-    compiled = None
+    ctx.symm_barrier_gemm_scatter_counter.zero_()
+    ctx.symm_barrier_gemm_scatter_ready.zero_()
+    ctx.rs_stream.wait_stream(torch.cuda.current_stream())
+    ctx.reduction_stream.wait_stream(torch.cuda.current_stream())
+    ctx.p2p_stream.wait_stream(torch.cuda.current_stream())
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
-    if do_initial_sync:
-        ctx.barrier_gemm_scatter_counter.zero_()
-        ctx.barrier_gemm_scatter_ready.zero_()
-        ctx.rs_stream.wait_stream(torch.cuda.current_stream())
-        ctx.reduction_stream.wait_stream(torch.cuda.current_stream())
-        ctx.p2p_stream.wait_stream(torch.cuda.current_stream())
-        barrier_all_on_stream(None, torch.cuda.current_stream())
+    full_sorted_token_ids = ctx.precompute_ctx.full_sorted_token_ids
+    full_token_expert_ids = ctx.precompute_ctx.full_token_expert_ids
+    block_wait_barriers = ctx.precompute_ctx.block_wait_barriers
+    rank_block_num = ctx.precompute_ctx.rank_block_num
+    full_num_tokens_post_padded_list = (ctx.precompute_ctx.full_num_tokens_post_padded_list)
+    EM = ctx.precompute_ctx.EM
+    full_numel = ctx.precompute_ctx.full_numel
 
-    with torch.cuda.stream(torch.cuda.current_stream()):
-        full_sorted_token_ids = ctx.precompute_ctx.full_sorted_token_ids
-        full_token_expert_ids = ctx.precompute_ctx.full_token_expert_ids
-        block_wait_barriers = ctx.precompute_ctx.block_wait_barriers
-        rank_block_num = ctx.precompute_ctx.rank_block_num
-        full_num_tokens_post_padded_list = (ctx.precompute_ctx.full_num_tokens_post_padded_list)
-        EM = ctx.precompute_ctx.EM
-        full_numel = ctx.precompute_ctx.full_numel
+    (
+        _,
+        _,
+        N,
+    ) = b.shape
 
-        (
-            _,
-            _,
-            N,
-        ) = b.shape
+    grid = lambda META: (triton.cdiv(EM, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]), )
 
-        grid = lambda META: (triton.cdiv(EM, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]), )
-
-        compiled = kernel_producer_group_gemm_tp_scatter_input[grid](
-            local_world_size,
-            a,
-            b,
-            ctx.final_output_buffer,
-            full_sorted_token_ids,
-            full_token_expert_ids,
-            ctx.precompute_ctx.full_topk_weight,
-            full_num_tokens_post_padded_list,
-            block_wait_barriers,
-            rank_block_num,
-            ctx.barrier_gemm_scatter_counter,
-            ctx.barriers_gemm_scatter_ready_ptrs,
-            full_numel,
-            EM,
-            N,
-            K_per_rank,
-            E,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            b.stride(2),
-            N,
-            1,
-            GEMM_BLOCK_M,
-            GEMM_BLOCK_N,
-            GEMM_BLOCK_K,
-            GROUP_SIZE_M,
-            TOP_K,
-            torch_dtype_to_triton_dtype(a.dtype),
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
-
-    # debug sync
-    if debug_sync:
-        ctx.rs_stream.wait_stream(torch.cuda.current_stream())
-        ctx.reduction_stream.wait_stream(ctx.rs_stream)
-        ctx.p2p_stream.wait_stream(ctx.reduction_stream)
-        torch.cuda.current_stream().wait_stream(ctx.rs_stream)
-        torch.cuda.current_stream().wait_stream(ctx.reduction_stream)
-        torch.cuda.current_stream().wait_stream(ctx.p2p_stream)
-        barrier_all_on_stream(None, torch.cuda.current_stream())
-
-    output = None
+    kernel_producer_group_gemm_tp_scatter_input[grid](
+        local_world_size,
+        a,
+        b,
+        ctx.final_output_buffer,
+        full_sorted_token_ids,
+        full_token_expert_ids,
+        ctx.precompute_ctx.full_topk_weight,
+        full_num_tokens_post_padded_list,
+        block_wait_barriers,
+        rank_block_num,
+        ctx.symm_barrier_gemm_scatter_counter,
+        ctx.symm_barrier_gemm_scatter_ready_ptrs,
+        full_numel,
+        EM,
+        N,
+        K_per_rank,
+        E,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        N,
+        1,
+        GEMM_BLOCK_M,
+        GEMM_BLOCK_N,
+        GEMM_BLOCK_K,
+        GROUP_SIZE_M,
+        topk,
+        torch_dtype_to_triton_dtype(a.dtype),
+        num_stages=num_stages,
+        num_warps=num_warps,
+    )
 
     with torch.cuda.stream(ctx.rs_stream):
         output = consumer_reduce_scatter_reduce_2d(
@@ -990,31 +904,529 @@ def moe_reduce_rs(
             local_world_size,
             M,
             N,
-            TOP_K,
+            topk,
             ctx.final_output_buffer,
-            ctx.rs_buffers,
-            ctx.rs_buffer_ptrs,
-            ctx.rs_per_node_buffer,
-            ctx.p2p_buffer,
-            ctx.barrier_gemm_scatter_ready,
-            ctx.rs_per_node_signal_buffer,
+            ctx.symm_rs_buffers,
+            ctx.symm_rs_buffer_ptrs,
+            ctx.symm_rs_per_node_buffer,
+            ctx.symm_p2p_buffer,
+            ctx.symm_barrier_gemm_scatter_ready,
+            ctx.symm_rs_per_node_signal,
             ctx.barrier,
             ctx.rs_stream,
             ctx.reduction_stream,
             ctx.p2p_stream,
         )
 
-    if dump_ir:
-        if rank == 0:
-            if compiled is not None:
-                for suffix in ["ptx", "ttir", "ttgir", "llir"]:
-                    with open(f"trace_{compiled.name}.{suffix}", "w") as fout:
-                        print(compiled.asm[suffix], file=fout)
-
-    if do_final_sync:
-        torch.cuda.current_stream().wait_stream(ctx.rs_stream)
-        torch.cuda.current_stream().wait_stream(ctx.reduction_stream)
-        torch.cuda.current_stream().wait_stream(ctx.p2p_stream)
-        barrier_all_on_stream(None, torch.cuda.current_stream())
+    torch.cuda.current_stream().wait_stream(ctx.rs_stream)
+    torch.cuda.current_stream().wait_stream(ctx.reduction_stream)
+    torch.cuda.current_stream().wait_stream(ctx.p2p_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     return output
+
+
+@dataclass
+class MoEReduceRSColwiseContext:
+    max_M: int
+    N: int
+    num_experts: int
+    topk: int
+    dtype: torch.dtype
+    # distributed arguments
+    rank: int
+    num_ranks: int
+    num_local_ranks: int
+    local_rank: int = field(init=False)
+    nnodes: int = field(init=False)
+    n_split_max: int = 8
+    # barriers
+    grid_barrier: torch.Tensor = field(init=False)
+    ntiles_counter: torch.Tensor = field(init=False)
+    # symmetric buffers or non-symmetric buffers
+    symm_barriers: List[torch.Tensor] = field(default_factory=list)
+    symm_barrier: torch.Tensor = field(init=False)
+    symm_reduce_scatter_buffers: List[torch.Tensor] = field(default_factory=list)
+    symm_reduce_scatter_buffer: torch.Tensor = field(init=False)
+
+    # stream
+    reduce_stream: torch.cuda.Stream = field(default_factory=lambda: torch.cuda.Stream(priority=-1))
+
+    def __post_init__(self):
+        assert self.dtype in [torch.bfloat16, torch.float16], "Currently only used for float16 or bfloat16"
+        assert self.max_M % self.topk == 0, "M must be divisible by topk"
+        self.local_rank = self.rank % self.num_local_ranks
+        self.nnodes = self.num_ranks // self.num_local_ranks
+        # Create a barrier for grid synchronization
+        self.grid_barrier = torch.zeros(
+            (1, ),
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+        self.ntiles_counter = torch.zeros((self.n_split_max, ), dtype=torch.int32, device=torch.cuda.current_device())
+        self.symm_barriers = nvshmem_create_tensors((self.num_ranks, ), torch.int32, self.rank, self.num_local_ranks)
+        self.symm_barrier = self.symm_barriers[self.local_rank]
+        self.symm_barrier.zero_()
+        ntokens = self.max_M // self.topk
+        self.symm_reduce_scatter_buffers = nvshmem_create_tensors((ntokens, self.N), self.dtype, self.rank,
+                                                                  self.num_local_ranks)
+        self.symm_reduce_scatter_buffer = self.symm_reduce_scatter_buffers[self.local_rank]
+
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+        torch.cuda.synchronize()
+
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.symm_barrier)
+        nvshmem_free_tensor_sync(self.symm_reduce_scatter_buffer)
+
+
+def create_moe_rs_context_colwise(rank, world_size, local_world_size, max_token_num, hidden_dim, num_experts, topk,
+                                  input_dtype):
+    return MoEReduceRSColwiseContext(max_token_num, hidden_dim, num_experts, topk, dtype=input_dtype, rank=rank,
+                                     num_ranks=world_size, num_local_ranks=local_world_size, n_split_max=8)
+
+
+@triton.jit
+def swizzle_2d_by_group_n(pid, nblocks_m, nblocks_n, GROUP_SIZE_N: tl.constexpr):
+    """ if we choose tile first in N within group_size_N, maybe each group with N = 1024, for BLOCK_SIZE_N = 64, then 16 tiles per tiled_m.
+    maybe too much for L20. but never mind. maybe we can fix it later.
+    """
+    nblocks_per_group = GROUP_SIZE_N * nblocks_m
+    group_id = pid // nblocks_per_group
+    remainder = pid - group_id * nblocks_per_group
+    pid_m = remainder // GROUP_SIZE_N
+    pid_n = remainder % GROUP_SIZE_N + group_id * GROUP_SIZE_N
+    return pid_m, pid_n, group_id
+
+
+@triton.jit
+def moe_gather_rs_grouped_gemm_kernel(
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    A_scale_ptr,
+    gather_index_ptr,
+    expert_index_ptr,
+    M_ptr,
+    N,
+    K,
+    E,  # not used
+    A_stride_m,
+    A_stride_k,
+    B_stride_e,
+    B_stride_k,
+    B_stride_n,
+    C_stride_m,
+    C_stride_n,
+    tile_counter_ptr,
+    barrier_ptr,
+    TOPK: tl.constexpr,  # not used
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_N: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    M = tl.load(M_ptr)
+
+    num_block_m = tl.cdiv(M, BLOCK_SIZE_M)
+    thread_idx = tid(0)
+    num_block_n = tl.cdiv(N, BLOCK_SIZE_N)
+    if pid >= num_block_m * num_block_n:
+        return
+
+    pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_gather_a = tl.load(gather_index_ptr + offs_m)
+    token_mask = offs_gather_a < M
+
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = A_ptr + offs_gather_a[:, None] * A_stride_m + offs_k[None, :] * A_stride_k
+
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_be = tl.load(expert_index_ptr + pid_m)
+    b_ptrs = B_ptr + offs_be * B_stride_e + offs_k[:, None] * B_stride_k + offs_bn[None, :] * B_stride_n
+
+    if A_ptr.dtype.element_ty == tl.int8:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
+        tl.static_assert(False, "int8 is not supported in this kernel, please use float16 or bfloat16")
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K))
+        b = tl.load(b_ptrs, mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K))
+
+        accumulator += tl.dot(a, b)
+        a_ptrs += BLOCK_SIZE_K * A_stride_k
+        b_ptrs += BLOCK_SIZE_K * B_stride_k
+
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = C_ptr + offs_gather_a[:, None] * C_stride_m + offs_cn[None, :] * C_stride_n
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+
+    if A_scale_ptr:
+        accumulator = accumulator * tl.load(A_scale_ptr + offs_gather_a[:, None], mask=token_mask[:, None])
+    accumulator = accumulator.to(A_ptr.dtype.element_ty)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+    thread_idx = tid(axis=0)
+    __syncthreads()
+    if thread_idx == 0:
+        count = atomic_add(tile_counter_ptr + group_id, 1, semantic="release", scope="gpu")
+        if count == num_block_m * GROUP_SIZE_N - 1:
+            atomic_add(barrier_ptr + group_id, 1, semantic="release", scope="sys")
+
+
+def moe_gather_rs_grouped_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    A_scale: torch.Tensor,
+    gather_a_index: torch.Tensor,
+    expert_id: torch.Tensor,
+    M_pad: torch.Tensor,
+    M_pad_approx: int,  # make sure M_pad_approx >= int(M_pad)
+    N: int,
+    K: int,
+    E: int,
+    topk: int,
+    tile_counter: torch.Tensor,
+    barrier: torch.Tensor,
+    config: triton.Config,
+):
+    grid = lambda META: (triton.cdiv(M_pad_approx, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+
+    moe_gather_rs_grouped_gemm_kernel[grid](
+        A,
+        B,
+        C,
+        A_scale,
+        gather_a_index,
+        expert_id,
+        M_pad,  # torch.Tensor on GPU
+        N,
+        K,
+        E,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(1),
+        B.stride(2),
+        C.stride(0),
+        C.stride(1),
+        tile_counter,
+        barrier,
+        TOPK=topk,
+        **config.all_kwargs(),
+    )
+    return C
+
+
+@triton.jit
+def reduce_scatter_multimem_kernel(
+    symm_input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_m,
+    stride_n,
+):
+    # N % BLOCK_SIZE_N is expected.
+    pid = tl.program_id(axis=0)
+    npid = tl.num_programs(axis=0)
+    thread_idx = tid(axis=0)
+    block_dim = ntid(axis=0)
+    mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, symm_input_ptr)
+
+    ELEMS_PER_THREAD: tl.constexpr = 128 // symm_input_ptr.dtype.element_ty.primitive_bitwidth
+
+    # 16 byte per thread: as a uint4
+    for k in range(pid * block_dim + thread_idx, M * N // ELEMS_PER_THREAD, block_dim * npid):
+        offs_m = k * ELEMS_PER_THREAD // N
+        offs_n = k * ELEMS_PER_THREAD % N
+        if offs_m < M and offs_n < N:
+            offs = offs_m * stride_m + offs_n * stride_n
+            val0, val1, val2, val3 = multimem_ld_reduce_v4(mc_ptr + offs)
+            st_v4_b32(output_ptr + offs, val0, val1, val2, val3)
+
+
+@triton.jit
+def reduce_scatter_a2a_kernel(
+    symm_input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_m,
+    stride_n,
+    rank,
+    num_ranks,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    nblocks_m = tl.cdiv(M, BLOCK_SIZE_M)
+    nblocks_n = tl.cdiv(N, BLOCK_SIZE_N)
+    nblocks = nblocks_m * nblocks_n
+    pid = tl.program_id(axis=0)
+    npid = tl.num_programs(axis=0)
+
+    for bid in range(pid, nblocks, npid):
+        bid_m = bid // nblocks_n
+        bid_n = bid % nblocks_n
+        offs_m = bid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        mask_m = offs_m < M
+        offs_n = bid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask_n = offs_n < N
+        offs = offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
+        mask = mask_m[:, None] & mask_n[None, :]
+        val = tl.load(symm_input_ptr + offs, mask=mask)
+        for n in range(1, num_ranks):
+            peer = (rank + n) % num_ranks
+            ptr_peer = libshmem_device.remote_ptr(symm_input_ptr, peer)
+            ptr_peer = tl.multiple_of(ptr_peer, 16)
+            x = tl.load(ptr_peer + offs, mask=mask)
+            val += x
+
+        tl.store(output_ptr + offs, val, mask=mask)
+
+
+@triton.jit(do_not_specialize=["rank"])
+def reduce_topk_reduce_scatter_intra_node(
+    input_ptr,  # of shape [ntokens * topk, N] with stride [stride_m, stride_n]
+    expert_weight_ptr,  # not used actually. accumulate in Grouped GEMM
+    # output
+    symm_reduced_topk_ptr,  # of shape [ntokens, N]. symm_buffer = sum(input, axis=1)
+    output_ptr,  # of shape [ntokens // num_ranks, N]. output = reduce_scatter(symm_buffer)
+    # args
+    ntokens,
+    N,
+    stride_m,
+    stride_n,
+    rank,
+    num_ranks,
+    # some barriers
+    barrier_ptr,
+    grid_barrier_ptr,
+    N_CHUNKS,  # N_SPLIT is used to distinguish different groups
+    TOPK: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    """
+    symm_buffer = reduce_scatter(input)
+    output = reduce_scatter(symm_buffer)
+    """
+    pid = tl.program_id(axis=0)
+    npid = tl.num_programs(axis=0)
+    N_per_chunk = N // N_CHUNKS
+    N_per_chunk = tl.multiple_of(N_per_chunk, 16)
+    ntokens_per_rank = ntokens // num_ranks
+    for n_chunk in tl.range(0, N_CHUNKS, step=1, loop_unroll_factor=1):
+        token = dl.wait(barrier_ptr + n_chunk, 1, scope="gpu", semantic="acquire", waitValue=1)
+        offs_n_chunk = n_chunk * N_per_chunk * stride_n
+        input_this_chunk_ptr = dl.consume_token(input_ptr + offs_n_chunk, token)
+        reduced_topk_this_chunk_ptr = dl.consume_token(symm_reduced_topk_ptr + offs_n_chunk, token)
+
+        for rid in range(0, num_ranks):
+            peer = (rank + rid) % num_ranks
+            out_ptr = dl.symm_at(reduced_topk_this_chunk_ptr, peer)
+            out_ptr = tl.multiple_of(out_ptr, 16)
+            reduce_topk_kernel(
+                input_this_chunk_ptr + peer * ntokens_per_rank * TOPK * stride_m,
+                expert_weight_ptr,
+                out_ptr + rank * ntokens_per_rank * stride_m,
+                ntokens_per_rank,
+                N_per_chunk,
+                stride_m,
+                stride_n,
+                TOPK,
+                BLOCK_SIZE_M,
+                BLOCK_SIZE_N,
+            )
+
+    # for intra-node, you may replace this with reduce flag to avoid nvshmem_barrier_block. which may cost a lot of registers and a little higher latency
+    barrier_on_this_grid(grid_barrier_ptr)
+    if pid == 0:
+        libshmem_device.barrier_all_block()
+    barrier_on_this_grid(grid_barrier_ptr)
+
+    # reduce symm_buffer_n_ptr to output_n_ptr
+    blocks_n_per_chunk = tl.cdiv(N_per_chunk, BLOCK_SIZE_N)
+    blocks_m_per_rank = tl.cdiv(ntokens_per_rank, BLOCK_SIZE_M)
+    nblocks_per_split_per_rank = blocks_m_per_rank * blocks_n_per_chunk
+    # want to save some registers, but loop_unroll_factor does not work here
+    for n_chunk in tl.range(0, N_CHUNKS, step=1, loop_unroll_factor=1):
+        offs_n_chunk = n_chunk * N_per_chunk * stride_n
+        output_n_ptr = output_ptr + offs_n_chunk
+        reduced_topk_this_chunk_ptr = symm_reduced_topk_ptr + offs_n_chunk
+        for tile_id in range(pid, nblocks_per_split_per_rank, npid):
+            tid_m = tile_id // blocks_n_per_chunk
+            tid_n = tile_id % blocks_n_per_chunk
+            offs_m = tid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_n = tid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            mask_m = offs_m < ntokens_per_rank
+            mask_n = offs_n < N_per_chunk
+            offs = offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
+            mask = mask_m[:, None] & mask_n[None, :]
+            val = tl.full((BLOCK_SIZE_M, BLOCK_SIZE_N), 0, input_ptr.dtype.element_ty)
+            for sid in range(0, num_ranks):
+                segment = (rank + sid) % num_ranks
+                offs_segment = segment * ntokens_per_rank * stride_m
+                val += tl.load(reduced_topk_this_chunk_ptr + offs_segment + offs, mask=mask)
+            tl.store(output_n_ptr + offs, val, mask=mask)
+
+
+@triton.jit(do_not_specialize=["rank"])
+def reduce_topk_reduce_scatter_intra_node_a2a_read(
+        input_ptr,  # of shape [ntokens, topk, N]
+        expert_weight_ptr,
+        # output
+        symm_reduce_topk_ptr,  # of shape [ntokens, N]
+        output_ptr,  # of shape [ntokens // num_rank, N]
+        # args
+    ntokens, N, stride_m, stride_n, rank, num_ranks,
+        #
+        barrier_ptr, grid_barrier_ptr, TOPK: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+        N_CHUNKS: tl.constexpr,  # N_SPLIT is used to distinguish different groups
+):
+    """
+    symm_buffer = reduce_scatter(input)
+    output = reduce_scatter(symm_buffer)
+    """
+    pid = tl.program_id(axis=0)
+    N_per_chunk = N // N_CHUNKS
+    ntokens_per_rank = ntokens // num_ranks
+    for chunk_id in range(0, N_CHUNKS, 1):
+        token = dl.wait(barrier_ptr + chunk_id, 1, scope="gpu", semantic="acquire", waitValue=1)
+        offs_n = chunk_id * N_per_chunk * stride_n
+        input_this_chunk_ptr = dl.consume_token(input_ptr + offs_n * TOPK, token)
+        output_this_chunk_ptr = dl.consume_token(output_ptr + offs_n, token)
+        symm_reduced_topk_this_chunk_ptr = dl.consume_token(symm_reduce_topk_ptr + offs_n, token)
+        reduce_topk_kernel(
+            input_this_chunk_ptr,
+            expert_weight_ptr,
+            symm_reduced_topk_this_chunk_ptr,
+            ntokens,
+            N_per_chunk,
+            stride_m,
+            stride_n,
+            TOPK,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+        )
+        # TODO(houqi.1993) replace nvshmem_barrier_block with another memory flag
+        barrier_on_this_grid(grid_barrier_ptr)
+        if pid == 0:
+            libshmem_device.barrier_all_block()
+        barrier_on_this_grid(grid_barrier_ptr)
+        # do reduce_scatter
+        reduce_scatter_a2a_kernel(
+            symm_reduced_topk_this_chunk_ptr + rank * ntokens_per_rank * stride_m,
+            output_this_chunk_ptr,
+            ntokens_per_rank,
+            N_per_chunk,
+            stride_m,
+            stride_n,
+            rank,
+            num_ranks,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+        )
+
+    if pid == 0:
+        libshmem_device.barrier_all_block()
+
+
+def get_auto_triton_config(M, N, K, N_CHUNKS, dtype: torch.dtype) -> triton.Config:
+    N_per_chunk = N // N_CHUNKS
+    # TODO(houqi.1993) may relax this check
+    assert N_per_chunk == triton.next_power_of_2(N_per_chunk), f"N_per_chunk({N_per_chunk}) must be power of 2"
+    BLOCK_SIZE_M = 128
+    BLOCK_SIZE_N = 128
+    BLOCK_SIZE_K = 64
+    # TODO(houqi.1993) maybe fill some GEMM-pruned configs
+    config = triton.Config(
+        kwargs={
+            "BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_K": BLOCK_SIZE_K, "GROUP_SIZE_N":
+            N_per_chunk // BLOCK_SIZE_N
+        })
+    return config
+
+
+def moe_reduce_rs_colwise(
+        # input
+        x: torch.Tensor, weights: torch.Tensor, choosed_experts: torch.Tensor, expert_weight: torch.Tensor,
+        # context
+        ctx: MoEReduceRSColwiseContext, n_chunks=2, config: Optional[triton.Config] = None):
+    assert x.ndim == 2 and x.is_cuda, "Input x must be a 2D CUDA tensor"
+    assert weights.ndim == 3 and weights.is_cuda, "Weights must be a 3D CUDA tensor"
+    assert choosed_experts.ndim == 2 and choosed_experts.is_cuda, "Choosed experts must be a 2D CUDA tensor"
+    M, K_per_rank = x.shape
+    assert M <= ctx.max_M, f"Input M({M}) must be less than or equal to context M({ctx.max_M})"
+    assert M % ctx.topk == 0, f"M({M}) must be divisible by topk({ctx.topk})"
+
+    ntokens = M // ctx.topk
+    assert choosed_experts.shape == (ntokens, ctx.topk), \
+        f"Choosed experts shape {choosed_experts.shape} must match (ntokens({ntokens}), topk({ctx.topk}))"
+
+    assert weights.shape == (ctx.num_experts, K_per_rank, ctx.N), \
+        f"Weights shape {weights.shape} must match context num_experts({ctx.num_experts}), K_per_rank({K_per_rank}), and N({ctx.N})"
+    assert x.dtype == weights.dtype == ctx.dtype, f"Input x dtype({x.dtype}) must match context dtype({ctx.dtype}) and weights dtype({weights.dtype})"
+
+    ntokens_per_rank = ntokens // ctx.num_ranks
+    N_per_chunk = ctx.N // n_chunks
+    config = config or get_auto_triton_config(M, ctx.N, K_per_rank, n_chunks, x.dtype)
+    block_size_m = config.kwargs["BLOCK_SIZE_M"]
+    # TODO(houqi.1993) maybe we can pass this as argument and avoid recompute it again
+    _, _, gather_index, expert_index, M_pad_gpu = calc_gather_scatter_index_triton(choosed_experts, ctx.num_experts,
+                                                                                   block_size_m)
+
+    grouped_gemm_out = torch.empty(
+        (M, ctx.N),
+        dtype=ctx.dtype,
+        device=torch.cuda.current_device(),
+    )
+    out = torch.empty((ntokens_per_rank, ctx.N), dtype=ctx.dtype, device=torch.cuda.current_device())
+
+    M_pad_approx = (triton.cdiv(M, block_size_m) + ctx.num_experts) * block_size_m
+
+    ctx.reduce_stream.wait_stream(torch.cuda.current_stream())
+    moe_gather_rs_grouped_gemm(x, weights, grouped_gemm_out, expert_weight, gather_index, expert_index, M_pad_gpu,
+                               M_pad_approx, ctx.N, K_per_rank, ctx.num_experts, ctx.topk, ctx.ntiles_counter,
+                               ctx.symm_barrier, config)
+
+    with torch.cuda.stream(ctx.reduce_stream):
+        reduce_topk_reduce_scatter_intra_node[(32, )](
+            grouped_gemm_out,
+            None,  # group weight
+            ctx.symm_reduce_scatter_buffer,
+            out,
+            ntokens,
+            ctx.N,
+            ctx.N,  # stride_m
+            1,  # stride_n
+            ctx.rank,
+            ctx.num_ranks,
+            ctx.symm_barrier,
+            ctx.grid_barrier,
+            TOPK=ctx.topk,
+            BLOCK_SIZE_M=max(1, 16 * 1024 // N_per_chunk // x.itemsize),  # each thread with a uint4 load
+            BLOCK_SIZE_N=N_per_chunk,
+            N_CHUNKS=n_chunks,
+            num_warps=32,
+            launch_cooperative_grid=True,
+        )
+        # print("reduce_topk_reduce_scatter_intra_node done")
+
+    torch.cuda.current_stream().wait_stream(ctx.reduce_stream)
+    # print("expert_index", expert_index)
+    # print("ntiles_counter", ctx.ntiles_counter)
+    # print("symm_barrier", ctx.symm_barrier)
+    # print("grid_barrier", ctx.grid_barrier)
+    # torch.save(choosed_experts, f"choosed_experts_{ctx.rank}.pt")
+    # torch.save(gather_index, f"gather_index_{ctx.rank}.pt")
+    # torch.save(grouped_gemm_out, f"grouped_gemm_out_{ctx.rank}.pt")
+    # torch.save(expert_weight, f"expert_weight_{ctx.rank}.pt")
+    # torch.save(ctx.symm_reduce_scatter_buffer, f"reduced_triton_{ctx.rank}.pt")
+    return out

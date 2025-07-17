@@ -72,8 +72,18 @@ export CXX=clang++-19
 pip uninstall triton
 rm -rf /usr/local/lib/python3.12/dist-packages/triton
 # Install Triton-distributed
-pip install "git+https://github.com/ByteDance-Seed/Triton-distributed.git#subdirectory=python" --no-build-isolation --verbose --force-reinstall
+pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/download/experimental/triton_dist-3.4.0-cp312-cp312-linux_x86_64.whl
 ```
+
+### 最近更新
+
+- 11/07/2025 ✨✨✨: 高性能AllReduce kernel实现。请见[AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py)。
+
+- 11/07/2025 ✨✨✨: 性能更优的TP MoE kernel。 请见 [AG+MoE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_ag_moe.py) 和 [MoE+RS Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py)。
+
+- 11/07/2025 ✨✨✨: Triton 3.4 和 NVSHMEM4py 支持，请见 ([MR](https://github.com/ByteDance-Seed/Triton-distributed/pull/54)). 可以无需修改代码直接`pip install`。
+
+- 12/05/2025 🚀🚀🚀: 我们的论文 `TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives` 被 MLSys 2025接收！
 
 ### 如何使用 Triton-distributed
 Triton-distributed 提供了一套易于使用的原语，用于支持开发计算-通信融合的分布式kernel。这些原语分为低层次原语和高层次原语。目前，我们已经发布了低层次原语，并计划在未来发布高层次原语。
@@ -197,7 +207,7 @@ Triton-distributed 可以达到和手写分布式算子库接近的性能，有�
 - [x] Release low-level primitives
 - [ ] Release high-level primitives
 - [x] Tutorials
-- [ ] Pre-built binary
+- [x] Pre-built binary
 ### Kernels
 - [x] Release single-node GEMM TP overlapping kernels
 - [x] Release single-node MoE TP overlapping kernels

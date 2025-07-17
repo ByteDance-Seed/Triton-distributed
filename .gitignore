@@ -49,11 +49,6 @@ shmem/rocshmem_bind/ompi_build
 shmem/rocshmem_bind/pyrocshmem/build/
 shmem/rocshmem_bind/pyrocshmem/python/*.egg-info
 shmem/rocshmem_bind/pyrocshmem/dist
-3rdparty/triton/python/*pynvshmem*
-3rdparty/triton/python/triton/*pynvshmem*
-3rdparty/triton/python/triton/_C/nvshmem
-3rdparty/triton/python/triton/_C/_pynvshmem
-3rdparty/nvshmem
 
 build
 python/dist
@@ -65,3 +60,5 @@ python/triton_dist/_C/*nvshmem
 temp_conflicts
 temp_merge_repo
 conflict_list.txt
+
+dev_output/

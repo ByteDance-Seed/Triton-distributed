@@ -35,23 +35,23 @@ In doing so, you will learn about:
 * Optimizing the internode communication with 2D Allgather.
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/07-overlapping-allgather-gemm.py
+    bash ./scripts/launch.sh ./tutorials/07-overlapping-allgather-gemm.py
 
 """
 
 import os
 import torch
-from triton_dist import pynvshmem
 from typing import Optional
-from triton_dist.utils import (initialize_distributed, TP_GROUP)
+from triton_dist.utils import (initialize_distributed, TP_GROUP, nvshmem_barrier_all_on_stream)
 from triton_dist.kernels.nvidia.common_ops import wait_eq, set_signal
 from cuda import cudart
 
+import nvshmem.core
 import triton
 from triton_dist.kernels.nvidia.allgather_gemm import create_ag_gemm_context
 import triton.language as tl
 import triton_dist.language as dl
-from triton.language.extra import libshmem_device
+from triton_dist.language.extra import libshmem_device
 
 # %%
 # Now, let's write a GEMM kernel to consume the transfered tensors!
@@ -322,8 +322,8 @@ def cp_engine_producer_all_gather_put(local_tensor, ag_buffer, signal_buffer, M_
 
 
 def ag_gemm_persistent_op(a, b, c, rank, num_ranks, workspace_tensors, barrier_tensors, comm_buf, ag_stream=None,
-                          internode_ag_stream=None, gemm_stream=None, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3,
-                          local_world_size=8, signal_target=1):
+                          internode_ag_stream=None, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3, local_world_size=8,
+                          signal_target=1):
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
 
@@ -337,51 +337,46 @@ def ag_gemm_persistent_op(a, b, c, rank, num_ranks, workspace_tensors, barrier_t
     num_gemm_sms = torch.cuda.get_device_properties("cuda").multi_processor_count - num_ag_sms
 
     ag_stream = torch.cuda.Stream() if ag_stream is None else ag_stream
-    gemm_stream = torch.cuda.current_stream() if gemm_stream is None else gemm_stream
     current_stream = torch.cuda.current_stream()
     ag_stream.wait_stream(current_stream)
-    gemm_stream.wait_stream(current_stream)
 
     inter_node_allgather(a, workspace_tensors, barrier_tensors, signal_target, rank, local_world_size, num_ranks,
                          ag_stream, internode_ag_stream)
 
     compiled = None
-    with torch.cuda.stream(gemm_stream):
 
-        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-            return torch.empty(size, device="cuda", dtype=torch.int8)
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device="cuda", dtype=torch.int8)
 
-        triton.set_allocator(alloc_fn)
-        grid = lambda META: (min(
-            num_gemm_sms,
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-        ), )
-        compiled = kernel_consumer_gemm_persistent[grid](
-            workspace_tensors[local_rank][:M],
-            b,
-            c,  #
-            M,
-            N_per_rank,
-            K,  #
-            rank,
-            num_ranks,
-            barrier_tensors[local_rank],
-            comm_buf,
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_K,
-            8,
-            False,
-            NUM_SMS=num_gemm_sms,
-            ready_value=signal_target,
-            num_stages=stages,
-            num_warps=8,
-        )
+    triton.set_allocator(alloc_fn)
+    grid = lambda META: (min(
+        num_gemm_sms,
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
+    ), )
+    compiled = kernel_consumer_gemm_persistent[grid](
+        workspace_tensors[local_rank][:M],
+        b,
+        c,  #
+        M,
+        N_per_rank,
+        K,  #
+        rank,
+        num_ranks,
+        barrier_tensors[local_rank],
+        comm_buf,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        8,
+        False,
+        NUM_SMS=num_gemm_sms,
+        ready_value=signal_target,
+        num_stages=stages,
+        num_warps=8,
+    )
 
     current_stream.wait_stream(internode_ag_stream)
     current_stream.wait_stream(ag_stream)
-    current_stream.wait_stream(gemm_stream)
-
     return compiled
 
 
@@ -438,18 +433,20 @@ if __name__ == "__main__":
     C = torch.empty([M, N_per_rank], dtype=dtype, device="cuda")
     ctx = create_ag_gemm_context(A, B, rank, WORLD_SIZE, max_M=M, BLOCK_M=config["BM"], BLOCK_N=config["BN"],
                                  BLOCK_K=config["BK"], stages=config["stage"])
-    ctx.barrier_tensor.fill_(0)
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    ctx.symm_barrier.fill_(0)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     # copy local data to the ctx
-    ctx.workspace_tensor[rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
-    set_signal(ctx.barrier_tensor[rank].data_ptr(), 1, torch.cuda.current_stream(), True)
+    ctx.symm_workspace[rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(A)
+    set_signal(ctx.symm_barrier[rank].data_ptr(), 1, torch.cuda.current_stream(), True)
 
     # launch the ag_gemm kernel
-    ag_gemm_persistent_op(A, B, C, ctx.rank, ctx.num_ranks, ctx.workspace_tensors, ctx.barrier_tensors, ctx.comm_buf,
+    ag_gemm_persistent_op(A, B, C, ctx.rank, ctx.num_ranks, ctx.symm_workspaces, ctx.symm_barriers, ctx.symm_comm_buf,
                           ag_stream=ctx.ag_intranode_stream, internode_ag_stream=ctx.ag_internode_stream,
-                          gemm_stream=ctx.gemm_stream, local_world_size=LOCAL_WORLD_SIZE, signal_target=1)
+                          local_world_size=LOCAL_WORLD_SIZE, signal_target=1)
 
     assert torch.allclose(golden, C, atol=1e-3, rtol=1e-3)
     print("Pass!")
 
+    ctx.finailize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

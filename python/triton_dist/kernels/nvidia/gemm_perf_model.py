@@ -27,10 +27,7 @@ from typing import Optional
 
 import torch
 import triton
-from triton.testing import (
-    get_max_simd_tflops,
-    nvsmi,
-)
+from triton.testing import get_max_simd_tflops, nvsmi
 import logging
 
 
@@ -140,7 +137,7 @@ def get_full_tflops_approx(dtype: torch.dtype, device: Optional[torch.device] = 
 
 
 def get_tensorcore_dtype_support(device_id=0):
-    """ INT4 is not listed here
+    """ INT4/MXFP4/MXFP6 is not listed here
     """
     cap = torch.cuda.get_device_capability(device_id)
     DTYPE_MAP = {
@@ -166,13 +163,13 @@ def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
     if device_name.find("A100") >= 0 or device_name.find("A800") >= 0:
         return 312 * (2 / dtype.itemsize)
     # https://www.nvidia.com/en-us/data-center/products/a10-gpu/
-    if device_name.find("A10"):
+    if device_name.find("A10") >= 0:
         return 125 * (2 / dtype.itemsize)
     # https://www.nvidia.com/en-us/data-center/products/a30-gpu/
-    if device_name.find("A30"):
+    if device_name.find("A30") >= 0:
         return 165 * (2 / dtype.itemsize)
     # https://images.nvidia.com/content/Solutions/data-center/a40/nvidia-a40-datasheet.pdf
-    if device_name.find("A40"):
+    if device_name.find("A40") >= 0:
         return 149.7 * (2 / dtype.itemsize)
 
     if device_name == "NVIDIA L20":  # No doc from NVIDIA
@@ -187,6 +184,7 @@ def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
     if device_name == "NVIDIA L40S":
         return 366 * (2 / dtype.itemsize)
     # https://www.nvidia.com/en-us/data-center/h100/
+    # https://chaoqing-i.com/upload/20231128/NVIDIA%20H800%20GPU%20Datasheet.pdf
     if device_name == "NVIDIA H100" or device_name == "NVIDIA H800":
         return 989 * (2 / dtype.itemsize)
     if device_name == "NVIDIA H20":
@@ -219,6 +217,7 @@ def get_dram_gbps_by_device_name(device_name: str):
         "NVIDIA A40": 696,
         "NVIDIA H100 SXM": 3958,
         "NVIDIA H100 NVL": 3341,
+        "NVIDIA H800": 3350,
     }
     return _DRAM_GBPS[device_name]
 
@@ -235,3 +234,14 @@ def estimate_gemm_sol_time_ms(M: int, N: int, K: int, dtype=torch.bfloat16):
 
     flops = M * N * K * 2
     return flops / get_tensorcore_tflops(dtype=dtype) / 1e9
+
+
+if __name__ == "__main__":
+    print(f"DRAM: {get_dram_gbps():0.2f} GB/s")
+    print(f"DRAM by approx: {triton.testing.get_dram_gbps():0.2f} GB/s")
+    print(f"DRAM by device name: {get_dram_gbps_by_device_name(torch.cuda.get_device_name(0)):0.2f} GB/s")
+    print(f"TFLOPS: {get_tensorcore_tflops(torch.float16):0.2f} TFLOPS")
+    num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    print(f"TFLOPS by approx: {get_tensorcore_tflops_by_calc(0, num_sms, 4, torch.float16):0.2f} TFLOPS")
+    print(f"TFLOPS by device name: {get_tensorcore_tflops_by_device_name(torch.float16):0.2f} TFLOPS")
+    print("")

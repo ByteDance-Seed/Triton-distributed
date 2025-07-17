@@ -30,26 +30,24 @@ In this tutorial, you will write a multi-node reduce-scatter operation.
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/06-inter-node-reduce-scatter.py
+    bash ./scripts/launch.sh ./tutorials/06-inter-node-reduce-scatter.py
 
 """
 
 import torch
 import dataclasses
 import triton
-import triton_dist
 import triton.language as tl
 import triton_dist.language as dl
 
 from typing import Optional, List
-from triton_dist import pynvshmem
+import nvshmem.core
 from triton_dist.kernels.nvidia.common_ops import BarrierAllContext, wait_eq, barrier_all_on_stream
 from triton_dist.kernels.nvidia.reduce_scatter import ring_reduce
-from triton.language.extra import libshmem_device
+from triton_dist.language.extra import libshmem_device
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, nvshmem_create_tensors, nvshmem_free_tensor_sync
 
 import os
-
-SIGNAL_DTYPE = torch.uint64
 
 
 # reduce-scatter context. Stores comm info (dtype, nnodes, etc), symm buffers, and signals.
@@ -65,12 +63,12 @@ class ReduceScatter2DContext:
     overlap_with_gemm: bool
 
     # comm buffer
-    scatter_bufs: List[torch.Tensor]
-    rs_per_node_bufs: List[torch.Tensor]
-    p2p_bufs: List[torch.Tensor]
+    symm_scatter_bufs: List[torch.Tensor]
+    symm_rs_per_node_bufs: List[torch.Tensor]
+    symm_p2p_bufs: List[torch.Tensor]
 
     # barrier bufs
-    signal_bufs: List[torch.Tensor]  # need reset: signal_buf =  scatter_signal | rs_per_node_signal
+    symm_signal_bufs: List[torch.Tensor]  # need reset: signal_buf =  scatter_signal | rs_per_node_signal
     barrier: BarrierAllContext
 
     # stream
@@ -84,8 +82,8 @@ class ReduceScatter2DContext:
 
     # preprocess to reduce cpu overhead
     # comm barriers
-    scatter_signal_bufs: List[torch.Tensor] = dataclasses.field(init=False)
-    rs_per_node_signal_bufs: List[torch.Tensor] = dataclasses.field(init=False)
+    symm_scatter_signal_bufs: List[torch.Tensor] = dataclasses.field(init=False)
+    symm_rs_per_node_signal_bufs: List[torch.Tensor] = dataclasses.field(init=False)
 
     local_rank: int = dataclasses.field(init=False)
     node_id: int = dataclasses.field(init=False)
@@ -98,40 +96,47 @@ class ReduceScatter2DContext:
         self.node_id = self.rank // self.local_world_size
         self.nnodes = self.world_size // self.local_world_size
         self.scatter_signal_buf_list_for_each_node = []
-        for buf in self.signal_bufs:
+        for buf in self.symm_signal_bufs:
             assert buf.shape[0] >= 2 * self.world_size
 
-        self.scatter_signal_bufs = [buf[:self.world_size] for buf in self.signal_bufs]
-        self.rs_per_node_signal_bufs = [buf[self.world_size:self.world_size * 2] for buf in self.signal_bufs]
+        self.symm_scatter_signal_bufs = [buf[:self.world_size] for buf in self.symm_signal_bufs]
+        self.symm_rs_per_node_signal_bufs = [buf[self.world_size:self.world_size * 2] for buf in self.symm_signal_bufs]
 
         for node_id in range(self.nnodes):
             self.scatter_signal_buf_list_for_each_node.append(
-                self.scatter_signal_bufs[self.local_rank][node_id * self.local_world_size:(node_id + 1) *
-                                                          self.local_world_size])
+                self.symm_scatter_signal_bufs[self.local_rank][node_id * self.local_world_size:(node_id + 1) *
+                                                               self.local_world_size])
 
-    def reset_barriers(self) -> int:
-        self.signal_bufs[self.local_rank].fill_(0)
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.symm_scatter_bufs[self.local_rank])
+        nvshmem_free_tensor_sync(self.symm_rs_per_node_bufs[self.local_rank])
+        nvshmem_free_tensor_sync(self.symm_p2p_bufs[self.local_rank])
+        nvshmem_free_tensor_sync(self.symm_signal_bufs[self.local_rank])
+
+    def reset_barriers(self):
+        self.symm_signal_bufs[self.local_rank].fill_(0)
 
     def get_scatter_bufs_and_signal_for_each_node(self, input, node_id):
         M = input.shape[0]
         M_per_rank = M // self.world_size
         M_per_node = M_per_rank * self.local_world_size
         scatter_bufs_intra_node = [
-            self.scatter_bufs[i][node_id * M_per_node:(node_id + 1) * M_per_node] for i in range(self.local_world_size)
+            self.symm_scatter_bufs[i][node_id * M_per_node:(node_id + 1) * M_per_node]
+            for i in range(self.local_world_size)
         ]
         return scatter_bufs_intra_node, self.scatter_signal_buf_list_for_each_node[node_id]
 
     @property
-    def rs_per_node_buf(self) -> torch.Tensor:
-        return self.rs_per_node_bufs[self.local_rank]
+    def symm_rs_per_node_buf(self) -> torch.Tensor:
+        return self.symm_rs_per_node_bufs[self.local_rank]
 
     @property
-    def rs_per_node_signal_buf(self) -> torch.Tensor:
-        return self.rs_per_node_signal_bufs[self.local_rank]
+    def symm_rs_per_node_signal_buf(self) -> torch.Tensor:
+        return self.symm_rs_per_node_signal_bufs[self.local_rank]
 
     @property
-    def p2p_buf(self) -> torch.Tensor:
-        return self.p2p_bufs[self.local_rank]
+    def symm_p2p_buf(self) -> torch.Tensor:
+        return self.symm_p2p_bufs[self.local_rank]
 
     @property
     def num_rs_sms(self) -> int:
@@ -142,8 +147,8 @@ class ReduceScatter2DContext:
             return 0
 
     @property
-    def scatter_signal_buf(self) -> torch.Tensor:
-        return self.scatter_signal_bufs[self.local_rank]
+    def symm_scatter_signal_buf(self) -> torch.Tensor:
+        return self.symm_scatter_signal_bufs[self.local_rank]
 
 
 def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dtype, overlap_with_gemm=True,
@@ -157,19 +162,19 @@ def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dt
     assert world_size % local_world_size == 0
     assert max_M % world_size == 0
 
-    scatter_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M, N], dtype)
+    scatter_bufs = nvshmem_create_tensors([max_M, N], dtype, rank, local_world_size)
 
-    rs_per_node_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M // local_world_size, N], dtype)
+    rs_per_node_bufs = nvshmem_create_tensors([max_M // local_world_size, N], dtype, rank, local_world_size)
 
-    p2p_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M // local_world_size, N], dtype)
+    p2p_bufs = nvshmem_create_tensors([max_M // local_world_size, N], dtype, rank, local_world_size)
 
     # signal_buf: scatter_signal | rs_per_node_signal
     num_signal_bufs = 2
-    signal_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([
-        world_size * num_signal_bufs,
-    ], SIGNAL_DTYPE)
+    signal_bufs = nvshmem_create_tensors([world_size * num_signal_bufs], NVSHMEM_SIGNAL_DTYPE, rank, local_world_size)
+    signal_buf = signal_bufs[rank]
+    signal_buf.zero_()
 
-    barrier_all_on_stream(None, torch.cuda.current_stream())
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     p2p_stream: torch.cuda.Stream = torch.cuda.Stream(priority=-1)
     reduction_stream: torch.cuda.Stream = torch.cuda.Stream(priority=-1)
@@ -177,11 +182,11 @@ def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dt
     num_sync_sms = 0
     num_p2p_sms = 1
     ctx = ReduceScatter2DContext(max_M=max_M, N=N, rank=rank, world_size=world_size, local_world_size=local_world_size,
-                                 dtype=dtype, overlap_with_gemm=overlap_with_gemm, scatter_bufs=scatter_bufs,
-                                 rs_per_node_bufs=rs_per_node_bufs, p2p_bufs=p2p_bufs, signal_bufs=signal_bufs,
-                                 barrier=BarrierAllContext(True), reduction_stream=reduction_stream,
-                                 p2p_stream=p2p_stream, num_sync_sms=num_sync_sms, num_p2p_sms=num_p2p_sms,
-                                 num_reduction_sms=num_reduction_sms)
+                                 dtype=dtype, overlap_with_gemm=overlap_with_gemm, symm_scatter_bufs=scatter_bufs,
+                                 symm_rs_per_node_bufs=rs_per_node_bufs, symm_p2p_bufs=p2p_bufs,
+                                 symm_signal_bufs=signal_bufs, barrier=BarrierAllContext(True),
+                                 reduction_stream=reduction_stream, p2p_stream=p2p_stream, num_sync_sms=num_sync_sms,
+                                 num_p2p_sms=num_p2p_sms, num_reduction_sms=num_reduction_sms)
     return ctx
 
 
@@ -246,8 +251,8 @@ def reducer_scatter_for_each_node(input, stream, ctx: ReduceScatter2DContext):
     M_per_node = M_per_rank * local_world_size
     nnodes = ctx.nnodes
     node_id = ctx.node_id
-    rs_per_node_buf = ctx.rs_per_node_buf
-    p2p_buf = ctx.p2p_buf
+    rs_per_node_buf = ctx.symm_rs_per_node_buf
+    p2p_buf = ctx.symm_p2p_buf
     # For `target_node_id` in the range [0, nnodes - 1], perform an intra-node reduce-scatter on the
     # input[target_node_id * M_per_node: (target_node_id + 1) * M_per_node]. Then send the result via
     # P2P to the same local rank on the node 'target_node_id'.
@@ -322,7 +327,7 @@ def reduce_scatter_multi_node(input, stream, ctx: ReduceScatter2DContext):
             This can reduce the inter-node communication volume by a factor of local_world_size.
     """
     rs_resutl_per_node = reducer_scatter_for_each_node(input, stream, ctx)
-    barrier_all_on_stream(None, stream)
+    nvshmem_barrier_all_on_stream(stream)
     output = torch.empty((M_per_rank, N), dtype=input.dtype, device=input.device)
     """
     Step 2: After receiving data sent via P2P from all nodes, perform a reduction to get the final result.
@@ -348,7 +353,7 @@ def reduce_scatter_2d_op(input, ctx: ReduceScatter2DContext):
     current_stream = torch.cuda.current_stream()
     reduction_stream.wait_stream(current_stream)
     # Wait for the completion of the previous iteration.
-    barrier_all_on_stream(None, current_stream)
+    nvshmem_barrier_all_on_stream(current_stream)
 
     # perform reduce-scatter
     output = reduce_scatter_multi_node(input, current_stream, ctx)
@@ -375,7 +380,7 @@ if __name__ == "__main__":
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 
-    TP_GROUP = triton_dist.utils.initialize_distributed()
+    TP_GROUP = initialize_distributed()
     torch.cuda.synchronize()
 
     output_dtype = torch.bfloat16
@@ -389,12 +394,12 @@ if __name__ == "__main__":
     # torch impl
     torch_output = torch_rs(input, TP_GROUP)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     # dist triton impl
     dist_triton_output = reduce_scatter_2d_op(input, rs_ctx)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     torch.cuda.synchronize()
 
     # check
@@ -402,4 +407,6 @@ if __name__ == "__main__":
     torch.testing.assert_close(torch_output, dist_triton_output, atol=atol, rtol=rtol)
     torch.cuda.synchronize()
     print(f"RANK {RANK}: pass!")
+    rs_ctx.finalize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

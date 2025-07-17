@@ -22,13 +22,15 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-import triton
-from triton_dist import pynvshmem
-from triton.language.extra import libshmem_device
-
-import os
 import datetime
+import os
+
+import nvshmem.core
+import torch
+
+import triton
+from triton_dist.language.extra import libshmem_device
+from triton_dist.utils import init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 @triton.jit
@@ -54,11 +56,13 @@ if __name__ == "__main__":
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
-    t = pynvshmem.nvshmem_create_tensor((32, ), torch.int32)
+    t = nvshmem_create_tensor((32, ), dtype=torch.int32)
     ring_put[(1, )](t)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     print(f"RANK {RANK}: {t}")
+    nvshmem_free_tensor_sync(t)
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

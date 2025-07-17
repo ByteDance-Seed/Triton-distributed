@@ -426,8 +426,10 @@ def make_kernel_with_algo_info_param(
     # TODO(houqi.1993) not supported code here
     params = " ".join([f"{key} = %d" for (key, dtype) in schema])
     args = ", ".join([f"{algo_info_variable_name}.{key}" for key, dtype in schema])
-
-    src += f'  fprintf(stderr, "Error: kernel `{c_kernel_name}` algo_info not supported: {params}\\n", {args});\n'
+    if len(args) > 0:
+        src += f'  fprintf(stderr, "Error: kernel `{c_kernel_name}` algo_info not supported: {params}\\n", {args});\n'
+    else:
+        src += f'  fprintf(stderr, "Error: kernel `{c_kernel_name}` algo_info not supported\\n");\n'
     src += "  return CUDA_ERROR_NOT_SUPPORTED;\n"
     src += "}\n"
     return src
@@ -750,6 +752,7 @@ endif()
 add_distributed_library({LIBNAME} ${{LIB_FILES}})
 target_link_libraries({LIBNAME} PUBLIC
   CUDA::cudart
+  CUDA::cuda_driver
   -L${{CUDA_HOME}}/lib -ldl)
 target_include_directories(triton_distributed_kernel PUBLIC
   ${{CUDAToolkit_INCLUDE_DIRS}}  # 使用 CMake 提供的头文件路径
@@ -851,6 +854,15 @@ if __name__ == "__main__":
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         kernel = getattr(mod, kernel_name)
+        ###################################################
+        # TODO: ad-hoc patch for huristic and autotune
+        from types import FunctionType
+
+        aot_args = kernel.__aot_compile_spaces__
+        while not isinstance(kernel.fn, FunctionType):
+            kernel = kernel.fn
+        kernel.__aot_compile_spaces__ = aot_args
+        ###################################################
         logging.info(f"compiling {kernel_name}...")
         tmp_context = compile_kernel(kernel, workspace)
         context.update(tmp_context)

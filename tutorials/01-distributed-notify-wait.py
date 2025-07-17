@@ -41,7 +41,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/01-distributed-notify-wait.py
+    bash ./scripts/launch.sh ./tutorials/01-distributed-notify-wait.py
 
 """
 
@@ -49,14 +49,14 @@ In doing so, you will learn about:
 # Kernel
 # --------------
 import torch
-from triton_dist import pynvshmem
 import os
 import datetime
+import nvshmem.core
 
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton_dist.utils import dist_print
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, dist_print, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 from triton.language.extra.cuda.language_extra import (__syncthreads)
 
 
@@ -153,7 +153,7 @@ def initialize_distributed():
     torch.cuda.synchronize()
     # You need to use `init_nvshmem_by_uniqueid` to initialize
     # the distributed system
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
     return TP_GROUP
 
 
@@ -165,16 +165,15 @@ BLOCK_SIZE = 128
 def main(TP_GROUP):
     stream = torch.cuda.current_stream()
     # The created tensor is by-default on current cuda device
-    queue = pynvshmem.nvshmem_create_tensor((QUEUE_SIZE * BLOCK_SIZE, ),  # Shape on each device
-                                            torch.float32)
-    signal = pynvshmem.nvshmem_create_tensor((QUEUE_SIZE, ), torch.uint64  # Notify requires 64bit unsigned signal type
-                                             )
+    queue = nvshmem_create_tensor((QUEUE_SIZE * BLOCK_SIZE, ),  # Shape on each device
+                                  torch.float32)
+    signal = nvshmem_create_tensor((QUEUE_SIZE, ), NVSHMEM_SIGNAL_DTYPE)
     queue.fill_(-1)
     signal.fill_(0)  # The initial value of signal should be 0s
     # You need a barrier all to make sure the above initialization
     # is visible to all the other ranks.
     # This is usually used for intra-node.
-    pynvshmem.nvshmemx_barrier_all_on_stream(stream.cuda_stream)
+    nvshmem_barrier_all_on_stream(stream)
 
     # Distributed info
     rank = TP_GROUP.rank()
@@ -193,7 +192,7 @@ def main(TP_GROUP):
         # by using flipping barriers. We will cover this optimization in future tutorial.
         # TODO: tutorial for flipping barriers.
         signal.fill_(0)
-        pynvshmem.nvshmemx_barrier_all_on_stream(stream.cuda_stream)
+        nvshmem_barrier_all_on_stream(stream)
 
         producer_consumer_kernel[(20, )](  # use 20 SMs
             rank,
@@ -221,10 +220,14 @@ def main(TP_GROUP):
         if iters == NUM_REPEAS - 1:
             dist_print(f"rank{rank} Passed✅!", need_sync=True, allowed_ranks=list(range(num_ranks)))
 
+    nvshmem_free_tensor_sync(queue)
+    nvshmem_free_tensor_sync(signal)
+
 
 # Initialize the distributed system
 TP_GROUP = initialize_distributed()
 # The main function
 main(TP_GROUP)
-# Finalize
+
+nvshmem.core.finalize()
 torch.distributed.destroy_process_group()

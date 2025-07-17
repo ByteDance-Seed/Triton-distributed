@@ -9,6 +9,9 @@ echo $SCRIPT_DIR
 echo $PARAMS_FILE
 AOT_KERNELS=()
 while IFS= read -r line; do
+    # skip `#`
+    [[ "$line" =~ ^# ]] && continue
+
     resolved_line="${line//\$\{SCRIPT_DIR\}/$SCRIPT_DIR}"
     echo $line
     echo $resolved_line

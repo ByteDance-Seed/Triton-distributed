@@ -26,7 +26,6 @@ import torch
 import torch.distributed
 import triton
 import triton.language as tl
-from triton_dist import pynvshmem
 
 import argparse
 import random
@@ -34,8 +33,9 @@ import os
 import datetime
 import numpy as np
 from tabulate import tabulate
+import nvshmem.core
 
-from triton_dist.utils import group_profile
+from triton_dist.utils import group_profile, init_nvshmem_by_torch_process_group, sleep_async
 from triton_dist.kernels.nvidia import create_all_to_all_context, fast_all_to_all, all_to_all_post_process
 
 
@@ -150,7 +150,7 @@ def initialize_distributed(enable_flux=False):
     if enable_flux:
         flux.init_flux_shm(EP_GROUP)
     else:
-        pynvshmem.init_nvshmem_by_uniqueid(EP_GROUP)
+        init_nvshmem_by_torch_process_group(EP_GROUP)
 
     torch.cuda.synchronize()
     return EP_GROUP
@@ -277,7 +277,7 @@ def perf_flux(input, scale_tensor, exp_indices):
         )
         return flux_out
 
-    torch.cuda._sleep(1000000000)
+    sleep_async(1000)
     # warmup
     for _ in range(10):
         flux_out = fwd()
@@ -332,7 +332,7 @@ def perf_triton(input: torch.Tensor, scale_tensor: torch.Tensor, exp_indices: to
         return fast_all_to_all(all_to_all_ctx, scattered_input, split_cumsum,
                                scattered_scale_tensor if args.with_scale else None)
 
-    torch.cuda._sleep(1000000000)
+    sleep_async(1000)
     # warmup
     for _ in range(20):
         fwd()
@@ -474,4 +474,6 @@ if __name__ == "__main__":
             if args.enable_flux:
                 _check(flux_scale, ref_scale, "Flux scale")
 
+    all_to_all_ctx.finalize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group(EP_GROUP)

@@ -60,7 +60,7 @@ def is_hip():
 if is_cuda():
     from cuda import cuda, cudart
 
-    from triton_dist import pynvshmem
+    import nvshmem.core
 elif is_hip():
     from hip import hip
 else:
@@ -76,6 +76,12 @@ def init_seed(seed=0):
     os.environ["NCCL_DEBUG"] = os.getenv("NCCL_DEBUG", "ERROR")
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     torch.use_deterministic_algorithms(True, warn_only=True)
+    # zero empty takes more kernel launch and may hide uninitialized problem. always set to False
+    # available since torch 2.2: https://docs.pytorch.org/docs/2.2/deterministic.html
+    try:
+        torch.utils.deterministic.fill_uninitialized_memory = False
+    except Exception:
+        logging.warning("torch.utils.fill_uninitialized_memory is available only for torch >=2.2")
     torch.set_printoptions(precision=2)
     torch.manual_seed(3 + seed)
     torch.cuda.manual_seed_all(3 + seed)
@@ -88,7 +94,84 @@ def init_seed(seed=0):
     random.seed(3 + seed)
 
 
-def initialize_distributed():
+def broadcast_cpu(tensor: torch.Tensor, src: int, group: torch.distributed.ProcessGroup):
+    if not tensor.is_cuda:
+        tensor_gpu = tensor.cuda()
+        torch.distributed.broadcast(tensor_gpu, src=src, group=group)
+        tensor.copy_(tensor_gpu)
+    else:
+        torch.distributed.broadcast(tensor, src=src, group=group)
+    torch.cuda.synchronize()
+
+
+def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
+    # Extract rank, nranks from process group
+    num_ranks = pg.size()
+    rank_id = pg.rank()
+
+    # Create an empty uniqueid for all ranks
+    broadcast_objects = [nvshmem.core.get_unique_id(empty=rank_id != 0)]
+    torch.distributed.broadcast_object_list(broadcast_objects, src=0, group=pg)
+    torch.distributed.barrier(group=pg)
+    from cuda.core.experimental import Device
+    nvshmem.core.init(device=Device(torch.cuda.current_device()), uid=broadcast_objects[0], rank=rank_id,
+                      nranks=num_ranks, initializer_method="uid")
+    # nvshmem.core.utils._configure_logging("DEBUG")
+
+
+def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
+    torch.cuda.synchronize()
+    tensor = nvshmem.core.tensor(shape, dtype=dtype)
+    torch.cuda.synchronize()
+    return tensor
+
+
+def nvshmem_create_tensors(shape, dtype, rank, local_world_size) -> List[torch.Tensor]:
+
+    def _get_peer_tensor(t, peer) -> torch.Tensor:
+        # avoid create tensor on the same buf again. nvshmem4py can't handle multiple reference with grace. so we handle it here.
+        # https://forums.developer.nvidia.com/t/nvshmem4py-nvshmem-core-finalize-does-not-handle-everything/337979
+        if peer == rank:
+            return t
+        return nvshmem.core.get_peer_tensor(t, peer)
+
+    local_rank = rank % local_world_size
+    rank_on_same_node_start = rank - local_rank
+    rank_on_same_node_end = rank_on_same_node_start + local_world_size
+    torch.cuda.synchronize()
+    tensor = nvshmem_create_tensor(shape, dtype=dtype)
+    torch.cuda.synchronize()
+    return [_get_peer_tensor(tensor, peer) for peer in range(rank_on_same_node_start, rank_on_same_node_end)]
+
+
+def nvshmem_free_tensor_sync(tensor):
+    torch.cuda.synchronize()
+    nvshmem.core.free_tensor(tensor)
+    torch.cuda.synchronize()
+
+
+def finalize_distributed():
+    nvshmem.core.finalize()
+    torch.distributed.destroy_process_group()
+
+
+class TorchStreamWrapper:
+
+    def __init__(self, pt_stream: torch.cuda.Stream):
+        self.pt_stream = pt_stream
+        self.handle = pt_stream.cuda_stream
+
+    def __cuda_stream__(self):
+        stream_id = self.pt_stream.cuda_stream
+        return (0, stream_id)  # Return format required by CUDA Python
+
+
+def nvshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+    stream = stream or torch.cuda.current_stream()
+    nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=TorchStreamWrapper(stream))
+
+
+def initialize_distributed(seed=None):
     global _TP_GROUP
     assert _TP_GROUP is None, "TP_GROUP has already been initialized"
 
@@ -106,8 +189,8 @@ def initialize_distributed():
     # use all ranks as tp group
     _TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
-    init_seed(seed=RANK)
-    pynvshmem.init_nvshmem_by_uniqueid(_TP_GROUP)
+    init_seed(seed=seed if seed is not None else RANK)
+    init_nvshmem_by_torch_process_group(_TP_GROUP)
     return _TP_GROUP
 
 
@@ -634,23 +717,16 @@ def get_has_fullmesh_nvlink_pynvml():
 
     try:
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(num_devices)]
-        remote_type = [pynvml.nvmlDeviceGetNvLinkRemoteDeviceType(handle, 0) for handle in handles]
-        if all([x == pynvml.NVML_NVLINK_DEVICE_TYPE_SWITCH for x in remote_type]):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            result = pynvml.nvmlDeviceGetFieldValues(handle, [pynvml.NVML_FI_DEV_NVSWITCH_CONNECTED_LINK_COUNT])
-            link_count = parse_nvml_field_value(result[0])
-            if link_count != num_devices:
-                warnings.warn(f"Found {link_count} NVLink links, but expected {num_devices}. "
-                              "This may be due to a bug in the NVSwitch driver. ")
-            return link_count == num_devices
-        if all([x == pynvml.NVML_NVLINK_DEVICE_TYPE_GPU for x in remote_type]):
-            if num_devices == 2:
-                return True
-            else:
-                warnings.warn(
-                    f"Found {num_devices} GPUs, but not connected by NVSwitch. this may not be supported well")
-                return False
-        return False
+        for cur_device in range(num_devices):
+            cur_handle = handles[cur_device]
+            for remote_device in range(num_devices):
+                if remote_device == cur_device:
+                    continue
+                remote_handle = handles[remote_device]
+                p2p_status = pynvml.nvmlDeviceGetP2PStatus(cur_handle, remote_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                    return False
+        return True
     except pynvml.NVMLError_NotSupported:
         return False
 
@@ -815,7 +891,7 @@ def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True):
         raise RuntimeError
 
     if verbose:
-        print("all close!")
+        print("✅ all close!")
 
 
 @functools.lru_cache()
@@ -853,3 +929,84 @@ def get_device_max_shared_memory_size(device):
     err, prop = cudart.cudaGetDeviceProperties(device)
     CUDA_CHECK(err)
     return prop.sharedMemPerBlockOptin
+
+
+# TODO(houqi.1993) nvshmem4py does not support torch.uint64, use torch.int64 instead
+# https://forums.developer.nvidia.com/t/nvshmem4py-nvshmem-core-tensor-does-not-support-dtype-torch-uint64-which-is-wired/337929/2
+NVSHMEM_SIGNAL_DTYPE = torch.int64
+
+
+@functools.lru_cache()
+def get_nvshmem_home():
+    try:
+        import nvidia.nvshmem
+        return Path(nvidia.nvshmem.__file__).parent
+    except Exception:
+        return Path(os.getenv("NVSHMEM_HOME"))
+
+
+@functools.lru_cache()
+def has_nvshmemi_bc_built():
+    try:
+        nvshmem_home = get_nvshmem_home()
+        return Path(nvshmem_home / "lib" / "libnvshmemi_device.bc").exists()
+    except Exception:
+        return False
+
+
+@functools.lru_cache()
+def is_nvshmem_multimem_supported():
+    # this is a python version of nvshmem nvshmemi_detect_nvls_support
+    err, cuda_driver_version = cuda.cuDriverGetVersion()
+    CUDA_CHECK(err)
+
+    err, is_multicast_supported = cuda.cuDeviceGetAttribute(
+        cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, 0)
+    CUDA_CHECK(err)
+
+    # nvshmem configure support
+    if os.getenv("NVSHMEM_DISABLE_CUDA_VMM", "0") == "1":
+        return False
+
+    if os.getenv("NVSHMEM_DISABLE_NVLS", "0") == "1":
+        return False
+
+    return all([
+        hasattr(cuda, x) for x in [
+            "cuMulticastCreate",
+            "cuMulticastBindMem",
+            "cuMulticastUnbind",
+            "cuMulticastGetGranularity",
+            "cuMulticastAddDevice",
+        ]
+    ])
+
+
+@functools.lru_cache()
+def is_tma_support():
+    cap_major = torch.cuda.get_device_capability()[0]
+    return cap_major >= 9
+
+
+def requires(condition_func):
+
+    def decorator(func):
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            assert condition_func(), f"{condition_func.__name__} is needed for {func.__name__}, please check..."
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+@functools.lru_cache()
+def get_device_property(device_id=0):
+    return torch.cuda.get_device_properties(device_id)
+
+
+def sleep_async(duration_ms: int):
+    clock_rate_hz = torch.cuda.clock_rate() * 1e6
+    torch.cuda._sleep(int(clock_rate_hz * duration_ms / 1000))

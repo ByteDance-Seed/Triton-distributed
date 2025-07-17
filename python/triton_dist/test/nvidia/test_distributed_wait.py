@@ -240,7 +240,7 @@ def test_1024_gemm_single_device(args):
     torch.cuda.current_stream().wait_stream(stream)
     print(barrier_tensor)
     assert torch.allclose(C_golden, C, atol=1e-3, rtol=1e-3)
-    print("Pass!")
+    print("✅ Pass!")
 
 
 def measure_cuda_function_performance(cuda_function, warmup=10, repeat=100):

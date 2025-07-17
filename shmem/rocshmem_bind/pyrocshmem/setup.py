@@ -93,7 +93,7 @@ def hip_deps():
 
 @pathlib_wrapper
 def mpi_deps():
-    mpi_home = root_path / "../ompi_build/install/ompi/"
+    mpi_home = Path("/opt/ompi_build/install/ompi/")
     include_dirs = [mpi_home / "include"]
     library_dirs = [mpi_home / "lib"]
     libraries = ["mpi"]

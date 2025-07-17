@@ -37,7 +37,7 @@ In doing so, you will learn about:
     bash launch_amd.sh 10-amd-gemm-fuse-ag-rs.py
 
     # To run this tutorial
-    bash ./launch_amd.sh ./tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
+    bash ./scripts/launch_amd.sh ./tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
 
 """
 

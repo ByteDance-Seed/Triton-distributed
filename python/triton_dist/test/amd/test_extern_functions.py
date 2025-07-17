@@ -42,36 +42,36 @@ def asin_kernel(
 
     x = libdevice.store_release_workgroup(x_ptr_plus_offsets)
     x = libdevice.store_relaxed_workgroup(x_ptr_plus_offsets)
-    x = libdevice.store_release_agent(x_ptr_plus_offsets)
+    x = libdevice.store_release_agent(x_ptr_plus_offsets, x)
     x = libdevice.store_relaxed_agent(x_ptr_plus_offsets)
-    x = libdevice.store_release_system(x_ptr_plus_offsets)
-    x = libdevice.store_relaxed_system(x_ptr_plus_offsets)
+    x = libdevice.store_release_system(x_ptr_plus_offsets, x)
+    x = libdevice.store_relaxed_system(x_ptr_plus_offsets, x)
 
-    x = libdevice.syncthreads()
+    x = libdevice.syncthreads().to(x.dtype)
 
     y_ptr_plus_offsets = y_ptr + offsets
-    x = libdevice.red_add_release_agent(y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.red_add_release_system(y_ptr_plus_offsets, y_ptr_plus_offsets)
+    x = libdevice.red_add_release_agent(y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.red_add_release_system(y_ptr_plus_offsets, x).to(x.dtype)
 
-    x = libdevice.atom_add_acquire_agent(y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_add_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_add_acqrel_agent(y_ptr_plus_offsets, y_ptr_plus_offsets)
+    x = libdevice.atom_add_acquire_agent(y_ptr_plus_offsets, x)
+    x = libdevice.atom_add_relaxed_agent(y_ptr_plus_offsets, x)
+    x = libdevice.atom_add_acqrel_agent(y_ptr_plus_offsets, x)
 
-    x = libdevice.atom_add_acquire_system(y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_add_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_add_acqrel_system(y_ptr_plus_offsets, y_ptr_plus_offsets)
+    x = libdevice.atom_add_acquire_system(y_ptr_plus_offsets, x)
+    x = libdevice.atom_add_relaxed_system(y_ptr_plus_offsets, x)
+    x = libdevice.atom_add_acqrel_system(y_ptr_plus_offsets, x)
 
-    x = libdevice.atom_cas_acquire_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_release_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_release_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_relaxed_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
+    x = libdevice.atom_cas_acquire_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.atom_cas_release_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.atom_cas_relaxed_relaxed_agent(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
 
-    x = libdevice.atom_cas_acquire_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_release_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_release_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
-    x = libdevice.atom_cas_relaxed_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, y_ptr_plus_offsets)
+    x = libdevice.atom_cas_acquire_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.atom_cas_release_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.atom_cas_release_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
+    x = libdevice.atom_cas_relaxed_relaxed_system(y_ptr_plus_offsets, y_ptr_plus_offsets, x).to(x.dtype)
 
-    return x
+    tl.store(y_ptr_plus_offsets, x)
+    #return x
 
 
 # %%
@@ -81,7 +81,7 @@ def asin_kernel(
 
 torch.manual_seed(0)
 size = 98432
-x = torch.randint(low=0, high=2, size=(size, ), dtype=torch.uint64, device=DEVICE)
+x = torch.randint(low=0, high=2, size=(size, ), dtype=torch.int32, device=DEVICE)
 output_triton = torch.zeros(size, device=DEVICE, dtype=torch.int32)
 output_torch = torch.asin(x).to(dtype=torch.uint64)
 assert x.is_cuda and output_triton.is_cuda

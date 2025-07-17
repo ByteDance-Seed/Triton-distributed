@@ -1,0 +1,18 @@
+set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
+
+set(LLVM_TARGET_DEFINITIONS SIMTOps.td)
+mlir_tablegen(Dialect.h.inc -gen-dialect-decls -dialect=simt)
+mlir_tablegen(Dialect.cpp.inc -gen-dialect-defs -dialect=simt)
+mlir_tablegen(OpsConversions.inc -gen-llvmir-conversions)
+mlir_tablegen(Ops.h.inc -gen-op-decls)
+mlir_tablegen(Ops.cpp.inc -gen-op-defs)
+add_mlir_doc(SIMTDialect SIMTDialect dialects/ -gen-dialect-doc)
+add_mlir_doc(SIMTOps SIMTOps dialects/ -gen-op-doc)
+add_public_tablegen_target(SIMTTableGen)
+
+set(LLVM_TARGET_DEFINITIONS SIMTAttrDefs.td)
+mlir_tablegen(SIMTEnums.h.inc -gen-enum-decls)
+mlir_tablegen(SIMTEnums.cpp.inc -gen-enum-defs)
+mlir_tablegen(SIMTAttrDefs.h.inc -gen-attrdef-decls)
+mlir_tablegen(SIMTAttrDefs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(SIMTAttrDefsIncGen)

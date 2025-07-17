@@ -130,9 +130,10 @@ CPP_LICENSES = [
 // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
-""", """/*
-* Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
-*/
+""", """
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 """, """//
 // Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
 //

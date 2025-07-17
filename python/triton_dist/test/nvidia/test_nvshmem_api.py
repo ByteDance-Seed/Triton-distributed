@@ -22,20 +22,49 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import triton
-import triton.language as tl
-from triton.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid, ntid, __syncthreads, multimem_st_b64, load_v2_b64, st
+import datetime
+import functools
+import os
+
+import pytest
+import nvshmem.bindings
+import nvshmem.core
 import torch
 import torch.distributed
-from triton_dist import pynvshmem
-import os
-import datetime
+
+import triton
+import triton.backends
+import triton.backends.nvidia
+import triton.backends.nvidia.compiler
+import triton.language as tl
+from triton.language.extra.cuda.language_extra import (__syncthreads, load_v4_u32, multimem_st_b32, multimem_st_v2,
+                                                       multimem_st_v4, ntid, st, tid, multimem_st_p_b32)
+from triton_dist.language.extra import libshmem_device
+from triton_dist.utils import (NVSHMEM_SIGNAL_DTYPE, has_nvshmemi_bc_built, init_nvshmem_by_torch_process_group,
+                               nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor,
+                               is_nvshmem_multimem_supported)
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 RANK = int(os.environ.get("RANK", 0))
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+
+
+def conditional_execution(condition_func):
+
+    def decorator(func):
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if condition_func():
+                return func(*args, **kwargs)
+            else:
+                print(f"{condition_func.__name__} not satisfied. skip {func.__name__}...")
+                return None
+
+        return wrapper
+
+    return decorator
 
 
 def test_nvshmem_basic():
@@ -58,9 +87,9 @@ def test_nvshmem_basic():
             st(output, libshmem_device.team_n_pes(libshmem_device.NVSHMEMX_TEAM_NODE))
 
     print("nvshmem basic start...")
-    output = pynvshmem.nvshmem_create_tensor((6, ), torch.int32)
+    output = nvshmem_create_tensor((6, ), torch.int32)
     _nvshmem_basic[(1, )](output)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     try:
         torch.testing.assert_close(
             output,
@@ -71,6 +100,8 @@ def test_nvshmem_basic():
         raise (e)
     else:
         print("✅ nvshmem basic pass")
+
+    nvshmem_free_tensor_sync(output)
 
 
 def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
@@ -132,7 +163,7 @@ def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 else:
                     raise ValueError("scope must be block, warp, or thread")
 
-    t = pynvshmem.nvshmem_create_tensor((N, ), dtype)
+    t = nvshmem_create_tensor((N, ), dtype)
 
     for scope in ["block", "warp", "thread"]:
         for nbi in [True, False]:
@@ -146,7 +177,7 @@ def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
             }[(scope, nbi)]
             print(f"runing {api}...")
             t.fill_(RANK + 1)
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             _nvshmemx_getmem[(WORLD_SIZE, )](
                 t,
                 t.nbytes // WORLD_SIZE,
@@ -154,7 +185,7 @@ def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 nbi,
                 num_warps=1 if scope == "warp" else 4,
             )
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             t_expected = (torch.arange(1, WORLD_SIZE + 1, dtype=dtype, device="cuda").reshape(
                 (WORLD_SIZE, 1)).repeat(1, N // WORLD_SIZE).flatten())
             try:
@@ -165,6 +196,8 @@ def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 raise (e)
             else:
                 print(f"✅ {api} pass")
+
+    nvshmem_free_tensor_sync(t)
 
 
 def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
@@ -232,7 +265,7 @@ def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 else:
                     raise ValueError("scope must be block, warp, or thread")
 
-    t = pynvshmem.nvshmem_create_tensor((N, ), dtype)
+    t = nvshmem_create_tensor((N, ), dtype)
 
     for scope in ["block", "warp", "thread"]:
         for nbi in [True, False]:
@@ -246,7 +279,7 @@ def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
             }[(scope, nbi)]
             print(f"runing {api}...")
             t.fill_(RANK + 1)
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             _nvshmemx_putmem[(WORLD_SIZE, )](
                 t,
                 N // WORLD_SIZE,
@@ -255,7 +288,7 @@ def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 ELEM_SIZE=dtype.itemsize,
                 num_warps=1 if scope == "warp" else 4,
             )
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             t_expected = (torch.arange(1, WORLD_SIZE + 1, dtype=dtype, device="cuda").reshape(
                 (WORLD_SIZE, 1)).repeat(1, N // WORLD_SIZE).flatten())
             try:
@@ -266,6 +299,7 @@ def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
                 raise (e)
             else:
                 print(f"✅ {api} pass")
+    nvshmem_free_tensor_sync(t)
 
 
 def test_nvshmem_signal():
@@ -296,12 +330,12 @@ def test_nvshmem_signal():
         __syncthreads()
 
     print("test nvshmemx_signal with pingpong...")
-    t = pynvshmem.nvshmem_create_tensor((1, ), torch.uint64)
+    t = nvshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE)
     t.fill_(0)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     _pingpong[(1, )](t, 100, num_warps=1)
-    pynvshmem.nvshmem_barrier_all()
-    if pynvshmem.nvshmem_my_pe() == 0:
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+    if nvshmem.bindings.nvshmem.my_pe() == 0:
         try:
             torch.testing.assert_close(t.to(torch.int32), torch.ones([1], dtype=torch.int32, device="cuda") * 100)
         except Exception as e:
@@ -309,6 +343,7 @@ def test_nvshmem_signal():
             raise e
         else:
             print("✅ nvshmemx_signal with pingpong pass")
+    nvshmem_free_tensor_sync(t)
 
 
 def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
@@ -391,8 +426,8 @@ def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
                 else:
                     raise ValueError("scope must be block, warp, or thread")
 
-    t = pynvshmem.nvshmem_create_tensor((N, ), dtype)
-    signal = pynvshmem.nvshmem_create_tensor((WORLD_SIZE, ), torch.uint64)
+    t = nvshmem_create_tensor((N, ), dtype)
+    signal = nvshmem_create_tensor((WORLD_SIZE, ), NVSHMEM_SIGNAL_DTYPE)
 
     for scope in ["block", "warp", "thread"]:
         for nbi in [True, False]:
@@ -408,7 +443,7 @@ def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
             t.fill_(RANK + 1)
             signal.fill_(0)
             signal[RANK].fill_(1)
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             _nvshmemx_putmem_signal[(WORLD_SIZE, )](
                 t,
                 signal,
@@ -417,12 +452,13 @@ def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
                 nbi,
                 num_warps=4,
             )
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             t_expected = (torch.arange(1, WORLD_SIZE + 1, dtype=dtype, device="cuda").reshape(
                 (WORLD_SIZE, 1)).repeat(1, N // WORLD_SIZE).flatten())
             try:
                 torch.testing.assert_close(t, t_expected)
-                torch.testing.assert_close(signal, torch.ones((WORLD_SIZE, ), dtype=torch.uint64, device="cuda"))
+                torch.testing.assert_close(signal, torch.ones((WORLD_SIZE, ), dtype=NVSHMEM_SIGNAL_DTYPE,
+                                                              device="cuda"))
             except Exception as e:
                 print(f" ❌ {api} failed")
                 print(t.reshape(WORLD_SIZE, -1))
@@ -430,6 +466,8 @@ def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
                 raise (e)
             else:
                 print(f"✅ {api} pass")
+    nvshmem_free_tensor_sync(t)
+    nvshmem_free_tensor_sync(signal)
 
 
 def test_nvshmem_barrier_sync_quiet_fence():
@@ -473,7 +511,7 @@ def test_nvshmem_barrier_sync_quiet_fence():
     _nvshmem_barrier_sync_quiet_fence[(1, )](num_warps=4)
     torch.cuda.synchronize()
     print("✅ nvshmem_barrier_all/nvshmem_sync/nvshmem_quiet/nvshmem_fence pased...")
-    _nvshmem_barrier_sync_quiet_fence_with_team[(1, )](pynvshmem.NVSHMEMX_TEAM_NODE, num_warps=4)
+    _nvshmem_barrier_sync_quiet_fence_with_team[(1, )](nvshmem.core.Teams.TEAM_NODE, num_warps=4)
     torch.cuda.synchronize()
     print("✅ nvshmem_barrier/nvshmemx_team_sync pased...")
 
@@ -495,8 +533,8 @@ def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
                 libshmem_device.broadcast(libshmem_device.NVSHMEM_TEAM_WORLD, dst, src, nbytes, 0)
             __syncthreads()
 
-    src = pynvshmem.nvshmem_create_tensor((N, ), dtype)
-    dst = pynvshmem.nvshmem_create_tensor((N, ), dtype)
+    src = nvshmem_create_tensor((N, ), dtype)
+    dst = nvshmem_create_tensor((N, ), dtype)
     for scope in ["block", "warp", "thread"]:
         api = {
             "block": "nvshmemx_broadcast_block",
@@ -506,7 +544,7 @@ def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
         print(f"running {api}...")
         src.fill_(RANK + 1)
         dst.fill_(-1)
-        pynvshmem.nvshmem_barrier_all()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         _nvshmem_broadcast[(1, )](
             dst,
             src,
@@ -514,7 +552,7 @@ def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
             scope,
             num_warps=4,
         )
-        pynvshmem.nvshmem_barrier_all()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         t_expected = torch.ones_like(dst)
         try:
             torch.testing.assert_close(dst, t_expected)
@@ -524,6 +562,9 @@ def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
             raise (e)
         else:
             print(f"✅ {api} pass")
+
+    nvshmem_free_tensor_sync(src)
+    nvshmem_free_tensor_sync(dst)
 
 
 def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
@@ -558,8 +599,8 @@ def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
                 )
             __syncthreads()
 
-    src = pynvshmem.nvshmem_create_tensor((N, ), dtype)
-    dst = pynvshmem.nvshmem_create_tensor((N * WORLD_SIZE, ), dtype)
+    src = nvshmem_create_tensor((N, ), dtype)
+    dst = nvshmem_create_tensor((N * WORLD_SIZE, ), dtype)
     for scope in ["block", "warp", "thread"]:
         api = {
             "block": "nvshmemx_fcollect_block",
@@ -569,7 +610,7 @@ def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
         print(f"running {api}...")
         src.fill_(RANK + 1)
         dst.fill_(-1)
-        pynvshmem.nvshmem_barrier_all()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         _nvshmem_fcollect[(1, )](
             dst,
             src,
@@ -577,7 +618,7 @@ def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
             scope,
             num_warps=4,
         )
-        pynvshmem.nvshmem_barrier_all()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         torch.cuda.synchronize()
         t_expected = (torch.ones_like(dst).reshape(
             (WORLD_SIZE, -1)) * torch.arange(1, 1 + WORLD_SIZE, device="cuda").to(dtype)[:, None]).flatten()
@@ -589,48 +630,96 @@ def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
             raise (e)
         else:
             print(f"✅ {api} pass")
+    nvshmem_free_tensor_sync(src)
+    nvshmem_free_tensor_sync(dst)
 
 
-def _if_nvls_supported():
-    """  NOTE: Hopper + NVSHMEM_DISABLE_CUDA_VMM=0 does not guarantee that NVLS is supported. for test only """
-    major, _ = torch.cuda.get_device_capability()
-    return major >= 9 and os.getenv("NVSHMEM_DISABLE_CUDA_VMM", "1") == "0"
-
-
-def test_nvshmem_mc_ptr(N, dtype: torch.dtype = torch.int8):
+@conditional_execution(is_nvshmem_multimem_supported)
+def test_nvshmem_multimem_st(N):
 
     @triton.jit
-    def _nvshmem_multimem_st(ptr, nbytes):
+    def _nvshmem_multimem_st_v4(symm_ptr, nbytes):
+        """ TODO(houqi.1993) it's expected that multimem.st.v3.fp32 is supported. but actually no. ptxas won't compile:
+        https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-multimem """
         thread_idx = tid(axis=0)
         block_dim = ntid(axis=0)
         pid = tl.program_id(0)
         npid = tl.num_programs(0)
-        ptr = tl.cast(ptr, tl.pointer_type(tl.int8))
-        mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, ptr)
+        mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, symm_ptr)
+        step = 128 // symm_ptr.dtype.element_ty.primitive_bitwidth  # 128 bits = 16 bytes
         for n in range(thread_idx + block_dim * pid, nbytes // 16, block_dim * npid):
-            val0, val1 = load_v2_b64(ptr + n * 16)
-            multimem_st_b64(tl.cast(mc_ptr, tl.pointer_type(tl.int8)) + n * 16, val0)
-            multimem_st_b64(mc_ptr + n * 16 + 8, val1)
+            val0, val1, val2, val3 = load_v4_u32(symm_ptr + n * step)
+            multimem_st_v4(mc_ptr + n * step, val0, val1, val2, val3)
 
-    t: torch.Tensor = pynvshmem.nvshmem_create_tensor((N, ), dtype)
+    @triton.jit
+    def _nvshmem_multimem_st_v2(symm_ptr, nbytes):
+        thread_idx = tid(axis=0)
+        block_dim = ntid(axis=0)
+        pid = tl.program_id(0)
+        npid = tl.num_programs(0)
+        mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, symm_ptr)
+        step = 128 // symm_ptr.dtype.element_ty.primitive_bitwidth  # 128 bits = 16 bytes
+        for n in range(thread_idx + block_dim * pid, nbytes // 16, block_dim * npid):
+            val0, val1, val2, val3 = load_v4_u32(symm_ptr + n * step)
+            multimem_st_v2(mc_ptr + n * step, val0, val1)
+            multimem_st_v2(mc_ptr + n * step + step // 2, val2, val3)
+
+    @triton.jit
+    def _nvshmem_multimem_st_b32(symm_ptr, nbytes):
+        thread_idx = tid(axis=0)
+        block_dim = ntid(axis=0)
+        pid = tl.program_id(0)
+        npid = tl.num_programs(0)
+        symm_ptr = tl.cast(symm_ptr, tl.pointer_type(tl.int8))
+        mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, symm_ptr)
+        mc_ptr = tl.cast(mc_ptr, tl.pointer_type(tl.int8))
+        for n in range(thread_idx + block_dim * pid, nbytes // 16, block_dim * npid):
+            val0, val1, val2, val3 = load_v4_u32(symm_ptr + n * 16)
+            multimem_st_b32(mc_ptr + n * 16, val0)
+            multimem_st_b32(mc_ptr + n * 16 + 4, val1)
+            multimem_st_b32(mc_ptr + n * 16 + 8, val2)
+            multimem_st_b32(mc_ptr + n * 16 + 12, val3)
+
+    @triton.jit
+    def _nvshmem_multimem_st_p_b32(symm_ptr, val):
+        thread_idx = tid(axis=0)
+        pid = tl.program_id(0)
+        symm_ptr = tl.cast(symm_ptr, tl.pointer_type(tl.int8))
+        mc_ptr = libshmem_device.remote_mc_ptr(libshmem_device.NVSHMEMX_TEAM_NODE, symm_ptr)
+        if thread_idx == 0 and pid == 0:
+            # should write not data with mask=0
+            multimem_st_p_b32(mc_ptr, tl.cast(val, tl.uint32), 0)
+
+    dtype = torch.float16
+    t: torch.Tensor = nvshmem_create_tensor((N, ), dtype)
     t.fill_(1 + RANK)
-    pynvshmem.nvshmem_barrier_all()
-    if not _if_nvls_supported():
-        print("not support MultiCast memory. only works on NVLS hardware and NVSHMEM_DISABLE_CUDA_VMM=0")
-        return
-
+    t_expected = torch.ones_like(t)
+    # test multimem.st without .v2/v4
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     if RANK == 0:
-        _nvshmem_multimem_st[(4, )](t, t.nbytes, num_warps=4)
-    pynvshmem.nvshmem_barrier_all()
-    try:
-        torch.testing.assert_close(t, torch.ones_like(t))
-    except Exception as e:
-        print(f"t: {t}")
-        raise e
-    else:
-        print("_nvshmem_multimem_st done")
+        _nvshmem_multimem_st_b32[(4, )](t, t.nbytes, num_warps=4)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+    torch.testing.assert_close(t, t_expected)
+
+    # TODO(houqi.1993) multimem.st should support v4/v2, but it is not. when ptxas fix it, we will support it.
+    with pytest.raises(triton.runtime.errors.PTXASError, match=r"PTXAS error: Internal Triton PTX codegen error"):
+        _nvshmem_multimem_st_v2.warmup(t, t.nbytes, grid=(4, ))
+    print(f"✅ _nvshmem_multimem_st with {dtype} v2 compiled failed as expected")
+    with pytest.raises(triton.runtime.errors.PTXASError, match=r"PTXAS error: Internal Triton PTX codegen error"):
+        _nvshmem_multimem_st_v4.warmup(t, t.nbytes, grid=(4, ))
+    print(f"✅ _nvshmem_multimem_st with {dtype} v4 compiled failed as expected")
+
+    _nvshmem_multimem_st_p_b32[(1, )](t, 0xffffffff)
+    if RANK == 0:  # RANK 0 fails may cause RANK 1 got an Exception. only check with 1 rank
+        with pytest.raises(AssertionError, match=r"Tensor-likes are not close!"):
+            # t is not changed as expected. but ptxas has a BUG here.
+            torch.testing.assert_close(t, t_expected)
+
+    nvshmem_free_tensor_sync(t)
+    print(f"✅ _nvshmem_multimem_st with {dtype} done")
 
 
+@conditional_execution(has_nvshmemi_bc_built)
 def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
 
     @triton.jit
@@ -696,7 +785,7 @@ def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
                 else:
                     raise ValueError("scope must be block, warp, or thread")
 
-    t = pynvshmem.nvshmem_create_tensor((N, ), dtype)
+    t = nvshmem_create_tensor((N, ), dtype)
 
     for scope in ["block", "warp", "thread"]:
         for nbi in [True, False]:
@@ -710,7 +799,7 @@ def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
             }[(scope, nbi)]
             print(f"runing {api}...")
             t.fill_(RANK + 1)
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             _nvshmemi_putmem_rma_kernel[(WORLD_SIZE, )](
                 t,
                 N // WORLD_SIZE,
@@ -719,7 +808,7 @@ def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
                 ELEM_SIZE=dtype.itemsize,
                 num_warps=1 if scope == "warp" else 4,
             )
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             t_expected = (torch.arange(1, WORLD_SIZE + 1, dtype=dtype, device="cuda").reshape(
                 (WORLD_SIZE, 1)).repeat(1, N // WORLD_SIZE).flatten())
             try:
@@ -730,8 +819,10 @@ def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
                 raise (e)
             else:
                 print(f"✅ {api} pass")
+    nvshmem_free_tensor_sync(t)
 
 
+@conditional_execution(has_nvshmemi_bc_built)
 def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int8):
 
     @triton.jit
@@ -812,8 +903,8 @@ def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int
                 else:
                     raise ValueError("scope must be block, warp, or thread")
 
-    t = pynvshmem.nvshmem_create_tensor((N, ), dtype)
-    signal = pynvshmem.nvshmem_create_tensor((WORLD_SIZE, ), torch.uint64)
+    t = nvshmem_create_tensor((N, ), dtype)
+    signal = nvshmem_create_tensor((WORLD_SIZE, ), NVSHMEM_SIGNAL_DTYPE)
 
     for scope in ["block", "warp", "thread"]:
         for nbi in [True, False]:
@@ -829,7 +920,7 @@ def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int
             t.fill_(RANK + 1)
             signal.fill_(0)
             signal[RANK].fill_(1)
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             _nvshmemi_putmem_rma_signal_kernel[(WORLD_SIZE, )](
                 t,
                 signal,
@@ -838,12 +929,13 @@ def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int
                 nbi,
                 num_warps=4,
             )
-            pynvshmem.nvshmem_barrier_all()
+            nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             t_expected = (torch.arange(1, WORLD_SIZE + 1, dtype=dtype, device="cuda").reshape(
                 (WORLD_SIZE, 1)).repeat(1, N // WORLD_SIZE).flatten())
             try:
                 torch.testing.assert_close(t, t_expected)
-                torch.testing.assert_close(signal, torch.ones((WORLD_SIZE, ), dtype=torch.uint64, device="cuda"))
+                torch.testing.assert_close(signal, torch.ones((WORLD_SIZE, ), dtype=NVSHMEM_SIGNAL_DTYPE,
+                                                              device="cuda"))
             except Exception as e:
                 print(f" ❌ {api} failed")
                 print(t.reshape(WORLD_SIZE, -1))
@@ -851,6 +943,8 @@ def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int
                 raise (e)
             else:
                 print(f"✅ {api} pass")
+    nvshmem_free_tensor_sync(t)
+    nvshmem_free_tensor_sync(signal)
 
 
 if __name__ == "__main__":
@@ -865,7 +959,7 @@ if __name__ == "__main__":
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     test_nvshmem_basic()
     test_nvshmemx_getmem_with_scope(31 * WORLD_SIZE, torch.int8)
@@ -874,13 +968,13 @@ if __name__ == "__main__":
     test_nvshmem_signal()
     test_nvshmem_barrier_sync_quiet_fence()
     test_nvshmem_broadcast(32 * WORLD_SIZE, torch.int8)
+
     # some ranks hangs. don't know why
     # test_nvshmem_fcollect(1024, torch.int8)
-    test_nvshmem_mc_ptr(1024, torch.int16)
+    test_nvshmem_multimem_st(1024)
 
     test_nvshmemi_putmem_rma(16 * WORLD_SIZE, torch.int8)
     test_nvshmemi_putmem_rma_signal_with_scope(16 * WORLD_SIZE, torch.int8)
 
-    torch.distributed.barrier(TP_GROUP)
-    torch.cuda.synchronize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

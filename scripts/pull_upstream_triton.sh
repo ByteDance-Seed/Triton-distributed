@@ -68,6 +68,45 @@ for patch_file in $(find "$tilelink_root/patches/triton" -type f); do
     fi
 done
 
+# backend
+for patch_file in $(find "$tilelink_root/backends" -type f); do
+    relative_path="${patch_file#$tilelink_root/backends}"
+    triton_file="$triton_path/third_party/$relative_path"
+    
+    # Skip if triton file doesn't exist
+    [ ! -f "$triton_file" ] && continue
+    
+    echo "patch_file: $patch_file, triton_file: $triton_file"
+    # Check for differences
+    if ! diff -q "$patch_file" "$triton_file" > /dev/null; then
+        echo "Detecting conflicts in: $relative_path"
+        generate_conflict "$patch_file" "$triton_file"
+        conflict_count=$((conflict_count + 1))
+        echo "$patch_file" >> "$conflict_list_file"
+    fi
+done
+
+# lib
+dist_triton_ext_passes=("$tilelink_root/lib/Conversion/TritonDistributedToTritonGPU/TritonDistributedToTritonGPU.cpp")
+upstream_triton_passes=("$triton_path/lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp")
+
+for i in "${!dist_triton_ext_passes[@]}"; do
+
+    patch_file=${dist_triton_ext_passes[$i]}
+    triton_file=${upstream_triton_passes[$i]}
+    # Skip if triton file doesn't exist
+    [ ! -f "$triton_file" ] && continue
+
+    echo "patch_file: $patch_file, triton_file: $triton_file"
+    # Check for differences
+    if ! diff -q "$patch_file" "$triton_file" > /dev/null; then
+        echo "Detecting conflicts in: $relative_path"
+        generate_conflict "$patch_file" "$triton_file"
+        conflict_count=$((conflict_count + 1))
+        echo "$patch_file" >> "$conflict_list_file"
+    fi
+done
+
 # Exit if no conflicts found
 if [ "$conflict_count" -eq 0 ]; then
     echo "No conflicts detected. Exiting."

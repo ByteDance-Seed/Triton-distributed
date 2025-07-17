@@ -34,8 +34,7 @@ import numpy as np
 import random
 
 import datetime
-from triton_dist import pynvshmem
-
+from triton_dist.utils import finalize_distributed, init_nvshmem_by_torch_process_group
 from triton_dist.kernels.nvidia import fast_all_to_all, create_all_to_all_context, all_to_all_post_process
 
 DTYPE_MAP = {
@@ -103,7 +102,7 @@ def initialize_distributed():
 
     EP_GROUP = dist.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
     init_seed(seed=RANK)
-    pynvshmem.init_nvshmem_by_uniqueid(EP_GROUP)
+    init_nvshmem_by_torch_process_group(EP_GROUP)
     return EP_GROUP
 
 
@@ -520,4 +519,6 @@ if __name__ == "__main__":
 
     layer.forward(*input)
 
-    torch.distributed.destroy_process_group(EP_GROUP)
+    layer.all2all_ctx.finalize()
+
+    finalize_distributed()

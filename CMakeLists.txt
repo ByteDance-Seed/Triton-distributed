@@ -26,6 +26,11 @@ option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
 
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+endif()
+
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
@@ -149,8 +154,8 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4244 /wd4624 /wd4715 /wd4530")
 endif()
 
-include_directories(${PROJECT_SOURCE_DIR}/dialect/include)
-include_directories(${PROJECT_BINARY_DIR}/dialect/include)
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_BINARY_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton)
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
@@ -158,10 +163,15 @@ include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/include)
 include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/include) # Tablegen'd files
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party)
 include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablegen'd files
+# backend
+include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
+include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
 
 # link_directories(${LLVM_LIBRARY_DIR})
 add_subdirectory(3rdparty/triton/include)
 add_subdirectory(3rdparty/triton/lib)
+add_subdirectory(include)
+add_subdirectory(lib)
 
 # TODO: Figure out which target is sufficient to fix errors; triton is
 # apparently not enough. Currently set linking libstdc++fs for all targets
@@ -174,6 +184,16 @@ endif()
 # -----
 
 # ------
+# triton distributed
+if(TRITON_BUILD_PYTHON_MODULE)
+  message(STATUS "Adding Python module for TritonDistributed")
+  set(PYTHON_DIST_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/python/src)
+  add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
+                                      ${PYTHON_DIST_SRC_PATH}/passes.cc
+                                      ${PYTHON_DIST_SRC_PATH}/ir.cc)
+  target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
+endif()
+
 if(TRITON_BUILD_PYTHON_MODULE)
   message(STATUS "Adding Python module")
   set(PYTHON_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/python/src)
@@ -209,16 +229,12 @@ if(TRITON_BUILD_PYTHON_MODULE)
   endif()
   if (TRITON_BUILD_DISTRIBUTED)
     add_subdirectory(csrc)
-    if (TRITON_BUILD_PYNVSHMEM)
-      add_subdirectory(shmem/nvshmem_bind/pynvshmem)
-    endif()
   endif()
   # We always build proton dialect
   list(APPEND TRITON_PLUGIN_NAMES "proton")
   add_subdirectory(3rdparty/triton/third_party/proton/dialect)
   # We always build distributed dialect
   list(APPEND TRITON_PLUGIN_NAMES "distributed")
-  add_subdirectory(dialect)
 
   get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
   get_property(triton_plugins GLOBAL PROPERTY TRITON_PLUGINS)
@@ -294,6 +310,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
   add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
+                  ${PYTHON_SRC_PATH}/gluon_ir.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc)
@@ -308,6 +325,20 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
+
+  if (NOT DEFINED LLVM_SYSPATH)
+      message(FATAL_ERROR "LLVM_SYSPATH must be set.")
+  endif()
+
+  if (NOT DEFINED TRITON_WHEEL_DIR)
+      message(FATAL_ERROR "TRITON_WHEEL_DIR must be set.")
+  endif()
+
+  configure_file(
+    "${LLVM_SYSPATH}/bin/FileCheck"
+    "${TRITON_WHEEL_DIR}/FileCheck"
+    COPYONLY)
+
 endif()
 
 if (UNIX AND NOT APPLE)
@@ -330,7 +361,6 @@ if(NOT TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(3rdparty/triton/third_party/${CODEGEN_BACKEND})
   endforeach()
   add_subdirectory(3rdparty/triton/third_party/proton/dialect)
-  add_subdirectory(dialect)
 endif()
 
 find_package(Threads REQUIRED)

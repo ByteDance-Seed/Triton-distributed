@@ -37,21 +37,22 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/02-intra-node-allgather.py
+    bash ./scripts/launch.sh ./tutorials/02-intra-node-allgather.py
 
 """
 
+import os
+from typing import List
+
+import nvshmem.core
 import torch
+from cuda import cuda
+
 import triton
 import triton.language as tl
-from triton.language.extra import libshmem_device
-from triton_dist import pynvshmem
-
-from typing import List
-from cuda import cuda
-from triton_dist.utils import CUDA_CHECK
-
-from triton_dist.utils import initialize_distributed, dist_print
+from triton_dist.language.extra import libshmem_device
+from triton_dist.utils import (CUDA_CHECK, dist_print, initialize_distributed, nvshmem_barrier_all_on_stream,
+                               NVSHMEM_SIGNAL_DTYPE, nvshmem_create_tensors, nvshmem_free_tensor_sync)
 
 # %%
 # In the tensor parallelism, allgather is used to collect the partitioned input tensors among all workers.
@@ -127,66 +128,67 @@ if __name__ == "__main__":
     TP_GROUP = initialize_distributed()
     rank = TP_GROUP.rank()
     num_ranks = TP_GROUP.size()
-    assert num_ranks == 8, "This tutorial is designed for intra-node"
+    LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE"))
+    assert num_ranks == LOCAL_WORLD_SIZE, "This tutorial is designed for intra-node"
 
     M = 8192
     N = 12288
     M_per_rank = M // num_ranks
     dtype = torch.float16
-    signal_dtype = torch.uint64  # we always use torch.uint64 barrier
 
     local_data = torch.randn([M_per_rank, N], dtype=dtype, device="cuda")
-    ag_buffer_ptrs = pynvshmem.nvshmem_create_tensor_list_intra_node([M, N], dtype)  # buffer for dist-triton allgather
-    signal = pynvshmem.nvshmem_create_tensor_list_intra_node(([num_ranks]),
-                                                             signal_dtype)  # each rank corresponds to one barrier
+    symm_ag_buffers = nvshmem_create_tensors((M, N), dtype, rank, LOCAL_WORLD_SIZE)
+    symm_ag_buffer = symm_ag_buffers[rank]
+    symm_signals = nvshmem_create_tensors((num_ranks, ), NVSHMEM_SIGNAL_DTYPE, rank, LOCAL_WORLD_SIZE)
+    symm_signal = symm_signals[rank]
     # Calculate golden
     golden = torch.empty([M, N], dtype=dtype, device="cuda")
     torch.distributed.all_gather_into_tensor(golden, local_data, group=TP_GROUP)
 
     #####################
     # Copy Engine
-    ag_buffer_ptrs[rank].fill_(-1)  # reset buffer
-    ag_buffer_ptrs[rank][
+    symm_ag_buffer.fill_(-1)  # reset buffer
+    symm_ag_buffer[
         rank * M_per_rank:(rank + 1) * M_per_rank,
     ].copy_(local_data)  # copy local data to symmetric memory for communication
-    signal[rank].fill_(0)  # The initial value of signal should be 0s
+    symm_signal.fill_(0)  # The initial value of signal should be 0s
     # We need barrier all to make sure the above initialization visible to other ranks
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     cp_engine_producer_all_gather_full_mesh_pull(
-        rank, num_ranks, local_data, ag_buffer_ptrs, torch.cuda.current_stream(),
-        signal)  # Here we use current stream for allgather, we can pass any other stream for comm-comp fusion.
+        rank, num_ranks, local_data, symm_ag_buffers, torch.cuda.current_stream(),
+        symm_signals)  # Here we use current stream for allgather, we can pass any other stream for comm-comp fusion.
 
     # Check results. Pull mode doesn't need sync after communication
-    dist_print(f"Rank {rank} CpEngine Result:\n", ag_buffer_ptrs[rank], need_sync=True, allowed_ranks="all")
-    dist_print(f"Rank {rank} CpEngine Signal:\n", signal[rank], need_sync=True, allowed_ranks="all")
-    assert torch.allclose(golden, ag_buffer_ptrs[rank], atol=1e-5, rtol=1e-5)
+    dist_print(f"Rank {rank} CpEngine Result:\n", symm_ag_buffer, need_sync=True, allowed_ranks="all")
+    dist_print(f"Rank {rank} CpEngine Signal:\n", symm_signal, need_sync=True, allowed_ranks="all")
+    assert torch.allclose(golden, symm_ag_buffer, atol=1e-5, rtol=1e-5)
     dist_print(f"Rank {rank}", "Pass!✅", need_sync=True, allowed_ranks="all")
 
     #####################
     # NVSHMEM Primitives
-    ag_buffer_ptrs[rank].fill_(-1)  # reset buffer
-    ag_buffer_ptrs[rank][
+    symm_ag_buffer.fill_(-1)  # reset buffer
+    symm_ag_buffer[
         rank * M_per_rank:(rank + 1) * M_per_rank,
     ].copy_(local_data)  # copy local data to symmetric memory for communication
-    signal[rank].fill_(0)  # The initial value of signal should be 0s
+    symm_signal.fill_(0)  # The initial value of signal should be 0s
     # We need barrier all to make sure the above initialization visible to other ranks
-    pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     grid = lambda META: (int(num_ranks), )
     nvshmem_device_producer_all_gather_2d_put_block_kernel[grid](
-        ag_buffer_ptrs[rank], signal[rank], M_per_rank * N,  # No. of elems of local data
+        symm_ag_buffer, symm_signal, M_per_rank * N,  # No. of elems of local data
         local_data.element_size(),  # element size
         1,  # signal target, can be any other value in practice
         rank, num_ranks, num_ranks)
     # Need to sync all to guarantee the completion of communication
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     # Check results. Pull mode doesn't need sync after communication
-    dist_print(f"Rank {rank} NVSHMEM Result:\n", ag_buffer_ptrs[rank], need_sync=True, allowed_ranks="all")
-    dist_print(f"Rank {rank} NVSHMEM Signal:\n", signal[rank], need_sync=True, allowed_ranks="all")
-    assert torch.allclose(golden, ag_buffer_ptrs[rank], atol=1e-5, rtol=1e-5)
+    dist_print(f"Rank {rank} NVSHMEM Result:\n", symm_ag_buffer, need_sync=True, allowed_ranks="all")
+    dist_print(f"Rank {rank} NVSHMEM Signal:\n", symm_signal, need_sync=True, allowed_ranks="all")
+    assert torch.allclose(golden, symm_ag_buffer, atol=1e-5, rtol=1e-5)
     dist_print(f"Rank {rank}", "Pass!✅", need_sync=True, allowed_ranks="all")
 
-    del ag_buffer_ptrs
-    del signal
-
+    nvshmem_free_tensor_sync(symm_ag_buffer)
+    nvshmem_free_tensor_sync(symm_signal)
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

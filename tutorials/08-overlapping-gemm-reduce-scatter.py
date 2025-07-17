@@ -36,7 +36,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/08-overlapping-gemm-reduce-scatter.py
+    bash ./scripts/launch.sh ./tutorials/08-overlapping-gemm-reduce-scatter.py
 
 """
 
@@ -48,7 +48,7 @@ import triton_dist.language as dl
 
 from typing import Optional, List
 import triton_dist
-from triton_dist import pynvshmem
+import nvshmem.core
 # The implementation of reduce_scatter_2d_op is the same as that in 06-intern-node-reudce-scatter.py.
 from triton_dist.kernels.nvidia.reduce_scatter import ReduceScatter2DContext, create_reduce_scater_2d_ctx, reduce_scatter_2d_op
 
@@ -58,11 +58,12 @@ from functools import partial
 
 from triton_dist.utils import (
     generate_data,
+    nvshmem_barrier_all_on_stream,
+    nvshmem_create_tensors,
+    nvshmem_free_tensor_sync,
     perf_func,
     dist_print,
 )
-
-SIGNAL_DTYPE = torch.uint64
 
 
 # GEMM and reduce-scatter context. Stores comm info (dtype, nnodes, etc), symm buffers, and signals.
@@ -73,7 +74,7 @@ class GEMMReduceScatterTensorParallelContext:
     output_dtype: torch.dtype
 
     # gemm bufs (symm address)
-    gemm_out_bufs: List[torch.Tensor]
+    symm_gemm_out_bufs: List[torch.Tensor]
 
     # stream
     rs_stream: torch.cuda.Stream
@@ -86,8 +87,8 @@ class GEMMReduceScatterTensorParallelContext:
     GROUP_M: int = 8
     stages: int = 3
 
-    def update(self, rank, num_ranks, rs_stream, output_dtype=None, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, GROUP_M=8,
-               stages=3):
+    def update(self, rank, num_ranks, rs_stream, output_dtype: torch.dtype, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64,
+               GROUP_M=8, stages=3):
         self.rank = rank
         self.num_ranks = num_ranks
         self.rs_stream = rs_stream
@@ -101,7 +102,11 @@ class GEMMReduceScatterTensorParallelContext:
     def get_gemm_out_buf(self, input):
         M, _ = input.shape
         local_rank = self.rs_ctx.local_rank
-        return self.gemm_out_bufs[local_rank][:M]
+        return self.symm_gemm_out_bufs[local_rank][:M]
+
+    def finalize(self):
+        self.rs_ctx.finalize()
+        nvshmem_free_tensor_sync(self.symm_gemm_out_bufs[self.rs_ctx.local_rank])
 
 
 def create_gemm_rs_context(max_M, N, rank, world_size, local_world_size, output_dtype, rs_stream, BLOCK_M=128,
@@ -110,10 +115,11 @@ def create_gemm_rs_context(max_M, N, rank, world_size, local_world_size, output_
                                          overlap_with_gemm=True)
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     num_gemm_sms = NUM_SMS - rs_ctx.num_rs_sms
-    gemm_out_bufs = pynvshmem.nvshmem_create_tensor_list_intra_node([max_M, N], output_dtype)
-    ctx = GEMMReduceScatterTensorParallelContext(rs_ctx=rs_ctx, output_dtype=output_dtype, gemm_out_bufs=gemm_out_bufs,
-                                                 rs_stream=rs_stream, num_gemm_sms=num_gemm_sms, BLOCK_M=BLOCK_M,
-                                                 BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, GROUP_M=GROUP_M, stages=stages)
+    gemm_out_bufs = nvshmem_create_tensors([max_M, N], dtype=output_dtype, rank=rank, local_world_size=local_world_size)
+    ctx = GEMMReduceScatterTensorParallelContext(rs_ctx=rs_ctx, output_dtype=output_dtype,
+                                                 symm_gemm_out_bufs=gemm_out_bufs, rs_stream=rs_stream,
+                                                 num_gemm_sms=num_gemm_sms, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                                                 BLOCK_K=BLOCK_K, GROUP_M=GROUP_M, stages=stages)
     return ctx
 
 
@@ -266,7 +272,7 @@ def kernel_gemm_rs_producer_persistent(
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
 
-def gemm_rs_producer_persistent(a, b, c, barrier, workspace, world_size, local_world_size, num_gemm_sms, gemm_stream,
+def gemm_rs_producer_persistent(a, b, c, barrier, workspace, world_size, local_world_size, num_gemm_sms,
                                 BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, BLOCK_SIZE_K=64, GROUP_SIZE_M=8, STAGES=3):
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"  # b is transposed
@@ -278,9 +284,6 @@ def gemm_rs_producer_persistent(a, b, c, barrier, workspace, world_size, local_w
     M_per_rank = M // world_size
 
     assert M_per_rank % BLOCK_SIZE_M == 0
-
-    current_stream = torch.cuda.current_stream()
-    gemm_stream.wait_stream(current_stream)
 
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
@@ -295,28 +298,25 @@ def gemm_rs_producer_persistent(a, b, c, barrier, workspace, world_size, local_w
 
     # Launch the Triton GEMM kernel. Once the kernel has completed the computation of the output tiles
     # that send to a specific rank, will set the corresponding barrier to 1.
-    with torch.cuda.stream(gemm_stream):
-        compiled = kernel_gemm_rs_producer_persistent[grid](
-            a,
-            b,
-            c,
-            M,
-            N,
-            local_K,
-            barrier,
-            workspace,
-            local_world_size,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-            BLOCK_SIZE_K,
-            GROUP_SIZE_M,
-            False,
-            NUM_SMS=num_gemm_sms,  #
-            num_stages=STAGES,
-            num_warps=8,
-        )
-
-    current_stream.wait_stream(gemm_stream)
+    compiled = kernel_gemm_rs_producer_persistent[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        local_K,
+        barrier,
+        workspace,
+        local_world_size,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        GROUP_SIZE_M,
+        False,
+        NUM_SMS=num_gemm_sms,  #
+        num_stages=STAGES,
+        num_warps=8,
+    )
 
     return compiled
 
@@ -369,7 +369,7 @@ def gemm_rs_multi_node_persistent_op(input, weight, ctx: GEMMReduceScatterTensor
     If the computation of the corresponding tiles is completed, set the barrier to 1.
     """
     gemm_rs_producer_persistent(input, weight, gemm_out, scatter_signal, workspace, world_size, local_world_size,
-                                num_gemm_sms, current_stream, BLOCK_SIZE_M=ctx.BLOCK_M, BLOCK_SIZE_N=ctx.BLOCK_N,
+                                num_gemm_sms, BLOCK_SIZE_M=ctx.BLOCK_M, BLOCK_SIZE_N=ctx.BLOCK_N,
                                 BLOCK_SIZE_K=ctx.BLOCK_K, GROUP_SIZE_M=ctx.GROUP_M, STAGES=ctx.stages)
     """
     Perform reduce-scatter on the rs_stream, overlapping with the gemm operation.
@@ -378,7 +378,7 @@ def gemm_rs_multi_node_persistent_op(input, weight, ctx: GEMMReduceScatterTensor
     computed(barrier[wait_rank] = 1), the corresponding reduce-scatterwill be perform.
     """
     with torch.cuda.stream(rs_stream):
-        output = reduce_scatter_2d_op(gemm_out, ctx.rs_ctx)
+        output = reduce_scatter_2d_op(gemm_out, ctx.rs_ctx, output=output)
     current_stream.wait_stream(rs_stream)
 
     return output[:orig_M_per_rank]
@@ -452,14 +452,14 @@ if __name__ == "__main__":
     # torch impl
     torch_output, torch_perf = perf_func(partial(torch_gemm_rs, input, weight, TP_GROUP), iters=100, warmup_iters=20)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream()
     torch.cuda.synchronize()
 
     # dist triton impl
     dist_triton_output, dist_triton_perf = perf_func(partial(gemm_rs_multi_node, input, weight, dist_gemm_rs_ctx),
                                                      iters=100, warmup_iters=20)
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream()
     torch.cuda.synchronize()
 
     # check
@@ -471,4 +471,6 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    dist_gemm_rs_ctx.finalize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

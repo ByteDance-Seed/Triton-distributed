@@ -17,7 +17,7 @@ import json
 from io import BytesIO
 from distutils.command.clean import clean
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from setuptools import Extension, setup, Command
 from setuptools.command.build_py import build_py
@@ -27,28 +27,40 @@ from distutils.command.install import install
 from setuptools.command.develop import develop
 from setuptools.command.egg_info import egg_info
 from wheel.bdist_wheel import bdist_wheel
+from setuptools.command.sdist import sdist
 
 import pybind11
 
-from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, softlink_apply_patches
+from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, softlink_apply_patches, copy_file
 
 from torch.utils.cpp_extension import BuildExtension as TorchBuildExtension
 
 softlink_apply_patches()
 
+try:
+    from setuptools.command.editable_wheel import editable_wheel
+except ImportError:
+    # create a dummy class, since there is no command to override
+    class editable_wheel:
+        pass
+
+
+def is_git_repo():
+    """Return True if this file resides in a git repository"""
+    return (Path(__file__).parent / ".git").is_dir()
+
 
 @dataclass
 class Backend:
     name: str
-    package_data: List[str]
-    language_package_data: List[str]
-    tools_package_data: List[str]
     src_dir: str
     backend_dir: str
     language_dir: Optional[str]
     tools_dir: Optional[str]
     install_dir: str
     is_external: bool
+    dist_backend_dir: Optional[str]
+    dist_language_dir: Optional[str]
 
 
 class BackendInstaller:
@@ -61,24 +73,25 @@ class BackendInstaller:
             assert backend_name in os.listdir(
                 root_dir), f"{backend_name} is requested for install but not present in {root_dir}"
 
-            try:
-                subprocess.run(["git", "submodule", "update", "--init", f"{backend_name}"], check=True,
-                               stdout=subprocess.DEVNULL, cwd=root_dir)
-            except subprocess.CalledProcessError:
-                pass
-            except FileNotFoundError:
-                pass
+            if is_git_repo():
+                try:
+                    subprocess.run(["git", "submodule", "update", "--init", f"{backend_name}"], check=True,
+                                   stdout=subprocess.DEVNULL, cwd=root_dir)
+                except subprocess.CalledProcessError:
+                    pass
+                except FileNotFoundError:
+                    pass
 
             backend_src_dir = os.path.join(root_dir, backend_name)
 
-        backend_path = os.path.abspath(os.path.join(backend_src_dir, "backend"))
+        backend_path = os.path.join(backend_src_dir, "backend")
         assert os.path.exists(backend_path), f"{backend_path} does not exist!"
 
-        language_dir = os.path.abspath(os.path.join(backend_src_dir, "language"))
+        language_dir = os.path.join(backend_src_dir, "language")
         if not os.path.exists(language_dir):
             language_dir = None
 
-        tools_dir = os.path.abspath(os.path.join(backend_src_dir, "tools"))
+        tools_dir = os.path.join(backend_src_dir, "tools")
         if not os.path.exists(tools_dir):
             tools_dir = None
 
@@ -87,19 +100,29 @@ class BackendInstaller:
 
         install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
                                    "backends", backend_name)
-        package_data = [f"{os.path.relpath(p, backend_path)}/*" for p, _, _, in os.walk(backend_path)]
 
-        language_package_data = []
-        if language_dir is not None:
-            language_package_data = [f"{os.path.relpath(p, language_dir)}/*" for p, _, _, in os.walk(language_dir)]
+        # TritonDistributed backends
+        dist_root_dir = os.path.join(get_base_dir(), "backends")
+        dist_backend_path = None
+        dist_language_dir = None
+        if backend_name in os.listdir(dist_root_dir):
+            dist_backend_src_dir = os.path.join(dist_root_dir, backend_name)
 
-        tools_package_data = []
-        if tools_dir is not None:
-            tools_package_data = [f"{os.path.relpath(p, tools_dir)}/*" for p, _, _, in os.walk(tools_dir)]
+            for dir in os.listdir(dist_backend_src_dir):
+                assert dir in ["backend", "language"], "only support backend/language extension"
 
-        return Backend(name=backend_name, package_data=package_data, language_package_data=language_package_data,
-                       tools_package_data=tools_package_data, src_dir=backend_src_dir, backend_dir=backend_path,
-                       language_dir=language_dir, tools_dir=tools_dir, install_dir=install_dir, is_external=is_external)
+            if os.path.exists(os.path.join(dist_backend_src_dir, "backend")):
+                dist_backend_path = os.path.join(dist_backend_src_dir, "backend")
+                for file in os.listdir(dist_backend_path):
+                    assert os.path.exists(os.path.join(backend_path,
+                                                       file)), f"${file} does not exist in ${backend_path}"
+            dist_language_dir = os.path.join(dist_backend_src_dir, "language")
+            if not os.path.exists(dist_language_dir):
+                dist_language_dir = None
+
+        return Backend(name=backend_name, src_dir=backend_src_dir, backend_dir=backend_path, language_dir=language_dir,
+                       tools_dir=tools_dir, install_dir=install_dir, is_external=is_external,
+                       dist_backend_dir=dist_backend_path, dist_language_dir=dist_language_dir)
 
     # Copy all in-tree backends under triton/third_party.
     @staticmethod
@@ -266,7 +289,7 @@ def get_triton_cache_path():
     return os.path.join(user_home, ".triton")
 
 
-def update_symlink(link_path, source_path):
+def update_symlink(link_path, source_path, materialization=False):
     source_path = Path(source_path)
     link_path = Path(link_path)
 
@@ -278,7 +301,10 @@ def update_symlink(link_path, source_path):
     print(f"creating symlink: {link_path} -> {source_path}", file=sys.stderr)
     link_path.absolute().parent.mkdir(parents=True, exist_ok=True)  # Ensure link's parent directory exists
     base_dir = Path(__file__).parent.parent
-    create_symlink_rel(source_path, link_path, base_dir)
+    if not materialization:
+        create_symlink_rel(source_path, link_path, base_dir)
+    else:
+        copy_file(source_path, link_path, base_dir)
 
 
 def get_thirdparty_packages(packages: list):
@@ -317,6 +343,8 @@ def get_thirdparty_packages(packages: list):
             thirdparty_cmake_args.append(f"-D{p.include_flag}={package_dir}/include")
         if p.lib_flag:
             thirdparty_cmake_args.append(f"-D{p.lib_flag}={package_dir}/lib")
+        if p.syspath_var_name:
+            thirdparty_cmake_args.append(f"-D{p.syspath_var_name}={package_dir}")
         if p.sym_name is not None:
             sym_link_path = os.path.join(package_root_dir, p.sym_name)
             update_symlink(sym_link_path, package_dir)
@@ -360,28 +388,6 @@ def download_and_copy(name, src_func, dst_path, variable, version, url_func):
         shutil.copy(src_path, dst_path)
 
 
-def download_nvshmem():
-    version = "3.2.5-1"
-    url = f"https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_{version}.txz"
-    base_dir = os.path.dirname(__file__)
-    triton_cache_path = get_triton_cache_path()
-    tmp_path = os.path.join(triton_cache_path, "nvshmem")  # path to cache the download
-    src_path = "nvshmem_src"
-    src_path = os.path.join(tmp_path, src_path)
-    dst_path = os.path.join(base_dir, os.pardir, "3rdparty", "triton", "third_party", "nvshmem")
-    download = not os.path.exists(src_path)
-    if download:
-        print(f'downloading and extracting {url} ...')
-        file = tarfile.open(fileobj=open_url(url), mode="r|*")
-        file.extractall(path=tmp_path)
-    os.makedirs(os.path.split(dst_path)[0], exist_ok=True)
-    print(f'copy {src_path} to {dst_path} ...')
-    if os.path.isdir(src_path):
-        shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-    else:
-        shutil.copy(src_path, dst_path)
-
-
 # ---- cmake extension ----
 
 
@@ -395,6 +401,7 @@ class CMakeClean(clean):
 class CMakeBuildPy(build_py):
 
     def run(self) -> None:
+        add_links(external_only=False, materialization=False)
         self.run_command('build_ext')
         return super().run()
 
@@ -405,22 +412,6 @@ class CMakeExtension(Extension):
         Extension.__init__(self, name, sources=[])
         self.sourcedir = os.path.abspath(sourcedir)
         self.path = path
-
-
-def build_nvshmem(cap):
-    nvshmem_bind_dir = os.path.join(get_base_dir(), "shmem", "nvshmem_bind")
-    nvshmem_dir = os.path.join(get_base_dir(), "3rdparty", "nvshmem")
-    nvshmem_dir = os.getenv("NVSHMEM_SRC", nvshmem_dir)
-    if not os.path.exists(nvshmem_dir) or len(os.listdir(nvshmem_dir)) == 0:
-        # for github version: download_nvshmem()
-        # subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"])
-        raise RuntimeError("NVSHMEM is empty. Please refer to README for NVSHMEM install")
-    if not os.path.exists(nvshmem_bind_dir):
-        raise RuntimeError("NVSHMEM bind source directory not found")
-
-    CUDA_ARCH = "".join([str(x) for x in cap])
-    extra_args = ["--arch", CUDA_ARCH] if CUDA_ARCH != "" else []
-    subprocess.check_call(["bash", f"{nvshmem_bind_dir}/build.sh"] + extra_args)
 
 
 def build_rocshmem(cap):
@@ -442,9 +433,7 @@ def build_shmem():
         import torch
 
         if torch.cuda.is_available():
-            if torch.version.hip is None:
-                build_nvshmem(torch.cuda.get_device_capability())
-            else:
+            if torch.version.hip is not None:
                 build_rocshmem(torch.cuda.get_device_capability())  # (9, 4)
     except Exception as e:
         print("Cannot import torch.")
@@ -478,7 +467,8 @@ class CMakeBuild(TorchBuildExtension):
         TorchBuildExtension.finalize_options(self)
 
     def run(self):
-        add_links()
+        add_links(external_only=False, materialization=False)
+        build_shmem()
         for ext in self.extensions:
             if isinstance(ext, CMakeExtension):
                 self.build_extension_cmake(ext)
@@ -512,7 +502,6 @@ class CMakeBuild(TorchBuildExtension):
         return cmake_args
 
     def build_extension_cmake(self, ext):
-        build_shmem()
 
         try:
             out = subprocess.check_output(["cmake", "--version"])
@@ -522,15 +511,16 @@ class CMakeBuild(TorchBuildExtension):
 
         match = re.search(r"version\s*(?P<major>\d+)\.(?P<minor>\d+)([\d.]+)?", out.decode())
         cmake_major, cmake_minor = int(match.group("major")), int(match.group("minor"))
-        if (cmake_major, cmake_minor) < (3, 18):
-            raise RuntimeError("CMake >= 3.18.0 is required")
+        if (cmake_major, cmake_minor) < (3, 20):
+            raise RuntimeError("CMake >= 3.20.0 is required")
 
         lit_dir = shutil.which('lit')
         ninja_dir = shutil.which('ninja')
         # lit is used by the test suite
         thirdparty_cmake_args = get_thirdparty_packages([get_llvm_package_info()])
         thirdparty_cmake_args += self.get_pybind11_cmake_args()
-        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
+        extdir = os.path.dirname(self.get_ext_fullpath(ext.path))
+        wheeldir = os.path.dirname(extdir)
         # create build directories
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
@@ -544,7 +534,8 @@ class CMakeBuild(TorchBuildExtension):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir, "-DTRITON_BUILD_PYTHON_MODULE=ON",
             "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable, "-DPython3_INCLUDE_DIR=" + python_include_dir,
             "-DTRITON_CODEGEN_BACKENDS=" + ';'.join([b.name for b in backends if not b.is_external]),
-            "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external])
+            "-DTRITON_PLUGIN_DIRS=" + ';'.join([b.src_dir for b in backends if b.is_external]),
+            "-DTRITON_WHEEL_DIR=" + wheeldir
         ]
         if lit_dir is not None:
             cmake_args.append("-DLLVM_EXTERNAL_LIT=" + lit_dir)
@@ -609,19 +600,6 @@ class CMakeBuild(TorchBuildExtension):
             cmake_args += shlex.split(cmake_args_append)
 
         env = os.environ.copy()
-        if check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    if torch.version.hip is None:
-                        cmake_args += ["-DTRITON_BUILD_PYNVSHMEM=ON"]
-                        nvshmem_dir = os.path.join(get_base_dir(), "3rdparty", "nvshmem")
-                        nvshmem_dir = os.getenv("NVSHMEM_SRC", nvshmem_dir)
-                        env["NVSHMEM_DIR"] = os.path.join(nvshmem_dir, "build", "install")
-            except Exception:
-                print("Cannot import torch.")
-                pass
-
         cmake_dir = get_cmake_dir()
         subprocess.check_call(["cmake", self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
         subprocess.check_call(["cmake", "--build", "."] + build_args, cwd=cmake_dir)
@@ -711,31 +689,72 @@ download_and_copy(
 backends = [*BackendInstaller.copy(["nvidia", "amd"]), *BackendInstaller.copy_externals()]
 
 
-def add_link_to_backends():
+def add_link_to_backends(external_only, materialization=False):
+
+    def _force_update_symlink_recursive(dest_dir, src_dir):
+        for root, dirs, files in os.walk(src_dir):
+            for file in files:
+                src_path = os.path.join(root, file)
+                rel_path = os.path.relpath(src_path, src_dir)
+                dest_path = os.path.join(dest_dir, rel_path)
+
+                src_path = os.path.abspath(src_path)
+                dest_path = os.path.abspath(dest_path)
+                if os.path.lexists(dest_path):
+                    assert os.path.islink(dest_path) or os.path.isfile(
+                        dest_path), f"unexpected file: {dest_path} is not a symbolic link or file"
+                    os.unlink(dest_path)
+                dest_parent = os.path.dirname(dest_path)
+                os.makedirs(dest_parent, exist_ok=True)
+
+                rel_src_path = os.path.join(os.path.relpath(os.path.dirname(src_path), dest_parent), file)
+                if not materialization:
+                    os.symlink(rel_src_path, dest_path)
+                else:
+                    # Copy the file instead of creating a symlink
+                    shutil.copy(src_path, dest_path)
+
     for backend in backends:
-        update_symlink(backend.install_dir, backend.backend_dir)
+        if external_only and not backend.is_external:
+            continue
+        _force_update_symlink_recursive(backend.install_dir, backend.backend_dir)
 
         if backend.language_dir:
             # Link the contents of each backend's `language` directory into
             # `triton.language.extra`.
-            extra_dir = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton", "language",
-                             "extra"))
+            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+                                     "language", "extra")
             for x in os.listdir(backend.language_dir):
                 src_dir = os.path.join(backend.language_dir, x)
                 install_dir = os.path.join(extra_dir, x)
-                update_symlink(install_dir, src_dir)
+                _force_update_symlink_recursive(install_dir, src_dir)
 
         if backend.tools_dir:
             # Link the contents of each backend's `tools` directory into
             # `triton.tools.extra`.
-            extra_dir = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton", "tools",
-                             "extra"))
+            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+                                     "tools", "extra")
             for x in os.listdir(backend.tools_dir):
                 src_dir = os.path.join(backend.tools_dir, x)
                 install_dir = os.path.join(extra_dir, x)
                 update_symlink(install_dir, src_dir)
+
+    # use TritonDistributed backend to override the exsiting backend in triton
+    for backend in backends:
+        if external_only and not backend.is_external:
+            continue
+        if backend.dist_backend_dir is not None:
+            _force_update_symlink_recursive(backend.install_dir, backend.dist_backend_dir)
+
+        if backend.dist_language_dir:
+            # Link the contents of each backend's `language` directory into
+            # `triton.language.extra`.
+            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+                                     "language", "extra")
+            for x in os.listdir(backend.dist_language_dir):
+                src_dir = os.path.join(backend.dist_language_dir, x)
+                install_dir = os.path.join(extra_dir, x)
+                _force_update_symlink_recursive(install_dir, src_dir)
 
 
 def add_link_to_proton():
@@ -759,70 +778,65 @@ def add_link_to_distributed():
     update_symlink(triton_install_dir, triton_dir)
 
 
-def add_link_to_pynvshmem():
-    triton_dist_root = Path(os.path.abspath(__file__)).parent.parent.absolute()
-    update_symlink(triton_dist_root / "python" / "triton_dist" / "pynvshmem",
-                   triton_dist_root / "shmem" / "nvshmem_bind" / "pynvshmem" / "python" / "pynvshmem")
-    # update pyi
-    update_symlink(triton_dist_root / "python" / "triton_dist" / "_C" / "_pynvshmem",
-                   triton_dist_root / "shmem" / "nvshmem_bind" / "pynvshmem" / "python" / "_pynvshmem")
-    # link nvshmem lib
-    update_symlink(triton_dist_root / "python" / "triton_dist" / "_C" / "nvshmem",
-                   triton_dist_root / "3rdparty" / "nvshmem" / "build" / "install")
-
-
-def add_links():
-    add_link_to_backends()
-    if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+def add_links(external_only, materialization=False):
+    add_link_to_backends(external_only=external_only, materialization=materialization)
+    if not external_only and check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
         add_link_to_proton()
-    if check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):  # Default ON
+    if not external_only and check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):  # Default ON
         add_link_to_distributed()
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                if torch.version.hip is None:
-                    add_link_to_pynvshmem()
-                else:
-                    pass
-        except Exception:
-            print("Cannot import torch.")
-            pass
-
-
-class plugin_install(install):
-
-    def run(self):
-        add_links()
-        install.run(self)
-
-
-class plugin_develop(develop):
-
-    def run(self):
-        add_links()
-        develop.run(self)
 
 
 class plugin_bdist_wheel(bdist_wheel):
 
     def run(self):
-        add_links()
-        bdist_wheel.run(self)
+        add_links(external_only=False, materialization=False)
+        super().run()
 
 
-class plugin_egginfo(egg_info):
+class plugin_develop(develop):
 
     def run(self):
-        add_links()
-        egg_info.run(self)
+        add_links(external_only=False)
+        super().run()
+
+
+class plugin_editable_wheel(editable_wheel):
+
+    def run(self):
+        add_links(external_only=False)
+        super().run()
+
+
+class plugin_egg_info(egg_info):
+
+    def run(self):
+        add_links(external_only=False, materialization=False)
+        super().run()
+
+
+class plugin_install(install):
+
+    def run(self):
+        add_links(external_only=False)
+        super().run()
+
+
+class plugin_sdist(sdist):
+
+    def run(self):
+        for backend in backends:
+            if backend.is_external:
+                raise RuntimeError("sdist cannot be used with TRITON_PLUGIN_DIRS")
+        super().run()
 
 
 package_data = {
-    "triton/tools/extra": sum((b.tools_package_data for b in backends), []),
-    **{f"triton/backends/{b.name}": b.package_data
-       for b in backends}, "triton/language/extra": sum((b.language_package_data for b in backends),
-                                                        []), '': ['*.so*', '*.a']
+    **{
+        f"triton/backends/{b.name}": [f"{os.path.relpath(p, b.backend_dir)}/*" for p, _, _, in os.walk(b.backend_dir)]
+        for b in backends
+    }, "triton/language/extra": sum(
+        ([f"{os.path.relpath(p, b.language_dir)}/*" for p, _, _, in os.walk(b.language_dir)] for b in backends), []),
+    '': ['*.so*', '*.a']
 }
 
 
@@ -851,40 +865,53 @@ def get_extra_packages(extra_name):
 
 
 def get_packages():
-    packages = [
+    _packages = [
         "triton",
         "triton/_C",
+        "triton/backends",
         "triton/compiler",
+        "triton/experimental",
+        "triton/experimental/gluon",
+        "triton/experimental/gluon/language",
+        "triton/experimental/gluon/nvidia",
+        "triton/experimental/gluon/language/nvidia",
+        "triton/experimental/gluon/language/nvidia/ampere",
+        "triton/experimental/gluon/language/nvidia/hopper",
+        "triton/experimental/gluon/language/nvidia/blackwell",
         "triton/language",
         "triton/language/extra",
         "triton/runtime",
-        "triton/backends",
         "triton/tools",
         "triton/tools/extra",
     ]
-    packages += [f'triton/backends/{backend.name}' for backend in backends]
-    packages += get_extra_packages("language")
-    packages += get_extra_packages("tools")
+    _packages += [f'triton/backends/{backend.name}' for backend in backends]
+    _packages += get_extra_packages("language")
+    _packages += get_extra_packages("tools")
     if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
-        packages += ["triton/profiler"]
+        _packages += ["triton/profiler"]
     if check_env_flag("TRITON_BUILD_DISTRIBUTED", "ON"):  # Default ON
-        packages += [
-            "triton_dist", "triton_dist/_C", "triton_dist/kernels", "triton_dist/kernels/nvidia",
-            "triton_dist/kernels/amd", "triton_dist/layers/nvidia", "triton_dist/tools", "triton_dist/test"
+        _packages += [
+            "triton_dist",
+            "triton_dist/_C",
+            "triton_dist/benchmark",
+            "triton_dist/kernels",
+            "triton_dist/kernels/nvidia",
+            "triton_dist/kernels/amd",
+            "triton_dist/language",
+            "triton_dist/language/extra",
+            "triton_dist/layers",
+            "triton_dist/layers/nvidia",
+            "triton_dist/models",
+            "triton_dist/test",
+            "triton_dist/tools",
+            "triton_dist/tools/compile",
+            "triton_dist/tools/runtime",
         ]
-        try:
-            import torch
 
-            if torch.cuda.is_available():
-                if torch.version.hip is None:
-                    packages += ["triton_dist/pynvshmem"]
-                    packages += ["triton_dist/_C/_pynvshmem"]
-                else:
-                    pass
-        except Exception:
-            print("Cannot import torch.")
-            pass
-
+    packages = []
+    for pkg in _packages:
+        if os.path.exists(pkg):
+            packages.append(pkg)
     return packages
 
 
@@ -895,6 +922,7 @@ def get_entry_points():
             "proton-viewer = triton.profiler.viewer:main",
             "proton = triton.profiler.proton:main",
         ]
+    entry_points["triton.backends"] = [f"{b.name} = triton.backends.{b.name}" for b in backends]
     return entry_points
 
 
@@ -915,6 +943,8 @@ def get_git_branch():
 
 
 def get_git_version_suffix():
+    if not is_git_repo():
+        return ""  # Not a git checkout
     branch = get_git_branch()
     if branch.startswith("release"):
         return ""
@@ -925,14 +955,30 @@ def get_git_version_suffix():
 # set ext_modules
 ext_modules = [CMakeExtension("3rdparty/triton/python/triton", "triton/_C/")]
 
+# Dynamically define supported Python versions and classifiers
+MIN_PYTHON = (3, 9)
+MAX_PYTHON = (3, 13)
+
+PYTHON_REQUIRES = f">={MIN_PYTHON[0]}.{MIN_PYTHON[1]},<{MAX_PYTHON[0]}.{MAX_PYTHON[1] + 1}"
+BASE_CLASSIFIERS = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "License :: OSI Approved :: MIT License",
+]
+PYTHON_CLASSIFIERS = [
+    f"Programming Language :: Python :: {MIN_PYTHON[0]}.{m}" for m in range(MIN_PYTHON[1], MAX_PYTHON[1] + 1)
+]
+CLASSIFIERS = BASE_CLASSIFIERS + PYTHON_CLASSIFIERS
+
 setup(
     name=os.environ.get("TRITON_WHEEL_NAME", "triton_dist"),
-    version="3.3.0" + get_git_version_suffix() + os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", ""),
+    version="3.4.0" + get_git_version_suffix() + os.environ.get("TRITON_WHEEL_VERSION_SUFFIX", ""),
     author="ByteDance Seed",
     author_email="zheng.size@bytedance.com",
     description="Triton language and compiler extension for distributed deep learning systems",
     long_description="",
-    install_requires=["setuptools>=40.8.0"],
+    install_requires=["setuptools>=40.8.0", "importlib-metadata; python_version < '3.10'"],
     packages=get_packages(),
     entry_points=get_entry_points(),
     package_data=package_data,
@@ -942,30 +988,22 @@ setup(
         "build_ext": CMakeBuild,
         "build_py": CMakeBuildPy,
         "clean": CMakeClean,
-        "install": plugin_install,
-        "develop": plugin_develop,
         "bdist_wheel": plugin_bdist_wheel,
-        "egg_info": plugin_egginfo,
+        "develop": plugin_develop,
+        "editable_wheel": plugin_editable_wheel,
+        "egg_info": plugin_egg_info,
+        "install": plugin_install,
         "build_shmem": SHMEMBuildOnly,
     },
     zip_safe=False,
     # for PyPI
     keywords=["Compiler", "Deep Learning", "Overlapping", "Distributed"],
     url="https://github.com/ByteDance-Seed/Triton-distributed",
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Developers",
-        "Topic :: Software Development :: Build Tools",
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
-    ],
+    python_requires=PYTHON_REQUIRES,
+    classifiers=CLASSIFIERS,
     test_suite="tests",
     extras_require={
-        "build": ["cmake>=3.20", "lit", "packaging", "ninja", "cuda-python==12.4", "pybind11"],
+        "build": ["cmake>=3.20,<4.0", "lit", "packaging", "ninja", "cuda-python==12.4", "pybind11"],
         "tests": [
             "autopep8",
             "isort",
@@ -977,6 +1015,7 @@ setup(
             "llnl-hatchet",
             "pytest",
             "nvidia-ml-py",
+            "transformers",
         ],
         "tutorials": [
             "matplotlib",

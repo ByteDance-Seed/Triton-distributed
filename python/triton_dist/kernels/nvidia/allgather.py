@@ -25,20 +25,22 @@
 """ NOTE: allgather.py is for high-throughput. while low_latency_allgather.py is for low-latency.
 """
 
-from enum import Enum
 import functools
+from enum import Enum
 from typing import List
 
+import nvshmem.bindings
+import nvshmem.core
 import torch
 from cuda import cuda, cudart
 
 import triton
 import triton.language as tl
-from triton_dist import pynvshmem
-from triton_dist.kernels.nvidia.common_ops import set_signal, wait_eq
-from triton_dist.utils import CUDA_CHECK, get_numa_world_size, get_has_fullmesh_nvlink
-from triton.language.extra import libshmem_device
 from triton.language.extra.cuda.language_extra import __syncthreads, tid
+from triton_dist.kernels.nvidia.common_ops import set_signal, wait_eq
+from triton_dist.language.extra import libshmem_device
+from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, get_has_fullmesh_nvlink, get_numa_world_size,
+                               nvshmem_barrier_all_on_stream, sleep_async)
 
 
 class AllGatherMethod(Enum):
@@ -73,7 +75,7 @@ def _add_noise_workload_debug():
     import random
 
     if random.random() > 0.3:
-        torch.cuda._sleep(3000000000)
+        sleep_async(100)
 
 
 def cp_engine_producer_all_gather_full_mesh_push(
@@ -145,7 +147,7 @@ def cp_engine_producer_all_gather_ring_push_1d(
     for_correctness=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
-    assert flag_dtype in [torch.int32, torch.uint64], flag_dtype
+    assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
     if flag_dtype == torch.int32:
         wait_value_fn = cuda.cuStreamWaitValue32
         write_value_fn = cuda.cuStreamWriteValue32
@@ -201,7 +203,7 @@ def cp_engine_producer_all_gather_ring_push_numa_2d(
     for_correctness=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
-    assert flag_dtype in [torch.int32, torch.uint64], flag_dtype
+    assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
     if flag_dtype == torch.int32:
         wait_value_fn = cuda.cuStreamWaitValue32
         write_value_fn = cuda.cuStreamWriteValue32
@@ -300,7 +302,7 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
     for_correctness=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
-    assert flag_dtype in [torch.int32, torch.uint64], flag_dtype
+    assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
     if flag_dtype == torch.int32:
         wait_value_fn = cuda.cuStreamWaitValue32
         write_value_fn = cuda.cuStreamWriteValue32
@@ -342,24 +344,24 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
             rank_base = ((n + node_id) % nnodes) * num_local_ranks
             if n != 0:  # inter node comm
                 # DON't overlap communication of INTER-NODE with INTRA-NODE: slow!
-                pynvshmem.nvshmemx_barrier_all_on_stream(intranode_stream.cuda_stream)
+                nvshmem_barrier_all_on_stream(intranode_stream)
                 rank_to_inter_node = (rank - n * num_local_ranks + num_ranks) % num_ranks
                 segment = rank
                 M_start = segment * M_per_rank
                 M_end = M_start + M_per_rank
                 src = remote_tensor_buffers[local_rank][M_start:M_end, :]
                 # with gridDim = 1
-                pynvshmem.nvshmemx_putmem_signal_on_stream(
+                nvshmem.bindings.nvshmem.putmem_signal_on_stream(
                     src.data_ptr(),
                     src.data_ptr(),
                     nbytes_per_rank,
                     barrier_buffers[local_rank][rank].data_ptr(),
                     1,
-                    pynvshmem.NVSHMEM_SIGNAL_SET,
+                    nvshmem.core.SignalOp.SIGNAL_SET,
                     rank_to_inter_node,
                     intranode_stream.cuda_stream,
                 )
-                pynvshmem.nvshmemx_barrier_all_on_stream(intranode_stream.cuda_stream)
+                nvshmem_barrier_all_on_stream(intranode_stream)
 
             # intra node comm
             for stage in range(num_local_ranks - 1):

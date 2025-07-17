@@ -22,43 +22,35 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from triton_dist import pynvshmem
 import torch
-import torch.distributed
 from triton_dist.kernels.nvidia import _forward_push_2d_ll_kernel, _forward_push_2d_kernel, _forward_push_3d_kernel, _forward_pull_kernel, _forward_push_2d_ll_multimem_kernel, _forward_push_numa_2d_ll_kernel, _forward_push_numa_2d_kernel, _forward_push_numa_2d_ll_multinode_kernel
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 class AllGatherLayer:
 
     def __init__(self, nnodes, world_size, rank, max_buffer_size: int = 2 * 32 * 128 * 128, stages=2):
         self.rank = rank
-        self.size = world_size
-        self.signal = pynvshmem.nvshmem_create_tensor((
-            stages,
-            self.size,
-        ), torch.uint64)
-        self.signal_bar = pynvshmem.nvshmem_create_tensor((
-            stages,
-            self.size,
-        ), torch.uint64)
+        self.num_ranks = world_size
+        self.symm_signal = nvshmem_create_tensor((stages, self.num_ranks), NVSHMEM_SIGNAL_DTYPE)
         self.max_buffer_size = max_buffer_size
-        self.ll_buffers = pynvshmem.nvshmem_create_tensor((
-            stages,
-            self.max_buffer_size,
-        ), torch.int8)
-        self.signal_target = 15  # avoid 1 to constexpr
-        for i in range(stages):
-            self.signal[i].zero_()
-            self.signal_bar[i].fill_(self.signal_target)
+        self.symm_ll_buffers = nvshmem_create_tensor((stages, self.max_buffer_size), torch.int8)
+        self.signal_target = 1
+        self.symm_signal.zero_()
         self.nnodes = nnodes
         self.stages = stages
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.symm_signal)
+        nvshmem_free_tensor_sync(self.symm_ll_buffers)
 
     def forward_pull(self, symm_buffer: torch.Tensor):
-        _forward_pull_kernel[(self.size, )](
+        _forward_pull_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            self.signal,
-            self.size,
+            symm_buffer.nbytes // self.num_ranks,
+            self.symm_signal,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -67,12 +59,12 @@ class AllGatherLayer:
         return symm_buffer
 
     def forward_push_2d(self, symm_buffer: torch.Tensor):
-        _forward_push_2d_kernel[(self.size, )](
+        _forward_push_2d_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            self.signal,
+            symm_buffer.nbytes // self.num_ranks,
+            self.symm_signal,
             self.nnodes,
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -81,15 +73,15 @@ class AllGatherLayer:
         return symm_buffer
 
     def _forward_push_3d(self, symm_buffer: torch.Tensor, use_ll_protocol: bool = False):
-        ll_buffer = self.ll_buffers[self.signal_target % self.stages]
-        _forward_push_3d_kernel[(self.size, )](
+        symm_ll_buffer = self.symm_ll_buffers[self.signal_target % self.stages]
+        _forward_push_3d_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            ll_buffer,
-            self.signal,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_ll_buffer,
+            self.symm_signal,
             self.nnodes,
             2,  # TODO(houqi.1993)
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             INTER_NODE_WITH_LL=use_ll_protocol,
@@ -107,15 +99,15 @@ class AllGatherLayer:
 
     def forward_push_2d_ll(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
-        signal = self.signal[self.signal_target % self.stages]
-        ll_buffer = self.ll_buffers[self.signal_target % self.stages]
-        _forward_push_2d_ll_kernel[(self.size, )](
+        symm_signal = self.symm_signal[self.signal_target % self.stages]
+        symm_ll_buffer = self.symm_ll_buffers[self.signal_target % self.stages]
+        _forward_push_2d_ll_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            signal,
-            ll_buffer,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_signal,
+            symm_ll_buffer,
             self.nnodes,
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -125,13 +117,13 @@ class AllGatherLayer:
 
     def forward_push_numa_2d(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
-        signal = self.signal[self.signal_target % self.stages]
-        _forward_push_numa_2d_kernel[(self.size, )](
+        symm_signal = self.symm_signal[self.signal_target % self.stages]
+        _forward_push_numa_2d_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            signal,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_signal,
             2,  # TODO(houqi.1993) 2 NUMA nodes supported
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -141,16 +133,16 @@ class AllGatherLayer:
 
     def forward_push_numa_2d_ll_multinode(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
-        signal = self.signal[self.signal_target % self.stages]
-        ll_buffer = self.ll_buffers[self.signal_target % self.stages]
-        _forward_push_numa_2d_ll_multinode_kernel[(self.size, )](
+        symm_signal = self.symm_signal[self.signal_target % self.stages]
+        ll_buffer = self.symm_ll_buffers[self.signal_target % self.stages]
+        _forward_push_numa_2d_ll_multinode_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            signal,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_signal,
             ll_buffer,
             self.nnodes,
             2,  # TODO(houqi.1993) 2 NUMA nodes supported
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -161,15 +153,15 @@ class AllGatherLayer:
 
     def forward_push_numa_2d_ll(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
-        signal = self.signal[self.signal_target % self.stages]
-        ll_buffer = self.ll_buffers[self.signal_target % self.stages]
-        _forward_push_numa_2d_ll_kernel[(self.size, )](
+        symm_signal = self.symm_signal[self.signal_target % self.stages]
+        symm_ll_buffer = self.symm_ll_buffers[self.signal_target % self.stages]
+        _forward_push_numa_2d_ll_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            signal,
-            ll_buffer,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_signal,
+            symm_ll_buffer,
             2,  # TODO(houqi.1993) 2 NUMA nodes supported
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,
@@ -179,13 +171,13 @@ class AllGatherLayer:
 
     def forward_push_2d_ll_multimem(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
-        ll_buffer = self.ll_buffers[self.signal_target % self.stages]
-        _forward_push_2d_ll_multimem_kernel[(self.size, )](
+        symm_ll_buffer = self.symm_ll_buffers[self.signal_target % self.stages]
+        _forward_push_2d_ll_multimem_kernel[(self.num_ranks, )](
             symm_buffer,
-            symm_buffer.nbytes // self.size,
-            ll_buffer,
+            symm_buffer.nbytes // self.num_ranks,
+            symm_ll_buffer,
             self.nnodes,
-            self.size,
+            self.num_ranks,
             self.rank,
             self.signal_target,
             num_warps=32,

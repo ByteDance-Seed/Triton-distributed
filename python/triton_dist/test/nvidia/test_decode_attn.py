@@ -32,11 +32,11 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pytest
 import torch
+import nvshmem.core
 
-from triton_dist import pynvshmem
 from triton_dist.kernels.nvidia import (gqa_fwd_batch_decode, gqa_fwd_batch_decode_aot, gqa_fwd_batch_decode_persistent,
                                         gqa_fwd_batch_decode_persistent_aot)
-from triton_dist.utils import dist_print, perf_func
+from triton_dist.utils import dist_print, perf_func, init_nvshmem_by_torch_process_group
 
 ALL_TESTS = {}
 
@@ -558,7 +558,7 @@ if __name__ == "__main__":
 
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     args = get_args()
     args.default_group = TP_GROUP
@@ -570,4 +570,5 @@ if __name__ == "__main__":
     func = ALL_TESTS[args.case]
     func(args)
 
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

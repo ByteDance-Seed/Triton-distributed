@@ -22,13 +22,16 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-from triton_dist.layers.nvidia import AllGatherLayer
-from triton_dist import pynvshmem
-
-import os
-import datetime
 import argparse
+import datetime
+import os
+
+import nvshmem.core
+import torch
+
+from triton_dist.layers.nvidia import AllGatherLayer
+from triton_dist.utils import (init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream,
+                               nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async)
 
 
 def parse_args():
@@ -104,11 +107,11 @@ def perf_ag(ag_op: AllGatherLayer, ag_buffer: torch.Tensor, nbytes: int, do_veri
 
     if do_verify:
         _verify()
-    pynvshmem.nvshmem_barrier_all()
-    from triton_dist.utils import perf_func, group_profile
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+    from triton_dist.utils import group_profile, perf_func
 
     with group_profile(f"all_gather_op_{nbytes//1024}KB", do_prof=args.profile, group=TP_GROUP):
-        torch.cuda._sleep(1000000000)  # in case CPU bound
+        sleep_async(1000)  # in case CPU bound
         _, ag_time_ms = perf_func(
             _run_with_ag_op,
             warmup_iters=warmup_iters,
@@ -146,11 +149,11 @@ if __name__ == "__main__":
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     stages = 2
 
-    ag_buffer = pynvshmem.nvshmem_create_tensor((stages, args.maxbytes), dtype)
+    ag_buffer = nvshmem_create_tensor((stages, args.maxbytes), dtype)
 
     nnodes = WORLD_SIZE // LOCAL_WORLD_SIZE
     ag_op = AllGatherLayer(nnodes, WORLD_SIZE, RANK, max_buffer_size=args.maxbytes * 2, stages=stages)
@@ -161,4 +164,8 @@ if __name__ == "__main__":
     while nbytes < maxbytes:
         perf_ag(ag_op, ag_buffer, nbytes, args.verify)
         nbytes = args.stepfactor * nbytes
+
+    ag_op.finalize()
+    nvshmem_free_tensor_sync(ag_buffer)
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

@@ -27,8 +27,9 @@ import os
 from triton_dist.kernels.nvidia import (create_fast_allgather_context, get_triton_combine_kv_algo_info,
                                         gqa_fwd_batch_decode_intra_rank_aot, gqa_fwd_batch_decode_intra_rank,
                                         kernel_inter_rank_gqa_fwd_batch_decode_combine_kv)
+from triton_dist.utils import nvshmem_free_tensor_sync, nvshmem_create_tensor
 from .low_latency_allgather_layer import AllGatherLayer
-from triton_dist import pynvshmem
+
 if "USE_TRITON_DISTRIBUTED_AOT" in os.environ and os.environ["USE_TRITON_DISTRIBUTED_AOT"] in [
         "1", "true", "on", "ON", "On", True
 ]:
@@ -66,7 +67,7 @@ class SpGQAFlashDecodeAttention(torch.nn.Module):
         self.max_allgather_buffer_size = self.num_ranks * self.num_q_heads * self.v_head_dim * 8  # bytes
         self.ag_layer = AllGatherLayer(self.num_nodes, self.num_ranks, self.rank,
                                        max_buffer_size=self.max_allgather_buffer_size, stages=self.stages)
-        self.ag_buffer = pynvshmem.nvshmem_create_tensor((
+        self.ag_buffer = nvshmem_create_tensor((
             self.stages,
             self.max_allgather_buffer_size,
         ), torch.int8)
@@ -74,6 +75,10 @@ class SpGQAFlashDecodeAttention(torch.nn.Module):
         # track buffer size
         self.count_less_than_half = 0
         self.shrink_buffer_threshold = thrink_buffer_threshold
+
+    def finalize(self):
+        self.ag_layer.finalize()
+        nvshmem_free_tensor_sync(self.ag_buffer)
 
     def forward(self, q, k_cache, v_cache, global_kv_lens, block_table):
         """
@@ -110,24 +115,20 @@ class SpGQAFlashDecodeAttention(torch.nn.Module):
 
         if nbytes >= self.max_allgather_buffer_size:
             self.max_allgather_buffer_size *= 2
+            # free buffer and reallocate
+            self.finalize()
             self.allgather_ctx = create_fast_allgather_context(self.rank, self.node, self.num_ranks, self.num_nodes,
                                                                max_buffer_size=self.max_allgather_buffer_size)
-            self.ag_buffer = pynvshmem.nvshmem_create_tensor((
-                self.stages,
-                self.max_allgather_buffer_size,
-            ), torch.int8)
+            self.ag_buffer = nvshmem_create_tensor((self.stages, self.max_allgather_buffer_size), torch.int8)
         if nbytes < self.max_allgather_buffer_size // 2:
             self.count_less_than_half += 1
         if self.count_less_than_half >= self.shrink_buffer_threshold:
             self.max_allgather_buffer_size = self.max_allgather_buffer_size // 2
-            del self.allgather_ctx
-            del self.ag_buffer
+            # free buffer and reallocate
+            self.finalize()
             self.allgather_ctx = create_fast_allgather_context(self.rank, self.node, self.num_ranks, self.num_nodes,
                                                                max_buffer_size=self.max_allgather_buffer_size)
-            self.ag_buffer = pynvshmem.nvshmem_create_tensor((
-                self.stages,
-                self.max_allgather_buffer_size,
-            ), torch.int8)
+            self.ag_buffer = nvshmem_create_tensor((self.stages, self.max_allgather_buffer_size), torch.int8)
             # reset counter
             self.count_less_than_half = 0
 

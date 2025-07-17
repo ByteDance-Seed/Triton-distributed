@@ -22,13 +22,16 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-import triton
-from triton_dist import pynvshmem
-import triton_dist.language as dl
-
-import os
 import datetime
+import os
+
+import nvshmem.core
+import torch
+
+import triton
+import triton_dist.language as dl
+from triton_dist.utils import (NVSHMEM_SIGNAL_DTYPE, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream,
+                               nvshmem_create_tensor)
 
 
 @triton.jit
@@ -59,22 +62,23 @@ if __name__ == "__main__":
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
-    t = pynvshmem.nvshmem_create_tensor((8, ), torch.uint64)
+    t = nvshmem_create_tensor((8, ), NVSHMEM_SIGNAL_DTYPE)
     t.fill_(0)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     test_notify_set[(1, )](t)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     assert t[0].item() == (RANK + WORLD_SIZE - 1) % WORLD_SIZE
 
     t.fill_(0)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     test_notify_add[(1, )](t)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     ref = WORLD_SIZE if RANK == 0 else 0
     assert t[0].item() == ref
 
     print(f"RANK {RANK}: pass.")
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

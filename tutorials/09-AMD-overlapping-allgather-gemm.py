@@ -38,7 +38,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch_amd.sh ./tutorials/09-AMD-overlapping-allgather-gemm.py
+    bash ./scripts/launch_amd.sh ./tutorials/09-AMD-overlapping-allgather-gemm.py
 
 """
 
@@ -48,6 +48,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import triton_dist.language as dl
 
 from hip import hip
 from typing import Optional, List
@@ -58,9 +59,7 @@ from triton_dist.utils import (
 )
 from triton_dist.kernels.amd import create_ag_gemm_intra_node_context
 from triton_dist.kernels.amd.common_ops import (
-    wait_eq_sys,
-    barrier_all_on_stream,
-)
+    barrier_all_on_stream, )
 
 assert triton.runtime.driver.active.get_current_target().backend == "hip"
 
@@ -196,7 +195,8 @@ def consumer_gemm_persistent_kernel(
 
         # Skip waiting local tensor as we pass it int kernel function as argument.
         if offs_rank != rank:
-            wait_eq_sys(barrier_ptr + offs_sig, 1)
+            token = dl.wait(barrier_ptr + offs_sig, 1, "sys", "acquire", waitValue=1)
+            A = dl.consume_token(A, token)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -356,7 +356,6 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
         barrier_all_on_stream(self.rank, ctx.num_ranks, ctx.comm_buf_ptr, current_stream)
 
         # Sync work streams.
-        ctx.gemm_stream.wait_stream(current_stream)
         for ag_stream in ctx.ag_streams:
             ag_stream.wait_stream(current_stream)
 
@@ -366,40 +365,38 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
         torch.cuda.synchronize()
         torch.distributed.barrier()
         # consumer gemm
-        with torch.cuda.stream(ctx.gemm_stream):
-            NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
-            NUM_XCDS = 4
+        NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
+        NUM_XCDS = 4
 
-            grid = lambda META: (min(
-                NUM_SMS,
-                triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_PER_RANK, META["BLOCK_SIZE_N"]),
-            ), )
+        grid = lambda META: (min(
+            NUM_SMS,
+            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_PER_RANK, META["BLOCK_SIZE_N"]),
+        ), )
 
-            full_input = ctx.workspace_tensors[ctx.rank][:M]
-            local_input = input
+        full_input = ctx.workspace_tensors[ctx.rank][:M]
+        local_input = input
 
-            consumer_gemm_persistent_kernel[grid](
-                full_input,
-                local_input,
-                weight,
-                output,
-                M,
-                N_PER_RANK,
-                K,
-                full_input.stride(0),
-                full_input.stride(1),
-                weight.stride(1),
-                weight.stride(0),
-                output.stride(0),
-                output.stride(1),
-                ctx.rank,
-                ctx.num_ranks,
-                ctx.barrier_tensors[ctx.rank],
-                M_PER_CHUNK=ctx.M_PER_CHUNK,
-                NUM_SMS=NUM_SMS,
-                NUM_XCDS=NUM_XCDS,
-            )
-        current_stream.wait_stream(ctx.gemm_stream)
+        consumer_gemm_persistent_kernel[grid](
+            full_input,
+            local_input,
+            weight,
+            output,
+            M,
+            N_PER_RANK,
+            K,
+            full_input.stride(0),
+            full_input.stride(1),
+            weight.stride(1),
+            weight.stride(0),
+            output.stride(0),
+            output.stride(1),
+            ctx.rank,
+            ctx.num_ranks,
+            ctx.barrier_tensors[ctx.rank],
+            M_PER_CHUNK=ctx.M_PER_CHUNK,
+            NUM_SMS=NUM_SMS,
+            NUM_XCDS=NUM_XCDS,
+        )
         return output
 
 

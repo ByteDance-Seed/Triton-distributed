@@ -50,6 +50,7 @@ Feel free to contact us if you want to use Triton-distributed on your own hardwa
 See [build from source](docs/build.md).
 
 #### Method 2. Using pip
+
 Prepare PyTorch container
 
 ```sh
@@ -57,26 +58,35 @@ docker run --name triton-dist --ipc=host --network=host --privileged --cap-add=S
 docker exec -it triton-dist /bin/bash
 ```
 
-Then, please download and fix NVSHMEM manually (as we cannot do this for you due to NVSHMEM license requirements). See [prepare NVSHMEM](docs/prepare_nvshmem.md).
+Install NVSHMEM
 
-After that, install clang-19
 ```sh
-apt update
-apt install clang-19 llvm-19 libclang-19-dev
+pip3 install pynvml>=11.5.3
+
+pip3 install nvidia-nvshmem-cu12==3.3.9 cuda.core==0.2.0 "Cython>=0.29.24"
+
+CPPFLAGS="-I/usr/local/cuda/include" pip3 install https://developer.download.nvidia.com/compute/nvshmem/redist/nvshmem_python/source/nvshmem_python-source-0.1.0.36132199_cuda12-archive.tar.xz
 ```
 
 Then, pip install triton-dist.
 ```sh
-export NVSHMEM_SRC=/workspace/nvshmem_src
-# Not recommend to use g++
-export CC=clang-19
-export CXX=clang++-19
 # Remove triton installed with torch
 pip uninstall triton
+pip uninstall triton_dist # remove previous triton-dist
 rm -rf /usr/local/lib/python3.12/dist-packages/triton
 # Install Triton-distributed
-pip install "git+https://github.com/ByteDance-Seed/Triton-distributed.git#subdirectory=python" --no-build-isolation --verbose --force-reinstall
+pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/download/experimental/triton_dist-3.4.0-cp312-cp312-linux_x86_64.whl
 ```
+
+### Latest News
+
+- 11/07/2025 ✨✨✨: Fast AllReduce implemented with Triton-distributed, see [AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py).
+
+- 11/07/2025 ✨✨✨: Improved MoE operators for tensor parallel. See [AG+MoE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_ag_moe.py) and [MoE+RS Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py).
+
+- 11/07/2025 ✨✨✨: Triton 3.4 support with NVSHMEM4py ([MR](https://github.com/ByteDance-Seed/Triton-distributed/pull/54)). `pip install` is also supported without any need to modify NVSHMEM code.
+
+- 12/05/2025 🚀🚀🚀: Our paper `TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives` accepted by MLSys 2025.
 
 ### How to use Triton-distributed
 Triton-distributed provides a set of easy-to use primitives to support the development of distributed compute-communication overlapping kernels. The primitives are divided into low-level primitives and high-level primitives. Currently, we have released our low-level primitives, and we plan to release high-level primitives in future.
@@ -199,11 +209,13 @@ The batch size is 1 (one query) for decoding.
 
 
 ## Roadmaps
+
 ### Functionalities
 - [x] Release low-level primitives
 - [ ] Release high-level primitives
 - [x] Tutorials
-- [ ] Pre-built binary
+- [x] Pre-built binary
+
 ### Kernels
 - [x] Release single-node GEMM TP overlapping kernels
 - [x] Release single-node MoE TP overlapping kernels
@@ -214,6 +226,7 @@ The batch size is 1 (one query) for decoding.
 - [x] Release cross-node distributed Flash-Decoding kernels
 - [x] Release cross-node EP all-to-all kernels (similar to [DeepEP](https://github.com/deepseek-ai/DeepEP))
 - [x] Provide tutorials for kernel implementation
+
 ### Backends
 Computation
 - [x] Nvidia SM90a support
@@ -225,6 +238,7 @@ Communication
 - [x] NVLink
 - [x] IB
 - [x] PCIe 
+
 ### Performance
 - [x] Performance report
 

@@ -38,8 +38,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.kernels.nvidia.common_ops import barrier_all
-
-from triton_dist import pynvshmem
+import nvshmem.core
 
 
 def CUDA_CHECK(err):
@@ -299,7 +298,6 @@ def ag_gemm_persistent(
     barrier_tensors,
     comm_buf,
     ag_stream=None,
-    gemm_stream=None,
     BLOCK_M=128,
     BLOCK_N=256,
     BLOCK_K=64,
@@ -314,10 +312,8 @@ def ag_gemm_persistent(
     N_per_rank, K = b.shape
 
     ag_stream = torch.cuda.Stream() if ag_stream is None else ag_stream
-    gemm_stream = torch.cuda.current_stream() if gemm_stream is None else gemm_stream
     current_stream = torch.cuda.current_stream()
     ag_stream.wait_stream(current_stream)
-    gemm_stream.wait_stream(current_stream)
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
@@ -335,37 +331,35 @@ def ag_gemm_persistent(
         ag_stream,
         barrier_tensors,
     )
-    with torch.cuda.stream(gemm_stream):
-        grid = lambda META: (
-            min(
-                NUM_SMS,
-                triton.cdiv(M, META["BLOCK_SIZE_M"])
-                * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-            ),
-        )
-        kernel_consumer_gemm_persistent[grid](
-            workspace_tensors[rank],
-            b,
-            c,
-            M,
-            N_per_rank,
-            K,
-            rank,
-            num_ranks,
-            barrier_tensors[rank],
-            comm_buf,
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_K,
-            8,
-            False,
-            NUM_SMS=NUM_SMS,
-            num_stages=stages,
-            num_warps=8,
-        )
+    grid = lambda META: (
+        min(
+            NUM_SMS,
+            triton.cdiv(M, META["BLOCK_SIZE_M"])
+            * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
+        ),
+    )
+    kernel_consumer_gemm_persistent[grid](
+        workspace_tensors[rank],
+        b,
+        c,
+        M,
+        N_per_rank,
+        K,
+        rank,
+        num_ranks,
+        barrier_tensors[rank],
+        comm_buf,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        8,
+        False,
+        NUM_SMS=NUM_SMS,
+        num_stages=stages,
+        num_warps=8,
+    )
 
     current_stream.wait_stream(ag_stream)
-    current_stream.wait_stream(gemm_stream)
 
 
 def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
@@ -381,21 +375,22 @@ def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
     N_per_rank = N // num_ranks
 
     A = torch.randn([M_per_rank, K], dtype=dtype, device=device)
-    workspaces = pynvshmem.nvshmem_create_tensor_list_intra_node([M, K], dtype)
+    workspaces = nvshmem_create_tensors([M, K], dtype, rank, num_ranks)
+    workspace = workspaces[rank]
     B = torch.randn([N_per_rank, K], dtype=dtype, device=device)
 
-    barriers = pynvshmem.nvshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
+    barriers = nvshmem_create_tensors((num_ranks,), torch.int32, rank, num_ranks)
+    barrier = barriers[rank]
 
     # at most 65536 blocks, each block world_size barriers
     max_blocks = 65536
-    comm_buf = pynvshmem.nvshmem_create_tensor([max_blocks * num_ranks], torch.int32)
+    comm_buf = nvshmem_create_tensor([max_blocks * num_ranks], torch.int32)
     comm_buf.fill_(0)
-    barriers[rank].fill_(0)
-    pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+    barrier.fill_(0)
+    nvshmem_barrier_all_on_stream(current_stream)
     torch.cuda.synchronize()
 
     ag_stream = torch.cuda.Stream()
-    gemm_stream = torch.cuda.Stream()
 
     def run_ag_gemm_persistent():
         C = torch.empty([M, N_per_rank], dtype=dtype, device=device)
@@ -404,9 +399,9 @@ def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
             rank,
             num_ranks,
             A,
-            workspaces[rank],
+            workspace,
             comm_buf,
-            barriers[rank],
+            barrier,
             M_per_rank,
             K,
         )
@@ -420,7 +415,6 @@ def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
             barriers,
             comm_buf,
             ag_stream=ag_stream,
-            gemm_stream=gemm_stream,
         )
         return C
 
@@ -428,8 +422,8 @@ def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
 
     A.copy_(torch.randn([M_per_rank, K], dtype=dtype, device=device))
     B.copy_(torch.randn([N_per_rank, K], dtype=dtype, device=device))
-    workspaces[rank].copy_(torch.randn([M, K], dtype=dtype, device=device))
-    pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+    workspace.copy_(torch.randn([M, K], dtype=dtype, device=device))
+    nvshmem_barrier_all_on_stream(current_stream)
     torch.cuda.synchronize()
     C = run_ag_gemm_persistent()
 
@@ -474,10 +468,10 @@ def main():
     torch.distributed.barrier(TP_GROUP)
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     test_ag_gemm_tma_intra_node(RANK, WORLD_SIZE, TP_GROUP)
-
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()
 
 
@@ -488,7 +482,7 @@ if __name__ == "__main__":
 You can test the aforementioned code using the following command:
 
 ```bash
-bash ./third_party/distributed/launch.sh <file_name>
+bash ./scripts/launch.sh <file_name>
 ```
 
 Next, we will add `triton.autotune` to `kernel_consumer_gemm_persistent` and modify `kernel_consumer_gemm_persistent` accordingly:
@@ -546,44 +540,41 @@ def ag_gemm_persistent(
     barrier_tensors,
     comm_buf,
     ag_stream=None,
-    gemm_stream=None,
     BLOCK_M=128,
     BLOCK_N=256,
     BLOCK_K=64,
     stages=3,
 ):
     ...
-    with torch.cuda.stream(gemm_stream):
-        grid = lambda META: (
-            min(
-                NUM_SMS,
-                triton.cdiv(M, META["BLOCK_SIZE_M"])
-                * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-            ),
-        )
-        kernel_consumer_gemm_persistent[grid](
-            workspace_tensors[rank],
-            b,
-            c,
-            M,
-            N_per_rank,
-            K,
-            rank,
-            num_ranks,
-            barrier_tensors[rank],
-            comm_buf,
-            # BLOCK_M,
-            # BLOCK_N,
-            # BLOCK_K,
-            # 8,
-            EPILOGUE_SUBTILE=False,
-            NUM_SMS=NUM_SMS,
-            # num_stages=stages,
-            # num_warps=8,
-        )
+    grid = lambda META: (
+        min(
+            NUM_SMS,
+            triton.cdiv(M, META["BLOCK_SIZE_M"])
+            * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
+        ),
+    )
+    kernel_consumer_gemm_persistent[grid](
+        workspace_tensors[rank],
+        b,
+        c,
+        M,
+        N_per_rank,
+        K,
+        rank,
+        num_ranks,
+        barrier_tensors[rank],
+        comm_buf,
+        # BLOCK_M,
+        # BLOCK_N,
+        # BLOCK_K,
+        # 8,
+        EPILOGUE_SUBTILE=False,
+        NUM_SMS=NUM_SMS,
+        # num_stages=stages,
+        # num_warps=8,
+    )
 
     current_stream.wait_stream(ag_stream)
-    current_stream.wait_stream(gemm_stream)
 ```
 
 Given that `kernel_consumer_gemm_persistent` is a subprocess of `run_ag_gemm_persistent`, and `run_ag_gemm_persistent` needs to be executed as a whole, we only need to decorate the `run_ag_gemm_persistent` function with `triton_dist.autotuner.contextual_autotune` (and set `is_dist=True`):
@@ -604,12 +595,12 @@ def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
 
 The log output of the rank-i tuning process will be printed in `./.autotune_logs/rank-i.log`.
 
-For more examples, refer to the following test files: [test_ag_gemm_intra_node.py](../../third_party/distributed/distributed/test/nvidia/test_ag_gemm_intra_node.py), [test_moe_reduce_rs.py](../../third_party/distributed/distributed/test/nvidia/test_moe_reduce_rs.py), and [test_ag_moe.py](../../third_party/distributed/distributed/test/nvidia/test_ag_moe.py). You can run the tests using the following commands:
+For more examples, refer to the following test files: [test_ag_gemm.py](../../python/triton_dist/test/nvidia/test_ag_gemm.py), [test_moe_reduce_rs.py](../../python/triton_dist/test/nvidia/test_moe_reduce_rs.py), and [test_ag_moe.py](../../python/triton_dist/test/nvidia/test_ag_moe.py). You can run the tests using the following commands:
 
 ```bash
-bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_ag_gemm_intra_node.py --case correctness_tma_autotune
-bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_moe_reduce_rs.py 8192 2048 1536 32 2 --check --autotune
-bash ./third_party/distributed/launch.sh ./third_party/distributed/distributed/test/nvidia/test_ag_moe.py --M 2048 --autotune
+bash ./scripts/launch.sh ./python/triton_dist/test/nvidia/test_ag_gemm.py --case correctness_tma_autotune
+bash ./scripts/launch.sh ./python/triton_dist/test/nvidia/test_moe_reduce_rs.py 8192 2048 1536 32 2 --check --autotune
+bash ./scripts/launch.sh ./python/triton_dist/test/nvidia/test_ag_moe.py --M 2048 --autotune
 ```
 
 ### Implementation

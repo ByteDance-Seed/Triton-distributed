@@ -25,11 +25,11 @@
 import torch
 import triton
 import triton.language as tl
-from triton_dist import pynvshmem
 
 from typing import Optional
-from triton.language.extra import libshmem_device
+from triton_dist.language.extra import libshmem_device
 from triton.language.extra.cuda.language_extra import tid
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
 @triton.jit
@@ -138,13 +138,13 @@ class AllToAllContext:
         """
         max_m: max number of tokens per rank
         """
-        self.send_buf = pynvshmem.nvshmem_create_tensor([max_m, hidden], dtype)
-        self.recv_buf = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * max_m * 2, hidden], dtype)
-        self.scale_send_buf = pynvshmem.nvshmem_create_tensor([max_m], scale_dtype)
-        self.scale_recv_buf = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * max_m * 2], scale_dtype)
-        self.split_send_buf = pynvshmem.nvshmem_create_tensor([num_tot_experts], torch.int32)
-        self.split_recv_buf = pynvshmem.nvshmem_create_tensor([num_tot_experts * 2], torch.int32)
-        self.signal_buf = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * 2], torch.uint64)
+        self.send_buf = nvshmem_create_tensor((max_m, hidden), dtype)
+        self.recv_buf = nvshmem_create_tensor((WORLD_SIZE * max_m * 2, hidden), dtype)
+        self.scale_send_buf = nvshmem_create_tensor((max_m, ), scale_dtype)
+        self.scale_recv_buf = nvshmem_create_tensor((WORLD_SIZE * max_m * 2, ), scale_dtype)
+        self.split_send_buf = nvshmem_create_tensor((num_tot_experts, ), torch.int32)
+        self.split_recv_buf = nvshmem_create_tensor((num_tot_experts * 2, ), torch.int32)
+        self.signal_buf = nvshmem_create_tensor((WORLD_SIZE * 2, ), NVSHMEM_SIGNAL_DTYPE)
 
         self.max_m = max_m
         self.hidden = hidden
@@ -162,6 +162,15 @@ class AllToAllContext:
         # start from 1, becase the initial values of signal buffer is 0
         self.call_count = 1
         self.MOD_VALUE = 1000000
+
+    def finalize(self):
+        nvshmem_free_tensor_sync(self.send_buf)
+        nvshmem_free_tensor_sync(self.recv_buf)
+        nvshmem_free_tensor_sync(self.scale_send_buf)
+        nvshmem_free_tensor_sync(self.scale_recv_buf)
+        nvshmem_free_tensor_sync(self.split_send_buf)
+        nvshmem_free_tensor_sync(self.split_recv_buf)
+        nvshmem_free_tensor_sync(self.signal_buf)
 
 
 def create_all_to_all_context(

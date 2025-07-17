@@ -30,8 +30,8 @@ import torch
 import triton
 import triton_dist.language as dl
 import triton.language as tl
-from triton_dist import pynvshmem
-from triton_dist.utils import dist_print, perf_func
+import nvshmem.core
+from triton_dist.utils import dist_print, nvshmem_free_tensor_sync, perf_func, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_create_tensor
 from triton.language.extra.cuda.language_extra import atomic_cas, tid
 
 
@@ -151,23 +151,23 @@ if __name__ == "__main__":
 
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     use_block_sync = True
 
     # test ag
     msg_size_bytes = 1024 * 8
-    symm_data = pynvshmem.nvshmem_create_tensor([msg_size_bytes], torch.int8)
+    symm_data = nvshmem_create_tensor((msg_size_bytes, ), torch.int8)
     # at most world_size blocks, each block world_size barriers
-    comm_buf = pynvshmem.nvshmem_create_tensor([WORLD_SIZE * WORLD_SIZE], torch.int32)
+    comm_buf = nvshmem_create_tensor((WORLD_SIZE * WORLD_SIZE, ), torch.int32)
     comm_buf.fill_(0)
     symm_data.fill_(RANK)
-    pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+    nvshmem_barrier_all_on_stream(current_stream)
     torch.cuda.synchronize()
 
     def func():
         if not use_block_sync:
-            pynvshmem.nvshmemx_barrier_all_on_stream(current_stream.cuda_stream)
+            nvshmem_barrier_all_on_stream(current_stream)
         results = ag_intra_node_nvlink_small_msg(symm_data, comm_buf, RANK, WORLD_SIZE,
                                                  need_block_level_sync=use_block_sync)
         return results
@@ -194,4 +194,7 @@ if __name__ == "__main__":
     os.makedirs(prof_dir, exist_ok=True)
     profiler.export_chrome_trace(f"{prof_dir}/rank{RANK}.json")
 
+    nvshmem_free_tensor_sync(symm_data)
+    nvshmem_free_tensor_sync(comm_buf)
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

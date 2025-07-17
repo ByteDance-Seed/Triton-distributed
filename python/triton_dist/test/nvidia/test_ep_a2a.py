@@ -22,17 +22,13 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+import nvshmem.core
 import torch
 import torch.distributed
 import triton
 import triton.language as tl
-from triton_dist.utils import (
-    perf_func,
-    get_torch_prof_ctx,
-)
+from triton_dist.utils import (perf_func, get_torch_prof_ctx, init_nvshmem_by_torch_process_group)
 from functools import partial
-
-from triton_dist import pynvshmem
 
 import argparse
 import random
@@ -181,7 +177,7 @@ def initialize_distributed():
     init_seed(seed=RANK)
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(EP_GROUP)
+    init_nvshmem_by_torch_process_group(EP_GROUP)
     return EP_GROUP
 
 
@@ -324,6 +320,8 @@ if __name__ == "__main__":
                     raise e
 
         print(f"RANK[{RANK}]: pass.")
+        triton_a2a_op.finalize()
+        nvshmem.core.finalize()
         torch.distributed.destroy_process_group(EP_GROUP)
         exit(0)
 
@@ -376,4 +374,6 @@ if __name__ == "__main__":
 
         print(f"RANK {RANK}: triton dispatch perf = {triton_perf}ms, triton_combine_perf = {triton_combine_perf}ms")
 
+    triton_a2a_op.finalize()
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group(EP_GROUP)

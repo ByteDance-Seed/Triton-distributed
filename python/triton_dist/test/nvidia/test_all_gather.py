@@ -26,7 +26,8 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton_dist import pynvshmem
+import nvshmem.core
+from triton_dist.utils import init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, perf_func, nvshmem_create_tensor, sleep_async
 
 import os
 import datetime
@@ -84,19 +85,19 @@ if __name__ == "__main__":
     TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
 
     torch.cuda.synchronize()
-    pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
+    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     n_elements = nelems_per_rank * WORLD_SIZE
     ref_tensor = torch.arange(n_elements, dtype=dtype).cuda()
 
-    ag_buffer = pynvshmem.nvshmem_create_tensor((n_elements, ), dtype)
+    ag_buffer = nvshmem_create_tensor((n_elements, ), dtype)
     # local copy
     ag_buffer[nelems_per_rank * RANK:nelems_per_rank * (RANK + 1)].copy_(ref_tensor[nelems_per_rank *
                                                                                     RANK:nelems_per_rank * (RANK + 1)])
 
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     triton_all_gather(ag_buffer)
-    pynvshmem.nvshmem_barrier_all()
+    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     try:
         torch.testing.assert_close(ag_buffer, ref_tensor, atol=0, rtol=0)
@@ -106,24 +107,11 @@ if __name__ == "__main__":
     else:
         print(f"✅ RANK[{RANK}] check passed")
 
-    total_iters = warmup_iters + iters
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
+    sleep_async(100)
+    _, ag_time_ms = perf_func(lambda: triton_all_gather(ag_buffer), iters, warmup_iters)
 
-    pynvshmem.nvshmem_barrier_all()
-    for i in range(total_iters):
-        start_events[i].record()
-        triton_all_gather(ag_buffer)
-        end_events[i].record()
-    torch.cuda.current_stream().synchronize()
-
-    ag_times = []
-    for i in range(total_iters):
-        end_events[i].synchronize()
-        if i >= warmup_iters:
-            ag_times.append(start_events[i].elapsed_time(end_events[i]) / 1000)
-    ag_time_ms = sum(ag_times) / iters * 1000
-
-    gbps = lambda ms: ag_buffer.numel() * ag_buffer.element_size() * 1e-9 / (ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE
-    print(f"RANK = {RANK}, Bandwith = {gbps(ag_time_ms)} GB/S")
+    gbps = ag_buffer.nbytes * 1e-9 / (ag_time_ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE
+    print(f"RANK = {RANK}, Bandwith = {gbps} GB/S")
+    nvshmem_free_tensor_sync(ag_buffer)
+    nvshmem.core.finalize()
     torch.distributed.destroy_process_group()
