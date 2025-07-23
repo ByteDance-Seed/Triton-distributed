@@ -37,6 +37,8 @@
 #include <torch/csrc/utils/pybind.h>
 #include <torch/python.h>
 
+namespace py = pybind11;
+
 using namespace rocshmem;
 // TODO: add pyrocshmem pybinding
 
@@ -346,6 +348,19 @@ rocshmem_create_tensor_list(const std::vector<int64_t> &shape,
 PYBIND11_MODULE(_pyrocshmem, m) {
 #if ENABLE_ROCSHMEM
   m.def("rocshmem_init", []() { rocshmem_init(); });
+  m.def("rocshmem_init", []() { rocshmem_init(); });
+  m.def("rocshmem_my_pe",[]() -> int {return rocshmem_my_pe();});
+  m.def("rocshmem_n_pes",[]() -> int {return rocshmem_n_pes();});
+  m.def("rocshmem_team_my_pe", [](uintptr_t team) -> int {
+    // check_rocshmem_init();
+    return rocshmem_team_my_pe((rocshmem_team_t)team);
+  });
+  m.def("rocshmem_team_n_pes", [](uintptr_t team) -> int {
+    return rocshmem_team_n_pes((rocshmem_team_t)team);
+  });
+  m.def("rocshmem_get_device_ctx",[]() -> int64_t {
+    return (int64_t) rocshmem_get_device_ctx();
+  });
   m.def("rocshmem_finalize", []() { rocshmem_finalize(); });
   m.def("rocshmem_malloc", [](size_t size) {
     void *ptr = rocshmem_malloc(size);
@@ -354,6 +369,11 @@ PYBIND11_MODULE(_pyrocshmem, m) {
     }
     return (intptr_t)ptr;
   });
+  m.def("rocshmem_free", [](intptr_t ptr) {rocshmem_free((void*) ptr);});
+  m.def("rocshmem_ptr", [](uintptr_t dest, int pe) -> intptr_t {
+    return (intptr_t) rocshmem_ptr((void*) dest, pe);
+  });
+  m.def("rocshmem_barrier_all", []() { rocshmem_barrier_all(); });
 #endif
   // TODO: find the related rocshmem Host side API.
   /*m.def("rocshmemx_get_uniqueid", []() {
@@ -377,23 +397,6 @@ PYBIND11_MODULE(_pyrocshmem, m) {
     CHECK_ROCSHMEMX(nvshmemx_init_attr(ROCSHMEMX_INIT_WITH_UNIQUEID,
   &init_attr));
   });*/
-#if ENABLE_ROCSHMEM
-  m.def("rocshmem_create_tensor",
-        [](const std::vector<int64_t> shape, py::object dtype) {
-          auto cast_dtype = torch::python::detail::py_object_to_dtype(dtype);
-          return create_tensor(shape, cast_dtype);
-        });
-  m.def("rocshmem_barrier_all", []() { rocshmem_barrier_all(); });
-#endif
-#if ENABLE_ROCSHMEM
-  m.def(
-      "rocshmem_create_tensor_list_intra_node",
-      [](const std::vector<int64_t> &shape, py::object dtype) {
-        return rocshmem_create_tensor_list(
-            shape, torch::python::detail::py_object_to_dtype(std::move(dtype)));
-      },
-      py::arg("shape"), py::arg("dtype"));
-#endif
   m.def(
       "rocshmem_get_tensors_from_ipchandle",
       [](int64_t rank, int64_t world_size,

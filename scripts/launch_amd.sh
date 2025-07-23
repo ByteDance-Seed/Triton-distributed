@@ -48,6 +48,8 @@ CMD="torchrun \
   ${additional_args} \
   $@"
 
+CMD="${MPI_ROOT}/bin/mpirun --allow-run-as-root -n ${nproc_per_node} -x MASTER_ADDR=127.0.0.1 -x MASTER_PORT=23456 python3 $@"
+
 echo ${CMD}
 ${CMD}
 
