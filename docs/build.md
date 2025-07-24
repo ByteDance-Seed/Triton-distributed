@@ -124,6 +124,7 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/ro
 bash ./shmem/rocshmem_bind/build.sh
 python3 -m pip install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
 pip3 install pybind11
+pip install mpi4py
 ```
 4. Build Triton-distributed
 ```sh
