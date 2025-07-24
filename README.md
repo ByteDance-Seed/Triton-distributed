@@ -79,7 +79,7 @@ pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/downlo
 ```
 
 ### Latest News
-- 07/24/2025 🤖🤖🤖: See how Triton-Distributed achieves up to 1.3x end-to-end inference acceleration on both NVIDIA and AMD GPUs. Explore the [demo](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_tp_e2e.py).
+- 07/24/2025 🤖🤖🤖: Introduced end-to-end inference acceleration with unified support for both NVIDIA and AMD GPUs. See the [doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/e2e/e2e_dense.md) for details.
 
 - 07/11/2025 ✨✨✨: Fast AllReduce implemented with Triton-distributed, see [AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py).
 
