@@ -10,6 +10,42 @@ This document provides an end-to-end (E2E) integration for Triton-Distributed. I
   * **Layer-wise Module Implementation**: Provides `TP_Attn` and `TP_MLP` modules that can easily replace corresponding layers in existing models to enable distributed parallelism.
   * **Full Model Integration**: Demonstrates how to seamlessly integrate the parallel modules into a dense model, using `Qwen3-32B` as an example. We also include a complete inference `Engine` with CUDA Graph integration.
 
+**Perf on 8xH800:** Large tensor shapes are best suited for a pipelined `AllGather-GEMM + GEMM-ReduceScatter` to overlap computation and communication, while smaller shapes are more efficient with `GEMM + AllReduce` .
+
+- `AllGather-GEMM` + `GEMM-ReduceScatter`
+
+| Test Case | Parameters | Torch AR (ms) | Dist-Triton (ms) | Speedup |
+|---|---|---|---|---|
+| **MLP** | `M=4096` | 1.076972 | 0.8854406 | **1.216** |
+| **Attn Prefill** | `bsz=32, ctx=128` | 0.71913 | 0.748670 | 0.961* |
+| **Attn Decode** | `bsz=4096, ctx=128` | 1.29802 | 1.31813 | 0.985* |
+| **E2E Model Prefill**| `bsz=32, ctx=128` | 123.3569 | 104.2794 | **1.183** |
+| **E2E Model Decode**| `bsz=4096, ctx=128` | 160.1424 | 140.393 | **1.141** |
+
+*The items marked with an asterisk show negative performance gains (i.e., slower speeds). This is because the shape of the weight tensors in the Attention computations is very small. For small-sized tensors, the additional overhead of splitting the communication operation into AllGather and ReduceScatter outweighs the gains from overlapping the computations, so the performance is worse than PyTorch's single AllReduce operation.
+
+- `GEMM + AllReduce`
+
+**Note:** The AllReduce implementation is not optimized yet in this open-source codebase, and will be optimized later.
+
+| Test Case | Parameters | Torch AR (ms) | Triton Dist AR (ms) | Speedup |
+|---|---|---|---|---|
+| **MLP** | `M=128` | 0.1255 | 0.0918 | **1.37x** |
+| **Attn Prefill** | `bsz=1, ctx=128` | 0.1275 | 0.0970 | **1.31x** |
+| **Attn Decode** | `bsz=128, ctx=128` | 0.1438 | 0.113 | **1.27x** |
+| **E2E Model Prefill** | `bsz=1, ctx=128` | 15.97 | 12.30 | **1.30x** |
+| **E2E Model Decode** | `bsz=128, ctx=128` | 16.68 | 13.003 | **1.28x** |
+
+**Perf on 8xMI308X:** 
+
+| Test Case | Parameters | Torch AR (ms) | Dist-Triton (ms) | Speedup |
+| :--- | :--- | :---: | :---: | :---: |
+| **AG_GEMM** | `M=4096` | 1.8047 | 1.8002 | **1.0025x** |
+| **GEMM_RS** | `M=4096` | 1.057 | 0.837 | **1.2627x** |
+| **MLP** | `M=4096` | 3.019 | 2.829 | **1.067x** |
+| **Attn Prefill** | `bsz=32, ctx=128` | 1.555 | 1.50833 | **1.0312x** |
+| **Attn Decode** | `bsz=4096, ctx=128`| 3.3783 | 3.2765 | **1.0310x** |
+
 -----
 
 ## Environment Setup

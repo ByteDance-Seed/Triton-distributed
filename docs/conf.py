@@ -57,6 +57,7 @@ master_doc = "index"
 # ones.
 extensions = [
     "recommonmark",
+    'sphinx_markdown_tables',
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.autosectionlabel",

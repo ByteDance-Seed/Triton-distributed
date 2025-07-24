@@ -79,7 +79,8 @@ pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/downlo
 ```
 
 ### Latest News
-- 07/24/2025 🤖🤖🤖: Triton-Distributed provides end-to-end (E2E) inference acceleration for dense models like [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B), achieving speedups of up to **1.3x** on 8xH800. See the [e2e Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_tp_e2e.py).
+- 07/24/2025 🤖🤖🤖: See how Triton-Distributed achieves up to 1.3x end-to-end inference acceleration on both NVIDIA and AMD GPUs. Explore the [demo](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_tp_e2e.py).
+
 - 07/11/2025 ✨✨✨: Fast AllReduce implemented with Triton-distributed, see [AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py).
 
 - 07/11/2025 ✨✨✨: Improved MoE operators for tensor parallel. See [AG+MoE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_ag_moe.py) and [MoE+RS Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py).
