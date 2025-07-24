@@ -1,5 +1,16 @@
 name: Integration Tests
+# on:
+#   pull_request:
+#     branches-ignore: ['llvm-**']
+#   merge_group:
+#     branches: [main, 'dev-**']
+#     types: [checks_requested]
+#   push:
+#     branches: [main]
+
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
 
