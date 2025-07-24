@@ -61,7 +61,7 @@ jobs:
           pip3 install pybind11
 
       - name: Build
-        runs: |
+        run: |
           echo "Building Triton-distributed..."
           pip3 install -e python --verbose --no-build-isolation --use-pep517
 
