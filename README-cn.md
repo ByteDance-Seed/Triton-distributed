@@ -76,7 +76,7 @@ pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/downlo
 ```
 
 ### 最近更新
-- 07/24/2025 🤖🤖🤖：Triton-Distributed 可为 [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) 等 dense 模型提供端到端 (E2E) 推理加速，速度提升高达 **1.3** 倍。请见 [e2e 测试](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_tp_e2e.py)。
+- 07/24/2025 🤖🤖🤖：Triton-Distributed 可为 [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) 等 dense 模型提供端到端 (E2E) 推理加速，在 8xH800 上速度提升高达 **1.3** 倍。请见 [e2e 测试](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_tp_e2e.py)。
 
 - 07/11/2025 ✨✨✨: 高性能AllReduce kernel实现。请见[AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py)。
 
