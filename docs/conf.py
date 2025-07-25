@@ -62,7 +62,16 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.autosectionlabel",
     "sphinx.ext.napoleon",
+    "sphinx_gallery.gen_gallery",
 ]
+
+sphinx_gallery_conf = {
+    'examples_dirs': 'examples',   
+    'gallery_dirs': 'auto_examples',  
+    'thumbnail_size': (250, 250), 
+    'run_stale_examples': False,
+}
+
 # Use Google style docstrings instead of NumPy docstrings.
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
@@ -100,7 +109,7 @@ html_theme = "sphinx_rtd_theme"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ["_static"]
+html_static_path = ["_static", "./getting-started/tutorials/images"]
 
 # Add the JavaScript file
 # html_js_files = [

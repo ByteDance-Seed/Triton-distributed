@@ -19,7 +19,7 @@ Getting Started
 - Explore our :doc:`end-to-end integration <getting-started/e2e/index>` to learn how Triton-Distributed accelerates inference for real-world LLMs.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 10
    :caption: Getting Started
    :hidden:
 
@@ -36,7 +36,7 @@ Python API
 
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 10
    :caption: Python API
    :hidden:
 

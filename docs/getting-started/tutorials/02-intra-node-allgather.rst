@@ -1,3 +1,5 @@
+.. _sphx_glr_getting-started_tutorials_02-intra-node-allgather.rst:
+
 Intra-node AllGather
 ====================
 

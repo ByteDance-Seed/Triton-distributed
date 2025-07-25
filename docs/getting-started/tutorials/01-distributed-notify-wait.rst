@@ -1,3 +1,5 @@
+.. _sphx_glr_getting-started_tutorials_01-distributed-notify-wait.rst:
+
 Distributed Notify and Wait
 ===========================
 
@@ -141,7 +143,7 @@ Here, we show you how to initialize a distributed system for our example.
 
 
 Test the Correctness
-----------------
+--------------------
 
 Let's now check our notify and wait kernel for correctness.
 
