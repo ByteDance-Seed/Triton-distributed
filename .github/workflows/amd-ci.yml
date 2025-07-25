@@ -1,0 +1,74 @@
+name: AMD GPU Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  amd-build-and-test:
+    name: Build and Test on AMD GPUs
+    runs-on: "amd-gfx942-mi300"
+    timeout-minutes: 45
+    container:
+        image: docker pull rocm/pytorch:rocm6.3.2_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.triton
+    env:
+      TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -y && apt install -y libopenmpi-dev
+          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          pip3 install pybind11
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+      - name: Compute cache keys
+        id: cache-key
+        run: |
+          llvm_file="3rdparty/triton/cmake/llvm-hash.txt"
+          nvidia_file="3rdparty/triton/cmake/nvidia-toolchain-version.json"
+          json_file="3rdparty/triton/cmake/json-version.txt"
+
+          # Check if files exist before proceeding
+          if [[ ! -f "$llvm_file" || ! -f "$nvidia_file" || ! -f "$json_file" ]]; then
+            echo "Error: Required dependency files are missing."
+            exit 1
+          fi
+
+          # Process the files if they exist
+          echo "llvm=$(cat $llvm_file | cut -c 1-8)" >> $GITHUB_OUTPUT
+          echo "nvidia=$(sha256sum $nvidia_file | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "json=$(cat $json_file)" >> $GITHUB_OUTPUT
+        shell: bash
+      - name: Cache build dependencies
+        uses: actions/cache@v4
+        with:
+          # Note that we cannot use environment variables here given there is
+          # no shell to interpret them in the paths.
+          path: |
+            ~/.triton/llvm
+            ~/.triton/nvidia
+            ~/.triton/json
+          key: ${{ runner.os }}-${{ runner.arch }}-llvm-${{ steps.cache-key.outputs.llvm }}-nvidia-${{ steps.cache-key.outputs.nvidia }}-json-${{ steps.cache-key.outputs.json }}
+      - name: Inspect cache directories
+        run: |
+          mkdir -p ~/.triton
+          du -h -d 1 ~/.triton
+      - name: Build rocmshmem bind
+        run: |
+          bash ./shmem/rocshmem_bind/build.sh
+      - name: Build
+        run: |
+          pip3 install -e python --verbose --no-build-isolation --use-pep517
+      - name: Test
+        run: |
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
