@@ -48,6 +48,7 @@ import time
 import pyrocshmem
 import random
 
+from triton_dist.utils import (get_torch_prof_ctx)
 
 def hip_check(call_result):
     err = call_result[0]
@@ -141,8 +142,48 @@ def test_rocshmem_basic():
 
     pyrocshmem.rocshmem_finalize()
 
+def perf_func(func, iters, warmup_iters):
+    start_event = torch.cuda.Event(enable_timing=True)
+    stop_event = torch.cuda.Event(enable_timing=True)
+    for n in range(iters + warmup_iters):
+        if n == warmup_iters:
+            start_event.record()
+        func()
+    stop_event.record()
+    start_event.wait()
+    stop_event.wait()
+    torch.cuda.current_stream().synchronize()
+    duration_ms = start_event.elapsed_time(stop_event)
+    return duration_ms / iters
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
+    parser.add_argument("--warmup", default=5, type=int, help="warmup iterations")
+    parser.add_argument("--iters", default=10, type=int, help="perf iterations")
+
+    return parser.parse_args()
+
+
+def perf_func(func, iters, warmup_iters):
+    start_event = torch.cuda.Event(enable_timing=True)
+    stop_event = torch.cuda.Event(enable_timing=True)
+    for n in range(iters + warmup_iters):
+        if n == warmup_iters:
+            start_event.record()
+        func()
+    stop_event.record()
+    start_event.wait()
+    stop_event.wait()
+    torch.cuda.current_stream().synchronize()
+    duration_ms = start_event.elapsed_time(stop_event)
+    return duration_ms / iters
 
 if __name__ == "__main__":
+    # init
+    args = parse_args()
+
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     world_size = comm.Get_size()
@@ -158,6 +199,19 @@ if __name__ == "__main__":
 
     torch.cuda.synchronize()
     torch.distributed.barrier()
-    test_rocshmem_basic()
 
+    ctx = get_torch_prof_ctx(args.profile)
+    
+    with ctx:
+        perf = perf_func(test_rocshmem_basic, iters=args.iters,
+            warmup_iters=args.warmup)
+
+    if args.profile:
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")    
+        prof_dir = f"prof/{run_id}"
+        os.makedirs(prof_dir, exist_ok=True)
+        ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
+
+    print(f"torch #{rank}", perf)
+    
     torch.distributed.destroy_process_group()
