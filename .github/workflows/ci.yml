@@ -1,0 +1,57 @@
+name: Integration Tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # TODO: Add pre commit checks
+  # pre-commit:
+  #   uses: ./.github/workflows/pre-commit.yml
+
+  # TODO: Add Nvidia integration tests
+  # integration-tests-nvidia:
+
+  integration-tests-amd:
+    name: AMD Integration Tests
+    runs-on: "amd-gfx942-mi300"
+    timeout-minutes: 60
+    container:
+        image: rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.6.0
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.trit
+
+    env:
+      # TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      # TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Install dependencies
+        run: |
+          echo "Install dependencies..."
+          sudo apt-get update -y
+          sudo apt install -y libopenmpi-dev
+          # pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --no-deps
+          bash ./shmem/rocshmem_bind/build.sh
+          python3 -m pip install -i https://test.pypi.org/simple hip-python>=6.4.0 # (or whatever Rocm version you have)
+          pip3 install pybind11
+
+      - name: Build
+        run: |
+          echo "Building Triton-distributed..."
+          pip3 install -e python --verbose --no-build-isolation --use-pep517
+
+
+      - name: Run AMD Integration Tests
+        run: |
+          echo "Running AMD integration tests..."
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
+
