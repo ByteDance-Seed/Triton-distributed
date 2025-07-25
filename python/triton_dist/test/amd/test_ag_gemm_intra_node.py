@@ -244,7 +244,8 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
 
     if args.profile:
-        run_id = os.environ["TORCHELASTIC_RUN_ID"]
+        # run_id = os.environ["TORCHELASTIC_RUN_ID"]
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
         prof_dir = f"prof/{run_id}"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
