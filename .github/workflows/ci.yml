@@ -1,13 +1,4 @@
 name: Integration Tests
-# on:
-#   pull_request:
-#     branches-ignore: ['llvm-**']
-#   merge_group:
-#     branches: [main, 'dev-**']
-#     types: [checks_requested]
-#   push:
-#     branches: [main]
-
 on:
   pull_request:
     branches: [main]
@@ -23,41 +14,34 @@ jobs:
   # integration-tests-nvidia:
 
   integration-tests-amd:
-    runs-on: ${{ matrix.runner }}
+    name: AMD Integration Tests
+    runs-on: "amd-gfx942-mi300"
     timeout-minutes: 60
-    strategy:
-      matrix:
-        runner: "amd-gfx942-mi300"
-        include:
-          # - image: "rocm/rocm-6.4-py310-torch25-241101-3"
-          - image: "rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.4"
-            runner: ["amd-gfx942-mi300"]
-    env:
-      PYTHON: "python3"
-
     container:
-      - name: "AMD Integration Tests"
-        image: ${{ matrix.image }}
-        options: --user root
+        image: rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.6.0
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.trit
+
+    env:
+      # TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      # TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
 
     steps:
       - name: Checkout
-        # uses: actions/checkout@v3
-        # with:
-        #   submodules: 'recursive'
-        run: |
-          git clone https://github.com/ByteDance-Seed/Triton-distributed.git
-          cd Triton-distributed/
-          git submodule update --init --recursive
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Install dependencies
         run: |
           echo "Install dependencies..."
           sudo apt-get update -y
           sudo apt install -y libopenmpi-dev
-          pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --no-deps
+          # pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --no-deps
           bash ./shmem/rocshmem_bind/build.sh
-          python3 -m pip install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          python3 -m pip install -i https://test.pypi.org/simple hip-python>=6.4.0 # (or whatever Rocm version you have)
           pip3 install pybind11
 
       - name: Build
