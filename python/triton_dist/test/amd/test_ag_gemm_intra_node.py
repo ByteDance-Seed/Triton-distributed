@@ -31,6 +31,10 @@ from typing import Optional
 import datetime
 import numpy as np
 from functools import partial
+from mpi4py import MPI
+import pyrocshmem
+
+from hip import hip
 
 from triton_dist.utils import (generate_data, get_torch_prof_ctx, perf_func, dist_print)
 from triton_dist.kernels.amd import ag_gemm_intra_node, create_ag_gemm_intra_node_context
@@ -164,18 +168,17 @@ if __name__ == "__main__":
     # init
     args = parse_args()
 
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
+    comm = MPI.COMM_WORLD
+    RANK = comm.Get_rank()
+    WORLD_SIZE = comm.Get_size()
+    os.environ["RANK"]  = str(RANK)
+    os.environ["WORLD_SIZE"] = str(WORLD_SIZE)
+
+    torch.cuda.set_device(RANK)
     torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+            backend="nccl", init_method="env://")
+
+    TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
     torch.distributed.barrier(TP_GROUP)
 
     torch.use_deterministic_algorithms(False, warn_only=True)
@@ -189,6 +192,8 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     np.random.seed(3 + RANK)
     random.seed(args.seed)
+
+    pyrocshmem.rocshmem_init()
 
     torch.cuda.synchronize()
     torch.distributed.barrier()
@@ -241,8 +246,9 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
 
     if args.profile:
-        run_id = os.environ["TORCHELASTIC_RUN_ID"]
-        prof_dir = f"prof/{run_id}"
+        # run_id = os.environ["TORCHELASTIC_RUN_ID"]
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
+        prof_dir = f"prof_ag_gemm_rshmem"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 
@@ -261,4 +267,5 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()

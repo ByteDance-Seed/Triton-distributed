@@ -27,22 +27,58 @@ from typing import List, Sequence
 import numpy as np
 import torch
 
+class SymmHeap:
+    def __init__(self, nbytes: int):
+        ...
+
+    def data_ptr(self) -> np.intp:
+        ...
+
+    def nbytes(self) -> int:
+        ...
+
+    def symm_at(self, rank) -> SymmHeap:
+        ...
+
+def rocshmem_get_device_ctx() -> np.intp:
+    ...
+
+def rocshmem_ptr(dest: np.intp, pe: np.int32) -> np.intp:
+    ...
 
 def rocshmemx_cumodule_init(module: np.intp) -> None:
     ...
 
-
-def rocshmemx_cumodule_finalize(module: np.intp) -> None:
+def rocshmem_my_pe() -> np.int32:
     ...
 
+
+def rocshmem_n_pes() -> np.int32:
+    ...
+
+
+def rocshmem_team_my_pe(team: np.int32) -> np.int32:
+    ...
+
+
+def rocshmem_team_n_pes(team: np.int32) -> np.int32:
+    ...
 
 def rocshmem_malloc(size: np.uint) -> np.intp:
     ...
 
+def rocshmem_free(ptr: np.intp) -> None:
+    ...
 
 def rocshmemx_get_uniqueid() -> bytes:
     ...
 
+def rocshmem_getmem(dest: np.intp, source: np.intp, nelems: int, pe: int):
+    ...
+
+
+def rocshmem_putmem(dest: np.intp, source: np.intp, nelems: int, pe: int):
+    ...
 
 def rocshmemx_init_attr_with_uniqueid(rank: np.int32, nranks: np.int32, unique_id: bytes) -> None:
     ...
