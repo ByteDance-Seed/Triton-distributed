@@ -76,14 +76,12 @@ def cp_engine_producer_all_gather_full_mesh_push_multi_stream(
             src_ptr = local_tensor.data_ptr() + M_src_start_pos * N * data_elem_size
             dst_ptr = remote_tensor_buffers[remote_rank].data_ptr() + M_dst_start_pos * N * data_elem_size
             nbytes = M_PER_CHUNK * N * data_elem_size
-            pyrocshmem.rocshmem_barrier_all()
-            stream = torch.cuda.current_stream()
             cp_res = hip.hipMemcpyAsync(
                 dst_ptr,
                 src_ptr,
                 nbytes,
                 hip.hipMemcpyKind.hipMemcpyDeviceToDeviceNoCU,
-                stream.cuda_stream,
+                ag_stream.cuda_stream,
             )
             HIP_CHECK(cp_res)
             """
@@ -96,11 +94,9 @@ def cp_engine_producer_all_gather_full_mesh_push_multi_stream(
                 one.data_ptr(),
                 barrier_elem_size,
                 hip.hipMemcpyKind.hipMemcpyDeviceToDeviceNoCU,
-                stream.cuda_stream,
+                ag_stream.cuda_stream,
             )
             HIP_CHECK(cp_res)
-            hip.hipDeviceSynchronize()
-            pyrocshmem.rocshmem_barrier_all()
 
 
 def matmul_get_configs():
@@ -288,7 +284,6 @@ def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, workspace_tensors, one, barr
 
         compiled = None
         full_input = workspace_tensors[rank][:M]
-        pyrocshmem.rocshmem_barrier_all()
         compiled = kernel_consumer_gemm_persistent[grid](
             full_input,
             a,
@@ -312,7 +307,6 @@ def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, workspace_tensors, one, barr
         )
     else:
         raise NotImplementedError("Non-perisitent gemm is not yet supported")
-    pyrocshmem.rocshmem_barrier_all()
     if os.getenv('CUDA_GRAPH') in ['1', 'true', 'True']:
         for ag_stream in ag_streams:
             current_stream.wait_stream(ag_stream)
@@ -381,7 +375,6 @@ def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, ra
     dtype = input_dtype
     m_chunk_num = (max_M + M_PER_CHUNK - 1) // M_PER_CHUNK
 
-    pyrocshmem.rocshmem_init()
 
     workspaces = pyrocshmem.rocshmem_create_tensor_list_intra_node([max_M, K], dtype)
 
@@ -393,7 +386,6 @@ def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, ra
     comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_bufs], device=torch.cuda.current_device(),
                                 requires_grad=False)
 
-    pyrocshmem.rocshmem_barrier_all()
     torch.cuda.synchronize()
     
     _ag_streams = [torch.cuda.Stream(priority=-1) for i in range(num_ranks)] if ag_streams is None else ag_streams

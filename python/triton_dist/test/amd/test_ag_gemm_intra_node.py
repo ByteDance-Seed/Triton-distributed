@@ -193,6 +193,8 @@ if __name__ == "__main__":
     np.random.seed(3 + RANK)
     random.seed(args.seed)
 
+    pyrocshmem.rocshmem_init()
+
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
@@ -232,21 +234,21 @@ if __name__ == "__main__":
             partial(torch_ag_gemm, input, weight, args.transpose_weight, bias, TP_GROUP), iters=args.iters,
             warmup_iters=args.warmup)
 
-        # torch.cuda.synchronize()
-        # torch.distributed.barrier()
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
 
         dist_triton_output, dist_triton_perf = perf_func(
             partial(dist_ag_gemm_op.forward, input, weight, args.transpose_weight), iters=args.iters,
             warmup_iters=args.warmup)
 
-    # torch.cuda.synchronize()
+    torch.cuda.synchronize()
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
     if args.profile:
         # run_id = os.environ["TORCHELASTIC_RUN_ID"]
         run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
-        prof_dir = f"prof/{run_id}"
+        prof_dir = f"prof_ag_gemm_rshmem"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 

@@ -59,6 +59,7 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
+
 def test_rocshmem_basic():
     @triton.jit
     def _rocshmem_basic(comm_buf, ctx, mype, npes):
@@ -67,23 +68,20 @@ def test_rocshmem_basic():
         tl.store(comm_buf, npes)
 
     print("**rocshmem basic start!")
-    pyrocshmem.rocshmem_init()
 
     mype = pyrocshmem.rocshmem_my_pe()
 
     npes =  pyrocshmem.rocshmem_n_pes()
     peer = (mype + 1) % npes
 
-    print('mype: {} -- num_pes: {}'.format(mype, npes))
-
     ctx = pyrocshmem.rocshmem_get_device_ctx()
     comm_buf = pyrocshmem.rocshmem_create_tensor((2,), torch.int32)
-
+    torch.cuda.synchronize()
     _rocshmem_basic[(1, )](comm_buf, ctx, mype, npes)
-    print(f"_rocshmem_basic [dl.rank , dl.num_ranks] from pe#{mype}: {comm_buf}")
 
-    pyrocshmem.rocshmem_barrier_all()
-
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    
     try:
         torch.testing.assert_close(
             comm_buf,
@@ -95,16 +93,23 @@ def test_rocshmem_basic():
     else:
         print(f"✅ _rocshmem_basic #{mype} pass")
 
+def test_rocshmem_memcpy():
+    print("**rocshmem memcpy start!")
+
+    mype = pyrocshmem.rocshmem_my_pe()
+
+    npes =  pyrocshmem.rocshmem_n_pes()
+    peer = (mype + 1) % npes
+
     nelems_per_rank = 4
     nelems = nelems_per_rank * npes
-
+    
     comm_buffs = pyrocshmem.rocshmem_create_tensor_list_intra_node([nelems_per_rank],torch.int32)
-
-    comm_buffs[rank].fill_(0)
+    comm_buffs[mype].fill_(0)
     comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_buffs], device=torch.cuda.current_device(),
                                 requires_grad=False)
 
-    pyrocshmem.rocshmem_barrier_all()
+    torch.cuda.synchronize()
 
     one = torch.arange(nelems_per_rank, dtype=torch.int32, device=torch.cuda.current_device())
     stream = torch.cuda.current_stream()
@@ -126,8 +131,7 @@ def test_rocshmem_basic():
             )
 
             hip_check(cp_res)
-    pyrocshmem.rocshmem_barrier_all()
-
+    
     print(f"mype#: {mype} comm_buffs: {comm_buffs}")
 
     try:
@@ -140,7 +144,6 @@ def test_rocshmem_basic():
     else:
         print(f"✅ _rocshmem_basic #{mype} - Check tensor_list pass")
 
-    pyrocshmem.rocshmem_finalize()
 
 def perf_func(func, iters, warmup_iters):
     start_event = torch.cuda.Event(enable_timing=True)
@@ -183,35 +186,44 @@ def perf_func(func, iters, warmup_iters):
 if __name__ == "__main__":
     # init
     args = parse_args()
-
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    world_size = comm.Get_size()
-    os.environ["RANK"]  = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
+    RANK = comm.Get_rank()
+    WORLD_SIZE = comm.Get_size()
+    os.environ["RANK"]  = str(RANK)
+    os.environ["WORLD_SIZE"] = str(WORLD_SIZE)
 
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(RANK)
     torch.distributed.init_process_group(
             backend="nccl", init_method="env://")
-
+    
+    assert torch.distributed.is_initialized()
     TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
+
     torch.distributed.barrier(TP_GROUP)
 
+    pyrocshmem.rocshmem_init()
+    
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
+    test_rocshmem_basic()
     ctx = get_torch_prof_ctx(args.profile)
     
     with ctx:
-        perf = perf_func(test_rocshmem_basic, iters=args.iters,
-            warmup_iters=args.warmup)
+        perf = perf_func(partial(test_rocshmem_memcpy), iters=10,
+            warmup_iters=5)
+    
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
 
     if args.profile:
         run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")    
-        prof_dir = f"prof/{run_id}"
+        prof_dir = "prof_rshmem"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 
-    print(f"torch #{rank}", perf)
-    
+    print(f"rocSHMEM #{RANK}", perf)
+
+    pyrocshmem.rocshmem_finalize()
+
     torch.distributed.destroy_process_group()

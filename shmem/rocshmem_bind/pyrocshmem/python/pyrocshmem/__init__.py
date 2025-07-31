@@ -86,18 +86,13 @@ def symm_heap_tensor(tensor: torch.Tensor, peer: int) -> torch.Tensor:
         return tensor
     ptr=rocshmem_ptr(tensor.data_ptr(), peer)
     buffer = SymmHeap(ptr,nbytes=tensor.nbytes, dtype=tensor.dtype, own_data=False)
-    print(f"rank: {rocshmem_my_pe()} npes: {rocshmem_n_pes()} nbytes: {tensor.nbytes} remote_ptr: {hex(ptr)} ")
     t = torch.as_tensor(buffer, device="cuda").view(tensor.dtype).view(tensor.shape)
     return  t
 
 
 def rocshmem_create_tensor(shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor:
     nbytes = torch.Size(shape).numel() * dtype.itemsize
-    hip.hipSetDevice(rocshmem_my_pe())
-    torch.cuda.synchronize()
-    hip.hipDeviceSynchronize()
     ptr=rocshmem_malloc(nbytes)
-    hip.hipDeviceSynchronize()
     buffer = SymmHeap(ptr, nbytes=nbytes, dtype=dtype, own_data=True)
     t = torch.as_tensor(buffer,device="cuda").view(dtype).view(shape)
     setattr(t, "__symm_tensor__", True)
