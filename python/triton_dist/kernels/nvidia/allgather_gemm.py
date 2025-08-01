@@ -559,7 +559,7 @@ def ag_gemm(a, b, ctx: AllGatherGEMMTensorParallelContext = None, rank=None, num
 
     if ctx is None:
         assert rank is not None and num_ranks is not None
-        M = M_per_rank * ctx.num_ranks
+        M = M_per_rank * num_ranks
         ctx = create_ag_gemm_context(a, b, rank, num_ranks, max_M=M)
 
     assert a.shape[0] * ctx.num_ranks <= ctx.max_M and a.shape[
