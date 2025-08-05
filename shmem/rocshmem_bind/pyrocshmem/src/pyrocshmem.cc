@@ -376,27 +376,32 @@ PYBIND11_MODULE(_pyrocshmem, m) {
   m.def("rocshmem_barrier_all", []() { rocshmem_barrier_all(); });
 #endif
   // TODO: find the related rocshmem Host side API.
-  /*m.def("rocshmemx_get_uniqueid", []() {
-    rocshmemx_uniqueid_t id;
-    CHECK_ROCSHMEMX(rocshmemx_get_uniqueid(&id));
-    std::string bytes((char *)&id, sizeof(id));
-    return pybind11::bytes(bytes);
-  });*/
-  /*m.def("nvshmemx_init_attr_with_uniqueid", [](int rank, int nranks,
-                                               pybind11::bytes bytes) {
-    nvshmemx_uniqueid_t id;
-    std::string id_str = bytes;
-    if (id_str.size() != sizeof(id)) {
-      throw std::runtime_error(
-          "nvshmemx_init_attr_with_uniqueid: invalid size");
+  m.def("rocshmem_get_uniqueid", []() {
+    rocshmem_uniqueid_t uid;
+    int ret = rocshmem_get_uniqueid (&uid);
+    if (ret != ROCSHMEM_SUCCESS) {
+        std::cout << rocshmem_my_pe() << ": Error in rocshmem_get_uniqueid. Aborting.\n";
+        return pybind11::bytes(0);
     }
-    nvshmemx_init_attr_t init_attr;
-    CHECK_ROCSHMEMX(
-        nvshmemx_set_attr_uniqueid_args(rank, nranks, &id, &init_attr));
-    memcpy(&id, id_str.data(), sizeof(id));
-    CHECK_ROCSHMEMX(nvshmemx_init_attr(ROCSHMEMX_INIT_WITH_UNIQUEID,
-  &init_attr));
-  });*/
+    std::string bytes((char *)&uid, sizeof(uid));
+    return pybind11::bytes(bytes);
+  });
+  m.def("rocshmem_init_attr", [](int rank, int nranks,
+                                pybind11::bytes bytes) {
+    rocshmem_uniqueid_t uid;
+    std::string uid_str = bytes;
+    if (uid_str.size() != sizeof(uid)) {
+      throw std::runtime_error(
+          "rocshmem_init_attr: invalid size");
+    }
+    rocshmem_init_attr_t init_attr;
+    // memset(uid, 0, sizeof(rocshmem_uniqueid_t));
+    memcpy(&uid, uid_str.data(), uid_str.size());
+    int ret = rocshmem_set_attr_uniqueid_args(rank, nranks, &uid, &init_attr);
+    
+    ret = rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID,
+  &init_attr);
+  });
   m.def(
       "rocshmem_get_tensors_from_ipchandle",
       [](int64_t rank, int64_t world_size,

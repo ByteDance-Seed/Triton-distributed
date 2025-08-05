@@ -168,15 +168,16 @@ if __name__ == "__main__":
     # init
     args = parse_args()
 
-    comm = MPI.COMM_WORLD
-    RANK = comm.Get_rank()
-    WORLD_SIZE = comm.Get_size()
-    os.environ["RANK"]  = str(RANK)
-    os.environ["WORLD_SIZE"] = str(WORLD_SIZE)
-
-    torch.cuda.set_device(RANK)
+    RANK = int(os.environ.get("RANK", 0))
+    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    torch.cuda.set_device(LOCAL_RANK)
     torch.distributed.init_process_group(
-            backend="nccl", init_method="env://")
+        backend="nccl",
+        world_size=WORLD_SIZE,
+        rank=RANK,
+        timeout=datetime.timedelta(seconds=1800),
+    )
 
     TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
     torch.distributed.barrier(TP_GROUP)
@@ -193,8 +194,20 @@ if __name__ == "__main__":
     np.random.seed(3 + RANK)
     random.seed(args.seed)
 
-    pyrocshmem.rocshmem_init()
+    num_ranks = torch.distributed.get_world_size()
+    rank_id = torch.distributed.get_rank()
 
+    if rank_id==0:
+        uid = pyrocshmem.rocshmem_get_uniqueid()
+        bcast_obj = [uid]
+    else:
+        bcast_obj = [None]
+
+    torch.distributed.broadcast_object_list(bcast_obj, src=0)
+    torch.distributed.barrier()
+
+    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+    
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
