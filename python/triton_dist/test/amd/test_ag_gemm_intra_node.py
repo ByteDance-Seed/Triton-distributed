@@ -31,7 +31,6 @@ from typing import Optional
 import datetime
 import numpy as np
 from functools import partial
-from mpi4py import MPI
 import pyrocshmem
 
 from hip import hip

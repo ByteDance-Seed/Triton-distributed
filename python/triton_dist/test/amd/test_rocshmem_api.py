@@ -29,7 +29,6 @@ import os
 from typing import Optional
 import datetime
 
-from mpi4py import MPI
 import numpy as np
 from hip  import hip
 
