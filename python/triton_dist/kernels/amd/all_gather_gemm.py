@@ -387,7 +387,6 @@ def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, ra
                                 requires_grad=False)
 
     torch.cuda.synchronize()
-    torch.distributed.barrier()
     
     _ag_streams = [torch.cuda.Stream(priority=-1) for i in range(num_ranks)] if ag_streams is None else ag_streams
     one = torch.ones((1024, ), dtype=torch.int32, device=torch.cuda.current_device())
