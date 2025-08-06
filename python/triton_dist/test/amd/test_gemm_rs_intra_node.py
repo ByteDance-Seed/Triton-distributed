@@ -40,6 +40,8 @@ from triton_dist.utils import (
     dist_print,
 )
 
+import pyrocshmem
+
 from triton_dist.kernels.amd import gemm_rs_intra_node, create_gemm_rs_intra_node_context
 
 
@@ -175,6 +177,20 @@ if __name__ == "__main__":
     np.random.seed(3 + RANK)
     random.seed(args.seed)
 
+    num_ranks = torch.distributed.get_world_size()
+    rank_id = torch.distributed.get_rank()
+
+    if rank_id==0:
+        uid = pyrocshmem.rocshmem_get_uniqueid()
+        bcast_obj = [uid]
+    else:
+        bcast_obj = [None]
+
+    torch.distributed.broadcast_object_list(bcast_obj, src=0)
+    torch.distributed.barrier()
+
+    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+    
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
@@ -264,4 +280,5 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()

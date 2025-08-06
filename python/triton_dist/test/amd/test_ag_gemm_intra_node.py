@@ -31,6 +31,9 @@ from typing import Optional
 import datetime
 import numpy as np
 from functools import partial
+import pyrocshmem
+
+from hip import hip
 
 from triton_dist.utils import (generate_data, get_torch_prof_ctx, perf_func, dist_print)
 from triton_dist.kernels.amd import ag_gemm_intra_node, create_ag_gemm_intra_node_context
@@ -174,8 +177,8 @@ if __name__ == "__main__":
         rank=RANK,
         timeout=datetime.timedelta(seconds=1800),
     )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+
+    TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
     torch.distributed.barrier(TP_GROUP)
 
     torch.use_deterministic_algorithms(False, warn_only=True)
@@ -190,6 +193,20 @@ if __name__ == "__main__":
     np.random.seed(3 + RANK)
     random.seed(args.seed)
 
+    num_ranks = torch.distributed.get_world_size()
+    rank_id = torch.distributed.get_rank()
+
+    if rank_id==0:
+        uid = pyrocshmem.rocshmem_get_uniqueid()
+        bcast_obj = [uid]
+    else:
+        bcast_obj = [None]
+
+    torch.distributed.broadcast_object_list(bcast_obj, src=0)
+    torch.distributed.barrier()
+
+    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+    
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
@@ -241,8 +258,9 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
 
     if args.profile:
-        run_id = os.environ["TORCHELASTIC_RUN_ID"]
-        prof_dir = f"prof/{run_id}"
+        # run_id = os.environ["TORCHELASTIC_RUN_ID"]
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
+        prof_dir = f"prof_ag_gemm_rshmem"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 
@@ -261,4 +279,5 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()

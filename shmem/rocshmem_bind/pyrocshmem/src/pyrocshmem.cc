@@ -37,6 +37,8 @@
 #include <torch/csrc/utils/pybind.h>
 #include <torch/python.h>
 
+namespace py = pybind11;
+
 using namespace rocshmem;
 // TODO: add pyrocshmem pybinding
 
@@ -346,6 +348,19 @@ rocshmem_create_tensor_list(const std::vector<int64_t> &shape,
 PYBIND11_MODULE(_pyrocshmem, m) {
 #if ENABLE_ROCSHMEM
   m.def("rocshmem_init", []() { rocshmem_init(); });
+  m.def("rocshmem_init", []() { rocshmem_init(); });
+  m.def("rocshmem_my_pe",[]() -> int {return rocshmem_my_pe();});
+  m.def("rocshmem_n_pes",[]() -> int {return rocshmem_n_pes();});
+  m.def("rocshmem_team_my_pe", [](uintptr_t team) -> int {
+    // check_rocshmem_init();
+    return rocshmem_team_my_pe((rocshmem_team_t)team);
+  });
+  m.def("rocshmem_team_n_pes", [](uintptr_t team) -> int {
+    return rocshmem_team_n_pes((rocshmem_team_t)team);
+  });
+  m.def("rocshmem_get_device_ctx",[]() -> int64_t {
+    return (int64_t) rocshmem_get_device_ctx();
+  });
   m.def("rocshmem_finalize", []() { rocshmem_finalize(); });
   m.def("rocshmem_malloc", [](size_t size) {
     void *ptr = rocshmem_malloc(size);
@@ -354,46 +369,39 @@ PYBIND11_MODULE(_pyrocshmem, m) {
     }
     return (intptr_t)ptr;
   });
-#endif
-  // TODO: find the related rocshmem Host side API.
-  /*m.def("rocshmemx_get_uniqueid", []() {
-    rocshmemx_uniqueid_t id;
-    CHECK_ROCSHMEMX(rocshmemx_get_uniqueid(&id));
-    std::string bytes((char *)&id, sizeof(id));
-    return pybind11::bytes(bytes);
-  });*/
-  /*m.def("nvshmemx_init_attr_with_uniqueid", [](int rank, int nranks,
-                                               pybind11::bytes bytes) {
-    nvshmemx_uniqueid_t id;
-    std::string id_str = bytes;
-    if (id_str.size() != sizeof(id)) {
-      throw std::runtime_error(
-          "nvshmemx_init_attr_with_uniqueid: invalid size");
-    }
-    nvshmemx_init_attr_t init_attr;
-    CHECK_ROCSHMEMX(
-        nvshmemx_set_attr_uniqueid_args(rank, nranks, &id, &init_attr));
-    memcpy(&id, id_str.data(), sizeof(id));
-    CHECK_ROCSHMEMX(nvshmemx_init_attr(ROCSHMEMX_INIT_WITH_UNIQUEID,
-  &init_attr));
-  });*/
-#if ENABLE_ROCSHMEM
-  m.def("rocshmem_create_tensor",
-        [](const std::vector<int64_t> shape, py::object dtype) {
-          auto cast_dtype = torch::python::detail::py_object_to_dtype(dtype);
-          return create_tensor(shape, cast_dtype);
-        });
+  m.def("rocshmem_free", [](intptr_t ptr) {rocshmem_free((void*) ptr);});
+  m.def("rocshmem_ptr", [](uintptr_t dest, int pe) -> intptr_t {
+    return (intptr_t) rocshmem_ptr((void*) dest, pe);
+  });
   m.def("rocshmem_barrier_all", []() { rocshmem_barrier_all(); });
 #endif
-#if ENABLE_ROCSHMEM
-  m.def(
-      "rocshmem_create_tensor_list_intra_node",
-      [](const std::vector<int64_t> &shape, py::object dtype) {
-        return rocshmem_create_tensor_list(
-            shape, torch::python::detail::py_object_to_dtype(std::move(dtype)));
-      },
-      py::arg("shape"), py::arg("dtype"));
-#endif
+  // TODO: find the related rocshmem Host side API.
+  m.def("rocshmem_get_uniqueid", []() {
+    rocshmem_uniqueid_t uid;
+    int ret = rocshmem_get_uniqueid (&uid);
+    if (ret != ROCSHMEM_SUCCESS) {
+        std::cout << rocshmem_my_pe() << ": Error in rocshmem_get_uniqueid. Aborting.\n";
+        return pybind11::bytes(0);
+    }
+    std::string bytes((char *)&uid, sizeof(uid));
+    return pybind11::bytes(bytes);
+  });
+  m.def("rocshmem_init_attr", [](int rank, int nranks,
+                                pybind11::bytes bytes) {
+    rocshmem_uniqueid_t uid;
+    std::string uid_str = bytes;
+    if (uid_str.size() != sizeof(uid)) {
+      throw std::runtime_error(
+          "rocshmem_init_attr: invalid size");
+    }
+    rocshmem_init_attr_t init_attr;
+    // memset(uid, 0, sizeof(rocshmem_uniqueid_t));
+    memcpy(&uid, uid_str.data(), uid_str.size());
+    int ret = rocshmem_set_attr_uniqueid_args(rank, nranks, &uid, &init_attr);
+    
+    ret = rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID,
+  &init_attr);
+  });
   m.def(
       "rocshmem_get_tensors_from_ipchandle",
       [](int64_t rank, int64_t world_size,
