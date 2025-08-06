@@ -787,14 +787,7 @@ class FastAllGatherContext:
     ll_buffers: List[torch.Tensor]  # double buffer
     grid_barrier: torch.Tensor
     max_buffer_size: int = 2 * 32 * 1024 * 1024
-    signal_target: int = 15
-
-    def update(self, rank, node, num_ranks, num_nodes, signal_target):
-        self.rank = rank
-        self.node = node
-        self.num_ranks = num_ranks
-        self.num_nodes = num_nodes
-        self.signal_target = signal_target
+    signal_target: int = 1
 
     def finalize(self):
         nvshmem_free_tensor_sync(self.signal_tensor)

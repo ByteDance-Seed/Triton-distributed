@@ -22,7 +22,6 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import datetime
 import os
 
 import torch
@@ -31,7 +30,7 @@ import triton
 import triton_dist.language as dl
 import triton.language as tl
 import nvshmem.core
-from triton_dist.utils import dist_print, nvshmem_free_tensor_sync, perf_func, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_create_tensor
+from triton_dist.utils import dist_print, initialize_distributed, nvshmem_free_tensor_sync, perf_func, nvshmem_barrier_all_on_stream, nvshmem_create_tensor
 from triton.language.extra.cuda.language_extra import atomic_cas, tid
 
 
@@ -138,21 +137,9 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier()
+    TP_GROUP = initialize_distributed()
 
     current_stream = torch.cuda.current_stream()
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
-
     use_block_sync = True
 
     # test ag

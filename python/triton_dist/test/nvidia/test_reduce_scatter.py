@@ -23,7 +23,6 @@
 #
 ################################################################################
 import argparse
-import datetime
 import os
 
 import nvshmem.core
@@ -34,7 +33,7 @@ from triton_dist.kernels.nvidia.reduce_scatter import (create_reduce_scater_2d_c
                                                        reduce_scatter_ring_push_1d_intra_node_ce,
                                                        reduce_scatter_ring_push_1d_intra_node_sm,
                                                        reduce_scatter_ring_push_1d_intra_node_sm_rma)
-from triton_dist.utils import assert_allclose, group_profile, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_create_tensor, perf_func, sleep_async
+from triton_dist.utils import assert_allclose, group_profile, initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_create_tensor, perf_func, sleep_async
 
 
 def fill_random(tensor: torch.Tensor):
@@ -190,29 +189,17 @@ def parse_args():
 
 
 if __name__ == "__main__":
-
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+    TP_GROUP = initialize_distributed()
     args = parse_args()
     assert args.M % WORLD_SIZE == 0
     M_per_rank = args.M // WORLD_SIZE
     N = args.N
     warmup_iters = args.warmup
     iters = args.iters
-
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
 
     if LOCAL_WORLD_SIZE == WORLD_SIZE:
         for method in ["ce", "sm", "sm_rma"]:

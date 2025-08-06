@@ -31,6 +31,7 @@ from transformers import Qwen3ForCausalLM, Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
 
 from triton_dist.kernels.allreduce import AllReduceMethod
+from triton_dist.models.kv_cache import KV_Cache
 
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is not available. Please ensure you have a compatible GPU and CUDA installed.")
@@ -38,12 +39,10 @@ try:
     if torch.version.cuda:
         from triton_dist.layers.nvidia.tp_mlp import TP_MLP
         from triton_dist.layers.nvidia.tp_attn import TP_Attn, layer_norm, _set_cos_sin_cache
-        from triton_dist.models.kv_cache import KV_Cache
         PLATFORM = 'nvidia'
     elif torch.version.hip:
         from triton_dist.layers.amd.tp_mlp import TP_MLP
         from triton_dist.layers.amd.tp_attn import TP_Attn, layer_norm, _set_cos_sin_cache
-        from triton_dist.models.kv_cache import KV_Cache
         PLATFORM = 'amd'
 except ImportError as e:
     raise ImportError(
@@ -139,6 +138,7 @@ class Qwen3:
         self.init_parameters()
         self.set_fwd()
         self.use_ar = False
+        self.model_type = 'dense'
 
     def set_fwd(self, mode: str = 'torch'):
         for layer in self.layers:

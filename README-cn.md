@@ -33,58 +33,16 @@
     <img src="https://img.shields.io/badge/License-MIT-blue"></a>
 </p> -->
 
-[原始Triton README](https://github.com/triton-lang/triton/blob/main/README.md) | [英文README](README.md)
+[原始Triton README](upstream-README.md) | [英文README](README.md)
 
 Triton-distributed是基于OpenAI Triton构建的分布式编译器，专为计算-通信重叠优化设计。
 
 使用Triton-distributed，开发者可以创建性能媲美优化库（如NVIDIA的[Distributed-GEMM](https://github.com/NVIDIA/cutlass/tree/main/examples/65_distributed_gemm)和字节跳动的[FLUX](https://github.com/bytedance/flux/blob/main/README.md)）的高效Kernel。当前主要支持NVIDIA GPU和AMD GPU，也可移植到其他硬件平台。如需在自定义硬件上使用，请联系我们。
 
 ## 快速入门
-### 安装 Triton-distributed
+### 源码安装
 
-#### 方法 1. 源码安装
-
-请看[文档](docs/build.md).
-
-#### 方法 2. 用pip安装
-
-首先，准备好PyTorch容器
-```sh
-docker run --name triton-dist --ipc=host --network=host --privileged --cap-add=SYS_ADMIN --shm-size=10g --gpus=all -itd nvcr.io/nvidia/pytorch:25.04-py3 /bin/bash
-docker exec -it triton-dist /bin/bash
-```
-
-然后，需要准备好NVSHMEM，并手动修改NVSHMEM的bug (由于NVSHMEM的许可证限制，我们无法预先为用户做这件事，必须由用户手动完成). 请看[文档](docs/prepare_nvshmem.md).
-
-这之后，安装clang-19
-```sh
-apt update
-apt install clang-19 llvm-19 libclang-19-dev
-```
-
-最后, pip安装.
-```sh
-export NVSHMEM_SRC=/workspace/nvshmem_src
-# Not recommend to use g++
-export CC=clang-19
-export CXX=clang++-19
-# Remove triton installed with torch
-pip uninstall triton
-rm -rf /usr/local/lib/python3.12/dist-packages/triton
-# Install Triton-distributed
-pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/download/experimental/triton_dist-3.4.0-cp312-cp312-linux_x86_64.whl
-```
-
-### 最近更新
-- 07/24/2025 🤖🤖🤖：引入端到端推理加速 demo，统一支持 NVIDIA 和 AMD GPU。详情请参阅[文档](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/e2e/e2e_dense.md)。
-
-- 07/11/2025 ✨✨✨: 高性能AllReduce kernel实现。请见[AllReduce Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_allreduce.py)。
-
-- 07/11/2025 ✨✨✨: 性能更优的TP MoE kernel。 请见 [AG+MoE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_ag_moe.py) 和 [MoE+RS Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py)。
-
-- 07/11/2025 ✨✨✨: Triton 3.4 和 NVSHMEM4py 支持，请见 ([MR](https://github.com/ByteDance-Seed/Triton-distributed/pull/54)). 可以无需修改代码直接`pip install`。
-
-- 05/12/2025 🚀🚀🚀: 我们的论文 `TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives` 被 MLSys 2025接收！
+[安装指导](docs/build.md)
 
 ### 如何使用 Triton-distributed
 Triton-distributed 提供了一套易于使用的原语，用于支持开发计算-通信融合的分布式kernel。这些原语分为低层次原语和高层次原语。目前，我们已经发布了低层次原语，并计划在未来发布高层次原语。
@@ -229,42 +187,40 @@ Triton-distributed 可以达到和手写分布式算子库接近的性能，有�
 通信能力
 - [x] NVLink
 - [x] IB
-- [x] PCIe 
+- [x] PCIe
 
 ### 性能
 - [x] Performance report
 
 ## 许可协议
 Triton-distributed 主体是 MIT license.
-我们的代码中有一些是 Apache-2.0 License的:
-- `python/triton_dist/kernels/flash_decode.py`
+我们的代码中有一些是 Apache-2.0 License 的:
+- `python/triton_dist/kernels/nvidia/flash_decode.py`
+
+Triton 原本有些代码也是 Apache-2.0 License 的:
+- `include/triton/Dialect/TritonGPU/Transforms/PipelineExpander.h`
 
 ## 引用
 如在学术研究中使用Triton-distributed，请引用：
 ```bibtex
 @misc{zheng2025tritondistributed,
-      title={Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler}, 
+      title={Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler},
       author={Size Zheng and Wenlei Bao and Qi Hou and Xuegui Zheng and Jin Fang and Chenhui Huang and Tianqi Li and Haojie Duanmu and Renze Chen and Ruifan Xu and Yifan Guo and Ningxin Zheng and Ziheng Jiang and Xinyi Di and Dongyang Wang and Jianxi Ye and Haibin Lin and Li-Wen Chang and Liqiang Lu and Yun Liang and Jidong Zhai and Xin Liu},
       year={2025},
       eprint={2504.19442},
       archivePrefix={arXiv},
       primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2504.19442}, 
+      url={https://arxiv.org/abs/2504.19442},
 }
-@inproceedings{zheng2025tilelink,
-      author = {Size Zheng and Jin Fang and Xuegui Zheng and Qi Hou and Wenlei Bao and Ningxin Zheng and Ziheng Jiang and Dongyang Wang and Jianxi Ye and Haibin Lin and Li-Wen Chang and Xin Liu},
-      booktitle = {Proceedings of Machine Learning and Systems},
-      title = {TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives},
-      url = {https://arxiv.org/abs/2503.20313},
-      year = {2025}
+@misc{zheng2025tilelink,
+      title={TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives},
+      author={Size Zheng and Jin Fang and Xuegui Zheng and Qi Hou and Wenlei Bao and Ningxin Zheng and Ziheng Jiang and Dongyang Wang and Jianxi Ye and Haibin Lin and Li-Wen Chang and Xin Liu},
+      year={2025},
+      eprint={TBD},
+      archivePrefix={MLSys}
 }
 ```
 
 # 关于 [ByteDance Seed Team](https://team.doubao.com/)
 
 字节跳动Seed团队成立于 2023 年，致力于打造行业内最先进的人工智能基础模型。该团队立志成为世界一流的研究团队，并为科学进步和社会发展做出重大贡献。
-
----
-
-# 交流与讨论
-<img src="asset/asset_wechat-group-temporal.jpg" width="200" height="300" alt="微信讨论群">

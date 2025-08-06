@@ -20,12 +20,7 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "apis.cuh"
 #include "registry.h"
-#include <c10/cuda/CUDAStream.h>
-#ifdef USE_TRITON_DISTRIBUTED_AOT
-#include "triton_aot_generated/triton_distributed_kernel.h"
-#endif
 
 namespace distributed {
 
@@ -34,13 +29,6 @@ namespace ops {
 PYBIND11_MODULE(libtriton_distributed, m) {
   m.doc() = "pybind11 distributed.";
   auto d = m.def_submodule("distributed");
-
-  OpInitRegistry::instance().register_one(
-      "moe_ag_scatter_align_block_size", [](py::module &m) {
-        m.def("moe_ag_scatter_align_block_size",
-              &moe_ag_scatter_align_block_size_op);
-      });
-
   OpInitRegistry::instance().initialize_all(d);
 }
 

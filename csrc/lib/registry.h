@@ -20,9 +20,10 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include <torch/csrc/utils/pybind.h>
-#include <torch/extension.h>
-#include <torch/python.h>
+
+#include <map>
+#include <pybind11/pybind11.h>
+#include <string>
 
 namespace py = pybind11;
 
@@ -44,12 +45,6 @@ private:
   OpInitRegistry() {}
   OpInitRegistry(const OpInitRegistry &) = delete;
   OpInitRegistry &operator=(const OpInitRegistry &) = delete;
-};
-
-template <typename T>
-struct TorchClassWrapper : public torch::CustomClassHolder, T {
-public:
-  using T::T;
 };
 
 } // namespace distributed

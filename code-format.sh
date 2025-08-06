@@ -43,7 +43,7 @@ done
 
 # hack for code format
 if [ -f "pre-commit" ]; then
-  cp pre-commit ./.git/hooks/pre-commit
+  cp pre-commit .git/hooks/pre-commit
 fi
 
 # 生成要检查的文件列表，排除3rdparty目录
@@ -76,17 +76,15 @@ if ! clang-format -version >/dev/null; then
   exit 1
 fi
 
-if ! command -v yapf &> /dev/null
-then
-    echo "yapf not found, can be installed by: pip3 install yapf"
-    exit 1
+if ! command -v yapf &>/dev/null; then
+  echo "yapf not found, can be installed by: pip3 install yapf"
+  exit 1
 fi
 
 # 检查 ruff 是否安装
-if ! command -v ruff &> /dev/null
-then
-    echo "ruff not found, can be installed by: pip install ruff"
-    exit 1
+if ! command -v ruff &>/dev/null; then
+  echo "ruff not found, can be installed by: pip install ruff"
+  exit 1
 fi
 
 if [ "$show_only" -eq 1 ]; then
@@ -114,7 +112,7 @@ if [ "$show_only" -eq 1 ]; then
       echo -e "$result"
       has_diff=1
     fi
-    ruff_result=$(ruff check --diff $f)
+    ruff_result=$(ruff check --config python/pyproject.toml --diff $f)
     if [ "$ruff_result" != "" ]; then
       echo "ruff ===== $f ====="
       echo -e "$ruff_result"
@@ -126,7 +124,7 @@ if [ "$show_only" -eq 1 ]; then
     if [ -L $f ]; then
       continue
     fi
-    ruff_result=$(ruff check --diff $f)
+    ruff_result=$(ruff check --config python/pyproject.toml --diff $f)
     if [ "$ruff_result" != "" ]; then
       echo "ruff ===== $f ====="
       echo -e "$ruff_result"
@@ -150,11 +148,11 @@ else
   fi
   if [[ ! -z $files_to_check_py ]]; then
     echo "Formatting py files by ruff..."
-    echo $files_to_check_py | xargs ruff check --fix
+    echo $files_to_check_py | xargs ruff check --config python/pyproject.toml --fix
   fi
   if [[ ! -z $files_to_check_pyi ]]; then
     echo "Formatting pyi files by ruff..."
-    echo $files_to_check_pyi | xargs ruff check --fix
+    echo $files_to_check_pyi | xargs ruff check --config python/pyproject.toml --fix
   fi
 fi
 

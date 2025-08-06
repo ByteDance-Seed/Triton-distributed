@@ -22,25 +22,21 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import datetime
 import functools
 import os
 
 import pytest
-import nvshmem.bindings
+import nvshmem.bindings.nvshmem as pynvshmem
 import nvshmem.core
 import torch
 import torch.distributed
 
 import triton
-import triton.backends
-import triton.backends.nvidia
-import triton.backends.nvidia.compiler
 import triton.language as tl
 from triton.language.extra.cuda.language_extra import (__syncthreads, load_v4_u32, multimem_st_b32, multimem_st_v2,
                                                        multimem_st_v4, ntid, st, tid, multimem_st_p_b32)
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import (NVSHMEM_SIGNAL_DTYPE, has_nvshmemi_bc_built, init_nvshmem_by_torch_process_group,
+from triton_dist.utils import (NVSHMEM_SIGNAL_DTYPE, has_nvshmemi_bc_built, initialize_distributed,
                                nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor,
                                is_nvshmem_multimem_supported)
 
@@ -335,7 +331,7 @@ def test_nvshmem_signal():
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     _pingpong[(1, )](t, 100, num_warps=1)
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    if nvshmem.bindings.nvshmem.my_pe() == 0:
+    if pynvshmem.my_pe() == 0:
         try:
             torch.testing.assert_close(t.to(torch.int32), torch.ones([1], dtype=torch.int32, device="cuda") * 100)
         except Exception as e:
@@ -701,13 +697,10 @@ def test_nvshmem_multimem_st(N):
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     torch.testing.assert_close(t, t_expected)
 
-    # TODO(houqi.1993) multimem.st should support v4/v2, but it is not. when ptxas fix it, we will support it.
-    with pytest.raises(triton.runtime.errors.PTXASError, match=r"PTXAS error: Internal Triton PTX codegen error"):
-        _nvshmem_multimem_st_v2.warmup(t, t.nbytes, grid=(4, ))
-    print(f"✅ _nvshmem_multimem_st with {dtype} v2 compiled failed as expected")
-    with pytest.raises(triton.runtime.errors.PTXASError, match=r"PTXAS error: Internal Triton PTX codegen error"):
-        _nvshmem_multimem_st_v4.warmup(t, t.nbytes, grid=(4, ))
-    print(f"✅ _nvshmem_multimem_st with {dtype} v4 compiled failed as expected")
+    _nvshmem_multimem_st_v2.warmup(t, t.nbytes, grid=(4, ))
+    print(f"✅ _nvshmem_multimem_st with {dtype} v2 passed")
+    _nvshmem_multimem_st_v4.warmup(t, t.nbytes, grid=(4, ))
+    print(f"✅ _nvshmem_multimem_st with {dtype} v4 passed")
 
     _nvshmem_multimem_st_p_b32[(1, )](t, 0xffffffff)
     if RANK == 0:  # RANK 0 fails may cause RANK 1 got an Exception. only check with 1 rank
@@ -948,18 +941,7 @@ def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int
 
 
 if __name__ == "__main__":
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
+    TP_GROUP = initialize_distributed()
 
     test_nvshmem_basic()
     test_nvshmemx_getmem_with_scope(31 * WORLD_SIZE, torch.int8)

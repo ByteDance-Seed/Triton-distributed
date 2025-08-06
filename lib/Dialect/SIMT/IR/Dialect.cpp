@@ -25,8 +25,8 @@
 #include "mlir/IR/OpImplementation.h"
 
 // clang-format off
- #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
- #include "TritonDistributed/Dialect/SIMT/IR/Dialect.cpp.inc"
+#include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
+#include "TritonDistributed/Dialect/SIMT/IR/Dialect.cpp.inc"
 // clang-format on
 
 using namespace mlir;

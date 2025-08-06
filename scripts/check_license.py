@@ -144,16 +144,20 @@ PYTHON_EXTENSIONS = ['.py', '.pyi']
 TD_EXTENSIONS = ['.td']
 CPP_EXTENSIONS = ['.cc', '.cpp', '.c', '.h', '.hpp', '.cu', '.cuh']
 WHITELIST_PATTERNS = [
-    r'setup.py',
-    r'^.*patches\/triton\/.*$',
+    r'setup.py', r'^.*patches\/triton\/.*$', r"\.codebase\/.*"
 ]
 
 
 def get_modified_files():
     try:
-        result1 = subprocess.run(['git', 'diff', '--name-only'], capture_output=True, text=True)
-        result2 = subprocess.run(['git', 'diff', '--name-only', '--cached'], capture_output=True, text=True)
-        modified_files = set(result1.stdout.strip().split('\n') + result2.stdout.strip().split('\n'))
+        result1 = subprocess.run(['git', 'diff', '--name-only'],
+                                 capture_output=True,
+                                 text=True)
+        result2 = subprocess.run(['git', 'diff', '--name-only', '--cached'],
+                                 capture_output=True,
+                                 text=True)
+        modified_files = set(result1.stdout.strip().split('\n') +
+                             result2.stdout.strip().split('\n'))
         return [file for file in modified_files if file]
     except Exception as e:
         print(f"Error getting modified files: {e}")
@@ -162,7 +166,10 @@ def get_modified_files():
 
 def get_git_tracked_files():
     try:
-        result = subprocess.run(['git', 'ls-files'], capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+        result = subprocess.run(['git', 'ls-files'],
+                                capture_output=True,
+                                text=True,
+                                cwd=Path(__file__).parent.parent)
         tracked_files = set(result.stdout.strip().split('\n'))
         return [file for file in tracked_files if file]
     except Exception as e:
@@ -193,7 +200,8 @@ def check_license(file_path):
 
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
-            first_lines = ''.join(file.readlines()[:max(len(license.splitlines()) for license in licenses)])
+            first_lines = ''.join(file.readlines()[:max(
+                len(license.splitlines()) for license in licenses)])
             for license_text in licenses:
                 if license_text.strip() in first_lines.strip():
                     return True
@@ -204,7 +212,8 @@ def check_license(file_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Check license for modified files.")
+    parser = argparse.ArgumentParser(
+        description="Check license for modified files.")
     parser.add_argument("--modify-only", default=False, action="store_true")
     return parser.parse_args()
 

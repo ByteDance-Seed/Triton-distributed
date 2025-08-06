@@ -31,7 +31,7 @@ import torch
 
 from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
-from triton_dist.utils import (assert_allclose, dist_print, group_profile, initialize_distributed, perf_func, TP_GROUP)
+from triton_dist.utils import (assert_allclose, dist_print, group_profile, initialize_distributed, perf_func)
 
 ALL_TESTS = {}
 
@@ -55,6 +55,7 @@ def get_args():
     parser.add_argument("--persistent", action=argparse.BooleanOptionalAction,
                         default=torch.cuda.get_device_capability() >= (9, 0))
     parser.add_argument("--profile", default=False, action="store_true")
+    parser.add_argument("--local_world_size", default=8, type=int)
 
     args = parser.parse_args()
     return args
@@ -73,8 +74,8 @@ def test_ag_gemm(args, autotune=False):
     dtype = torch.float16
     rank = args.rank
     num_ranks = args.num_ranks
-    M = 999 * num_ranks
-    N = 1024
+    M = 4091 * num_ranks
+    N = 5120
     K = 1024
 
     assert M % num_ranks == 0
@@ -86,8 +87,7 @@ def test_ag_gemm(args, autotune=False):
     B = torch.randn([N_per_rank, K], dtype=dtype, device=device)
 
     debug = args.debug
-    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-    ctx = create_ag_gemm_context(A, B, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE, max_M=M,
+    ctx = create_ag_gemm_context(A, B, rank, num_ranks, num_local_ranks=args.local_world_size, max_M=M,
                                  for_correctness=debug)
     if rank == 0:
         print(f"all gather with: {ctx.all_gather_method}")
@@ -195,19 +195,19 @@ def test_perf_ag_gemm_tma(args, autotune=False):
 register_test("perf_tma_autotune")(lambda args: test_perf_ag_gemm_tma(args, autotune=True))
 
 if __name__ == "__main__":
+    args = get_args()
+
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(LOCAL_RANK)
-    initialize_distributed()
+    args.default_group = initialize_distributed()
 
-    args = get_args()
     if torch.cuda.get_device_capability() < (9, 0):
         if args.persistent:
             print("Persistent is not supported on device with capability < (9, 0). exit...")
             sys.exit()
 
-    args.default_group = TP_GROUP()
     args.rank = RANK
     args.num_ranks = WORLD_SIZE
     if args.list:

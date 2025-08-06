@@ -332,18 +332,6 @@ class AllGatherGEMMTensorParallelContext:
     stages: int = 3
     autotune: bool = False
 
-    def update(self, rank, num_ranks, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3, ag_streams=None, serial=False,
-               autotune=False):
-        self.rank = rank
-        self.num_ranks = num_ranks
-        self.BLOCK_M = BLOCK_M
-        self.BLOCK_N = BLOCK_N
-        self.BLOCK_K = BLOCK_K
-        self.stages = stages
-        self.ag_streams = ag_streams
-        self.serial = serial
-        self.autotune = autotune
-
 
 def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, rank, num_ranks, tp_group,
                                       ag_streams=None, M_PER_CHUNK=1024, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3,

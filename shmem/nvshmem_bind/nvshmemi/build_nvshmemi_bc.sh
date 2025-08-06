@@ -16,7 +16,7 @@ pushd ${SCRIPT_DIR}/llvm_lib
 clang-19 -c -emit-llvm -O1 -std=c++11 -x cuda --cuda-path=${CUDA_HOME} --cuda-device-only \
   --cuda-gpu-arch=${BITCODE_LIB_ARCH} -I ${NVSHMEM_SRC}/src/include \
   -I ${SCRIPT_DIR}/llvm_lib \
-  -D__clang_llvm_bitcode_lib__ ${NVSHMEM_SRC}/src/device/comm/transfer_device.cu -o libnvshmemi_device.bc.unoptimized
+  -D__clang_llvm_bitcode_lib__ ${SCRIPT_DIR}/transfer_device.cu -o libnvshmemi_device.bc.unoptimized
 
 opt --passes='internalize,inline,globaldce' -internalize-public-api-list='nvshmemi_*' \
   libnvshmemi_device.bc.unoptimized -o libnvshmemi_device.bc

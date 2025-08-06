@@ -37,7 +37,7 @@ In doing so, you will learn about:
     bash launch_amd.sh 10-amd-gemm-fuse-ag-rs.py
 
     # To run this tutorial
-    bash ./scripts/launch_amd.sh ./tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
+    bash scripts/launch_amd.sh tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
 
 """
 
@@ -72,14 +72,26 @@ assert triton.runtime.driver.active.get_current_target().backend == "hip"
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'M_PER_COPY_CHUNK':
-                128, 'waves_per_eu': 2
-            }, num_warps=4, num_stages=2),
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 256,
+                'BLOCK_SIZE_K': 16,
+                'GROUP_SIZE_M': 1,
+                'M_PER_COPY_CHUNK': 128,
+                'waves_per_eu': 2
+            },
+            num_warps=4,
+            num_stages=2),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'M_PER_COPY_CHUNK':
-                128, 'waves_per_eu': 2
-            }, num_warps=8, num_stages=2),
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 128,
+                'BLOCK_SIZE_K': 32,
+                'GROUP_SIZE_M': 1,
+                'M_PER_COPY_CHUNK': 128,
+                'waves_per_eu': 2
+            },
+            num_warps=8,
+            num_stages=2),
     ],
     key=['M', 'N', 'K'],
     use_cuda_graph=True,
@@ -87,18 +99,30 @@ assert triton.runtime.driver.active.get_current_target().backend == "hip"
 @triton.jit
 def kernel_gemm_rs_producer_fuse_scatter(
         # Pointers to matrices
-        a_ptr, b_ptr, scatter_bufs_ptr, rank, num_ranks,
+        a_ptr,
+        b_ptr,
+        scatter_bufs_ptr,
+        rank,
+        num_ranks,
         # Matrix dimensions
-        M, N, K,
+        M,
+        N,
+        K,
         # The stride variables represent how much to increase the ptr by when moving by 1
         # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
         # by to get the element one row down (A has M rows).
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
-        stride_cm, stride_cn,
+        stride_am,
+        stride_ak,  #
+        stride_bk,
+        stride_bn,  #
+        stride_cm,
+        stride_cn,
         # Meta-parameters
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
-        GROUP_SIZE_M: tl.constexpr, M_PER_COPY_CHUNK: tl.constexpr  #
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+        BLOCK_SIZE_K: tl.constexpr,  #
+        GROUP_SIZE_M: tl.constexpr,
+        M_PER_COPY_CHUNK: tl.constexpr  #
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -128,11 +152,13 @@ def kernel_gemm_rs_producer_fuse_scatter(
     M_per_rank = M // num_ranks
     num_pid_m_per_copy_chunk = M_PER_COPY_CHUNK // BLOCK_SIZE_M
     chunk_offset = pid_m // (num_pid_m_per_copy_chunk * num_ranks)
-    rank_offset = pid_m % (num_pid_m_per_copy_chunk * num_ranks) // num_pid_m_per_copy_chunk
+    rank_offset = pid_m % (num_pid_m_per_copy_chunk *
+                           num_ranks) // num_pid_m_per_copy_chunk
     block_offset = pid_m % num_pid_m_per_copy_chunk
 
     rank_offset = (rank_offset + rank + 1) % num_ranks
-    pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
+    pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK +
+             block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
 
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)
@@ -147,8 +173,10 @@ def kernel_gemm_rs_producer_fuse_scatter(
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am +
+                      offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk +
+                      offs_bn[None, :] * stride_bn)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -178,7 +206,8 @@ def kernel_gemm_rs_producer_fuse_scatter(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptr = tl.load(scatter_bufs_ptr + rank_offset).to(tl.pointer_type(dtype))
     c_ptr = tl.multiple_of(c_ptr, 16)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_ptrs = c_ptr + stride_cm * offs_cm[:,
+                                         None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
@@ -218,7 +247,9 @@ def ring_reduce_after_scatter(
 ):
     M, N = scatter_out.shape
     M_per_rank = M // num_ranks
-    output = torch.empty((M_per_rank, N), dtype=scatter_out.dtype, device=scatter_out.device)
+    output = torch.empty((M_per_rank, N),
+                         dtype=scatter_out.dtype,
+                         device=scatter_out.device)
     grid = lambda META: (triton.cdiv(M_per_rank * N, META["BLOCK_SIZE"]), )
     with torch.cuda.stream(stream):
         kernel_consumer_reduce[grid](
@@ -275,10 +306,13 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
             self.transpose_weight,
         )
 
-    def forward(self, input: torch.Tensor,  # [M, local_K]
-                weight: torch.Tensor,  # [N, local_K]
-                transpose_weight: bool = False,  # indicates whether weight already transposed
-                ):
+    def forward(
+            self,
+            input: torch.Tensor,  # [M, local_K]
+            weight: torch.Tensor,  # [N, local_K]
+            transpose_weight:
+        bool = False,  # indicates whether weight already transposed
+    ):
 
         ctx = self.ctx
         M, local_K = input.shape
@@ -293,14 +327,18 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         M_per_rank = M // ctx.num_ranks
 
         current_stream = torch.cuda.current_stream()
-        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr, current_stream)
+        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr,
+                              current_stream)
 
-        output = torch.empty((M_per_rank, N), dtype=output_dtype, device=input.device)
+        output = torch.empty((M_per_rank, N),
+                             dtype=output_dtype,
+                             device=input.device)
         alignment = 256
         assert M % alignment == 0 and N % alignment == 0 and K % alignment == 0
 
         # producer gemm fused scatter
-        grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+        grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.
+                             cdiv(N, META['BLOCK_SIZE_N']), )
         kernel_gemm_rs_producer_fuse_scatter[grid](
             input,
             weight,
@@ -321,10 +359,12 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         scatter_out = ctx.scatter_bufs[ctx.rank][:M]
 
         # barrier all to wait for gemm finish
-        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr, current_stream)
+        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr,
+                              current_stream)
 
         # consumer reduction
-        output = ring_reduce_after_scatter(ctx.rank, ctx.num_ranks, scatter_out, current_stream)
+        output = ring_reduce_after_scatter(ctx.rank, ctx.num_ranks,
+                                           scatter_out, current_stream)
 
         return output
 
@@ -344,7 +384,9 @@ def torch_gemm_rs(
     output = torch.matmul(input, weight)
     if bias:
         output = output + bias
-    rs_output = torch.empty((M // world_size, N), dtype=output.dtype, device=input.device)
+    rs_output = torch.empty((M // world_size, N),
+                            dtype=output.dtype,
+                            device=input.device)
     torch.distributed.reduce_scatter_tensor(rs_output, output, group=TP_GROUP)
     return rs_output
 
@@ -361,7 +403,8 @@ def init():
         timeout=datetime.timedelta(seconds=1800),
     )
     assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)),
+                                           backend="nccl")
     torch.distributed.barrier(TP_GROUP)
 
     torch.manual_seed(3 + RANK)
@@ -398,10 +441,11 @@ if __name__ == "__main__":
 
     # Generate input and weight.
     scale = TP_GROUP.rank() + 1
-    data_config = [((M, local_K), dtype, (0.01 * scale, 0), DEVICE),  # input
-                   ((N, local_K), dtype, (0.01 * scale, 0), DEVICE),  # weight
-                   (None),  # bias
-                   ]
+    data_config = [
+        ((M, local_K), dtype, (0.01 * scale, 0), DEVICE),  # input
+        ((N, local_K), dtype, (0.01 * scale, 0), DEVICE),  # weight
+        (None),  # bias
+    ]
     generator = generate_data(data_config)
     input, weight, bias = next(generator)
 
@@ -411,13 +455,16 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     # dist triton impl
-    dist_gemm_rs_op = triton_gemm_rs_intra_node(TP_GROUP, M, N, K, input_dtype, output_dtype)
+    dist_gemm_rs_op = triton_gemm_rs_intra_node(TP_GROUP, M, N, K, input_dtype,
+                                                output_dtype)
     tri_out = dist_gemm_rs_op.forward(input, weight)
 
     if torch.allclose(tri_out, ref_out, atol=atol, rtol=rtol):
         dist_print("✅ Triton and Torch match")
     else:
-        dist_print(f"The maximum difference between torch and triton is {torch.max(torch.abs(tri_out - ref_out))}")
+        dist_print(
+            f"The maximum difference between torch and triton is {torch.max(torch.abs(tri_out - ref_out))}"
+        )
         dist_print("❌ Triton and Torch differ")
 
     # Finally destroy distributed process group.

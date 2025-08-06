@@ -1,6 +1,7 @@
 ################################################################################
 # Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
 ################################################################################
+# fmt: off
 from __future__ import annotations
 import hashlib
 import json
@@ -500,8 +501,8 @@ class CompiledKernel:
         if hasattr(self.metadata, 'use_nvshmem'):
             if self.metadata.use_nvshmem:
                 # patch function with nvshmem
-                import nvshmem.bindings
-                nvshmem.bindings.nvshmem.cumodule_init(self.module)
+                import nvshmem.bindings.nvshmem as pynvshmem
+                pynvshmem.cumodule_init(self.module)
         elif hasattr(self.metadata, 'use_rocshmem'):
             if self.metadata.use_rocshmem:
                 pass

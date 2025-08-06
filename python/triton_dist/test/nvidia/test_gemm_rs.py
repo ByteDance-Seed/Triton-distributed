@@ -32,7 +32,7 @@ import torch
 
 from triton_dist.kernels.nvidia import create_gemm_rs_context, gemm_rs
 from triton_dist.utils import (assert_allclose, dist_print, generate_data, group_profile, initialize_distributed,
-                               nvshmem_barrier_all_on_stream, perf_func, finalize_distributed, TP_GROUP)
+                               nvshmem_barrier_all_on_stream, perf_func, finalize_distributed)
 
 
 def torch_gemm_rs(
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(LOCAL_RANK)
 
     args = parse_args()
-    initialize_distributed(args.seed)
+    tp_group = initialize_distributed(args.seed)
     if torch.cuda.get_device_capability()[0] < 9:
         assert not args.persistent, "persistent is not supported on cuda < 9.0"
 
@@ -167,7 +167,6 @@ if __name__ == "__main__":
     local_K = args.K // WORLD_SIZE
 
     scale = RANK + 1
-    tp_group = TP_GROUP()
 
     def _make_data(M):
         data_config = [

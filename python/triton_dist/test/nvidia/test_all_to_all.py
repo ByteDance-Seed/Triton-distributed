@@ -92,8 +92,8 @@ def calc_gather_index(
     return gather_index, topk_index
 
 
-def calc_scatter_index_stable(choosed_experts: torch.Tensor):
-    return (choosed_experts.flatten().argsort(stable=True).argsort().int().view(choosed_experts.shape))
+def calc_scatter_index_stable(chosen_experts: torch.Tensor):
+    return (chosen_experts.flatten().argsort(stable=True).argsort().int().view(chosen_experts.shape))
 
 
 DTYPE_MAP = {

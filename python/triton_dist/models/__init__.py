@@ -27,6 +27,7 @@ from transformers import AutoTokenizer as HFTokenizer
 
 from .config import ModelConfig
 from .qwen import Qwen3
+from .qwen_moe import Qwen3MoE
 
 
 class AutoLLM:
@@ -34,6 +35,8 @@ class AutoLLM:
         "Qwen/Qwen3-8B": Qwen3,
         "Qwen/Qwen3-14B": Qwen3,
         "Qwen/Qwen3-32B": Qwen3,
+        "Qwen/Qwen3-30B-A3B": Qwen3MoE,
+        "Qwen/Qwen3-235B-A22B": Qwen3MoE,
     }
 
     @staticmethod

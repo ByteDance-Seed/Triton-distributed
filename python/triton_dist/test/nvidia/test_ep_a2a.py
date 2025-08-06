@@ -27,13 +27,12 @@ import torch
 import torch.distributed
 import triton
 import triton.language as tl
-from triton_dist.utils import (perf_func, get_torch_prof_ctx, init_nvshmem_by_torch_process_group)
+from triton_dist.utils import finalize_distributed, initialize_distributed, perf_func, get_torch_prof_ctx
 from functools import partial
 
 import argparse
 import random
 import os
-import datetime
 import numpy as np
 
 from triton_dist.layers.nvidia import EPAll2AllLayer
@@ -127,8 +126,8 @@ def calc_gather_index(
     return gather_index, topk_index
 
 
-def calc_scatter_index_stable(choosed_experts: torch.Tensor):
-    return (choosed_experts.flatten().argsort(stable=True).argsort().int().view(choosed_experts.shape))
+def calc_scatter_index_stable(chosen_experts: torch.Tensor):
+    return (chosen_experts.flatten().argsort(stable=True).argsort().int().view(chosen_experts.shape))
 
 
 DTYPE_MAP = {
@@ -156,29 +155,6 @@ def init_seed(seed=0):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     np.random.seed(3 + seed)
     random.seed(3 + seed)
-
-
-def initialize_distributed():
-    global EP_GROUP
-    assert EP_GROUP is None, "EP_GROUP has already been initialized"
-
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    # use all ranks as tp group
-    EP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(EP_GROUP)
-
-    init_seed(seed=RANK)
-
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(EP_GROUP)
-    return EP_GROUP
 
 
 def parse_args():
@@ -375,5 +351,4 @@ if __name__ == "__main__":
         print(f"RANK {RANK}: triton dispatch perf = {triton_perf}ms, triton_combine_perf = {triton_combine_perf}ms")
 
     triton_a2a_op.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group(EP_GROUP)
+    finalize_distributed()

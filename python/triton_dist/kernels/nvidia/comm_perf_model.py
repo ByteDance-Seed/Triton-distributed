@@ -23,12 +23,13 @@
 #
 ################################################################################
 import functools
+import warnings
 
 import torch
 import os
 import subprocess
 
-from triton_dist.utils import get_has_fullmesh_nvlink
+from triton_dist.utils import has_fullmesh_nvlink
 
 
 @functools.lru_cache()
@@ -74,7 +75,8 @@ def get_max_nic_bandwidth_gpbs(interface="eth0"):
     except Exception:
         pass
 
-    raise Exception(f"Could not determine max bandwidth for {interface}")
+    warnings.warn(f"can not get max bandwidth of interface {interface}, return 0...")
+    return 0
 
 
 @functools.lru_cache()
@@ -98,7 +100,7 @@ def estimate_reduce_scatter_time_ms(nbytes, world_size, local_world_size, intran
         nnodes = world_size // local_world_size
         intra_node_ms = nbytes / world_size * (local_world_size - 1) / 1e6 / intranode_bw
         inter_node_ms = nbytes / world_size / 1e6 / internode_bw
-        if get_has_fullmesh_nvlink():
+        if has_fullmesh_nvlink():
             # with nvlink full mesh, intra/inter node overlaps
             return min(intra_node_ms, inter_node_ms) * (nnodes - 1) + intra_node_ms
         else:

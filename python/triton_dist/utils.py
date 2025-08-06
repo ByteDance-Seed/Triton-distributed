@@ -44,6 +44,7 @@ import warnings
 from functools import wraps
 
 import numpy as np
+import packaging.version
 import torch
 
 
@@ -60,7 +61,9 @@ def is_hip():
 if is_cuda():
     from cuda import cuda, cudart
 
+    import nvshmem
     import nvshmem.core
+    from nvshmem.core.utils import _get_device
 elif is_hip():
     from hip import hip
 else:
@@ -68,7 +71,6 @@ else:
 
 # Some code from python/flux/util.py in flux project
 
-_TP_LOCAL_GROUP = None
 _TP_GROUP = None
 
 
@@ -92,16 +94,6 @@ def init_seed(seed=0):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     np.random.seed(3 + seed)
     random.seed(3 + seed)
-
-
-def broadcast_cpu(tensor: torch.Tensor, src: int, group: torch.distributed.ProcessGroup):
-    if not tensor.is_cuda:
-        tensor_gpu = tensor.cuda()
-        torch.distributed.broadcast(tensor_gpu, src=src, group=group)
-        tensor.copy_(tensor_gpu)
-    else:
-        torch.distributed.broadcast(tensor, src=src, group=group)
-    torch.cuda.synchronize()
 
 
 def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
@@ -151,7 +143,8 @@ def nvshmem_free_tensor_sync(tensor):
 
 
 def finalize_distributed():
-    nvshmem.core.finalize()
+    if is_cuda():
+        nvshmem.core.finalize()
     torch.distributed.destroy_process_group()
 
 
@@ -171,7 +164,22 @@ def nvshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
     nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=TorchStreamWrapper(stream))
 
 
-def initialize_distributed(seed=None):
+# nvshmem4py version 0.1.0 bug:
+# wrong parameter order of signal_value and signal_op
+# so we reimplement this signal_wait
+def nvshmem_signal_wait(signal: torch.Tensor, pe: int, signal_val: int, signal_op: int,
+                        stream: torch.cuda.Stream) -> None:
+    signal_buf = nvshmem.core.tensor_get_buffer(nvshmem.core.get_peer_tensor(signal, pe))[0]
+    # signal_buf = nvshmem.core.tensor_get_buffer(signal)[0]
+    user_nvshmem_dev, other_dev = _get_device()
+
+    nvshmem.bindings.signal_wait_until_on_stream(signal_buf._mnff.ptr, signal_op, signal_val, stream.cuda_stream)
+
+    if other_dev is not None:
+        other_dev.set_current()
+
+
+def initialize_distributed(seed=None) -> torch.distributed.ProcessGroup:
     global _TP_GROUP
     assert _TP_GROUP is None, "TP_GROUP has already been initialized"
 
@@ -180,7 +188,7 @@ def initialize_distributed(seed=None):
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(LOCAL_RANK)
     torch.distributed.init_process_group(
-        backend="nccl",
+        backend="cpu:gloo,cuda:nccl",
         world_size=WORLD_SIZE,
         rank=RANK,
         timeout=datetime.timedelta(seconds=1800),
@@ -188,15 +196,12 @@ def initialize_distributed(seed=None):
     assert torch.distributed.is_initialized()
     # use all ranks as tp group
     _TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+    torch.distributed.barrier(_TP_GROUP)
+    _TP_GROUP_GLOO = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="gloo")
+    torch.distributed.barrier(_TP_GROUP_GLOO)
 
     init_seed(seed=seed if seed is not None else RANK)
-    init_nvshmem_by_torch_process_group(_TP_GROUP)
-    return _TP_GROUP
-
-
-def TP_GROUP() -> torch.distributed.ProcessGroup:
-    global _TP_GROUP
-    assert _TP_GROUP is not None, "TP_GROUP has not been initialized"
+    init_nvshmem_by_torch_process_group(_TP_GROUP_GLOO)
     return _TP_GROUP
 
 
@@ -402,7 +407,7 @@ def _merge_json_v1(to_merge_files: List[Path], output_json: Path, compress: bool
     logging.info("compress...")
     trace["traceEvents"] = events
     if compress:
-        with gzip.open(output_json + ".tar.gz", mode="wt", compresslevel=3) as g:
+        with gzip.open(str(output_json) + ".tar.gz", mode="wt", compresslevel=3) as g:
             json.dump(trace, g)
     else:
         with open(output_json, "w") as f:
@@ -709,7 +714,7 @@ def get_nvlink_max_speed(gpu_index=0):
 
 
 @functools.lru_cache()
-def get_has_fullmesh_nvlink_pynvml():
+def has_fullmesh_nvlink_pynvml():
     num_devices = torch.cuda.device_count()
 
     ensure_nvml_initialized()
@@ -815,8 +820,8 @@ def get_pcie_link_max_speed(gpu_index):
         return get_pcie_link_max_speed_pynvml(gpu_index)
 
 
-def get_intranode_max_speed(gpu_index=0, with_scale: bool = True):
-    if get_has_fullmesh_nvlink():
+def get_intranode_max_speed(gpu_index=0, with_scale: bool = False):
+    if has_fullmesh_nvlink():
         # 200GB/s => 160GB/s
         _factor = 1.0 if not with_scale else 0.8
         return get_nvlink_max_speed(gpu_index) * _factor
@@ -835,18 +840,18 @@ def get_numa_node(gpu_index):
 
 
 @functools.lru_cache()
-def get_has_fullmesh_nvlink():
+def has_fullmesh_nvlink():
     try:
-        return get_has_fullmesh_nvlink_pynvml()
+        return has_fullmesh_nvlink_pynvml()
     except Exception:
         nvlink_matrix = NvidiaSmiUtil.get_nvlink_adjacency_matrix()
         has_nvlink = any([any(x == 1 for x in row) for row in nvlink_matrix])
-        has_fullmesh_nvlink = all([i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
-        if has_nvlink and not has_fullmesh_nvlink:
+        _has_fullmesh_nvlink = all([i == j or v == 1 for i, row in enumerate(nvlink_matrix) for j, v in enumerate(row)])
+        if has_nvlink and not _has_fullmesh_nvlink:
             warnings.warn(
                 "⚠️ found NVLink but not fullmesh NVLink, this may cause undefined behavior, please check your GPU topology"
             )
-        return has_fullmesh_nvlink
+        return _has_fullmesh_nvlink
 
 
 @functools.lru_cache()
@@ -895,7 +900,7 @@ def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True):
 
 
 @functools.lru_cache()
-def check_p2p_native_atomic_supported():
+def supports_p2p_native_atomic():
     assert torch.cuda.is_available()
     count = torch.cuda.device_count()
     if count <= 1:
@@ -911,11 +916,11 @@ def check_p2p_native_atomic_supported():
     return support == 1
 
 
-def p2p_native_atomic_required(fn):
+def requires_p2p_native_atomic(fn):
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if not check_p2p_native_atomic_supported():
+        if not supports_p2p_native_atomic():
             warnings.warn(
                 f"⚠️ function {fn.__name__} requires P2P native atomic support but you are running on a platform that does not support it. this may cause undefined behavior"
             )
@@ -956,6 +961,8 @@ def has_nvshmemi_bc_built():
 
 @functools.lru_cache()
 def is_nvshmem_multimem_supported():
+    if not is_cuda():
+        return False
     # this is a python version of nvshmem nvshmemi_detect_nvls_support
     err, cuda_driver_version = cuda.cuDriverGetVersion()
     CUDA_CHECK(err)
@@ -965,10 +972,11 @@ def is_nvshmem_multimem_supported():
     CUDA_CHECK(err)
 
     # nvshmem configure support
-    if os.getenv("NVSHMEM_DISABLE_CUDA_VMM", "0") == "1":
+    if os.getenv("NVSHMEM_DISABLE_CUDA_VMM", "0") == "1" or os.getenv("NVSHMEM_DISABLE_NVLS", "0") == "1":
         return False
 
-    if os.getenv("NVSHMEM_DISABLE_NVLS", "0") == "1":
+    # hardware support
+    if torch.cuda.get_device_capability()[0] < 9 or not has_fullmesh_nvlink():
         return False
 
     return all([
@@ -983,9 +991,9 @@ def is_nvshmem_multimem_supported():
 
 
 @functools.lru_cache()
-def is_tma_support():
+def has_tma():
     cap_major = torch.cuda.get_device_capability()[0]
-    return cap_major >= 9
+    return is_cuda() and cap_major >= 9
 
 
 def requires(condition_func):
@@ -1010,3 +1018,31 @@ def get_device_property(device_id=0):
 def sleep_async(duration_ms: int):
     clock_rate_hz = torch.cuda.clock_rate() * 1e6
     torch.cuda._sleep(int(clock_rate_hz * duration_ms / 1000))
+
+
+def triton_packed_version():
+    import triton
+    return packaging.version.Version(triton.__version__)
+
+
+@functools.lru_cache()
+def support_launch_cooperative_grid():
+    return triton_packed_version() >= packaging.version.Version("3.3.0")
+
+
+def launch_cooperative_grid_options():
+    # launch_cooperative_grid is enabled since 3.3.0
+    if support_launch_cooperative_grid():
+        return {"launch_cooperative_grid": True}
+
+    return {}
+
+
+def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps, *func_args, **func_kwargs):
+
+    compiled = triton_func.run(*func_args, grid=(1, ), warmup=True, **func_kwargs)
+    compiled._init_handles()
+    ret = cudart.cudaOccupancyMaxActiveBlocksPerMultiprocessor(compiled.function, num_warps * 32,
+                                                               compiled.metadata.shared)
+    CUDA_CHECK(ret[0])
+    return ret[1]

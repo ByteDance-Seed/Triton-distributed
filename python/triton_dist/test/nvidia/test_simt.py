@@ -55,17 +55,17 @@ def kernel_simt_transpose(
 
 def test_simt_transpose():
     print("test transpose...")
-    TILE_SIZE = 128
+    TILE_SIZE = 64
     assert TILE_SIZE % 32 == 0
     n = 1000
     input = torch.randn((n, n), dtype=torch.float32).cuda()
     output = torch.empty((n, n), dtype=torch.float32).cuda()
     grid = lambda META: (triton.cdiv(n, TILE_SIZE) * triton.cdiv(n, TILE_SIZE), )
-    kernel_simt_transpose[grid](input, output, n, TILE_SIZE=TILE_SIZE)
+    kernel_simt_transpose[grid](input, output, n, TILE_SIZE=TILE_SIZE, num_stages=1)
 
     output_ref = input.transpose(0, 1).contiguous()
     torch.testing.assert_close(output_ref, output, atol=0, rtol=0)
-    print("transpose pass")
+    print("✅ transpose pass")
 
 
 @triton.jit
@@ -180,15 +180,13 @@ def test_simt_matmul():
         c.stride(1),  #
         BLOCK_SIZE_M=128,
         BLOCK_SIZE_N=128,
-        BLOCK_SIZE_K=128,
+        BLOCK_SIZE_K=64,
         GROUP_SIZE_M=1,
     )
 
     output_ref = torch.matmul(a, b)
     torch.testing.assert_close(output_ref, c, atol=1e-2, rtol=2e-2)
-    print("matmul pass!")
-
-    return c
+    print("✅ matmul pass!")
 
 
 if __name__ == "__main__":

@@ -27,14 +27,15 @@ import itertools
 import os
 import random
 from typing import Optional
+import warnings
 import torch
 import triton
 import sys
 import torch.distributed as dist
 from triton_dist.kernels.allreduce import AllReduceMethod, get_allreduce_methods, to_allreduce_method
 from triton_dist.kernels.nvidia.allreduce import (create_allreduce_ctx, all_reduce)
-from triton_dist.utils import (assert_allclose, group_profile, initialize_distributed, finalize_distributed, perf_func,
-                               sleep_async)
+from triton_dist.utils import (assert_allclose, group_profile, initialize_distributed, finalize_distributed,
+                               is_nvshmem_multimem_supported, perf_func, sleep_async)
 
 DATA_SIZES = [
     128,  # 128B
@@ -103,13 +104,18 @@ def stress_test(dtype: torch.dtype, args, method: AllReduceMethod):
 
     ctx = create_allreduce_ctx(args.max_nbytes, RANK, WORLD_SIZE, LOCAL_WORLD_SIZE)
 
+    def _all_reduce_with_output(x):
+        out = torch.empty_like(x)
+        all_reduce(x, method=method, ctx=ctx, output=out)
+        return out
+
     for n in range(args.iters):
         # generate data for verify
         tensor_inputs = [
             _create_data(_randint_with_align(args.max_nbytes // dtype.itemsize, WORLD_SIZE * args.alignment),
                          dtype=dtype) for _ in range(args.verify_shapes)
         ]
-        triton_out_list = [all_reduce(x, None, method=method, ctx=ctx) for x in tensor_inputs]
+        triton_out_list = [_all_reduce_with_output(x) for x in tensor_inputs]
         torch_out_list = [torch_all_reduce(x, pg=TP_GROUP) for x in tensor_inputs]
 
         # verify
@@ -123,7 +129,7 @@ def stress_test(dtype: torch.dtype, args, method: AllReduceMethod):
         sleep_async(1000)
         for x in itertools.islice(itertools.cycle(tensor_inputs), args.verify_hang):
             straggler_opt = _random_straggler_option() if args.simulate_straggler else None
-            all_reduce(x, None, method=method, ctx=ctx, straggler_option=straggler_opt)
+            all_reduce(x, method=method, ctx=ctx, straggler_option=straggler_opt)
 
         print(f"runs {n + 1} iterations done")
         if (n + 1) % 10 == 0:
@@ -136,27 +142,22 @@ def stress_test(dtype: torch.dtype, args, method: AllReduceMethod):
     ctx.finalize()
 
 
-def _is_one_shot(method):
-    return "one_shot" in method
+def _is_one_shot(method: AllReduceMethod) -> bool:
+    return method in [AllReduceMethod.OneShot, AllReduceMethod.OneShot_Multimem, AllReduceMethod.OneShot_TMA]
 
 
 def run_perf(dtype: torch.dtype, method: AllReduceMethod, warmup=5, iters=10):
-    bytes_per_elem = torch.finfo(dtype).bits // 8
-    if method in ["double_tree", "one_shot", "one_shot_tma"]:
-        available_ds = DATA_SIZES[:13]
-    else:
-        available_ds = DATA_SIZES
-
+    bytes_per_elem = dtype.itemsize
+    available_ds = DATA_SIZES
     ctx = create_allreduce_ctx(available_ds[-1], RANK, WORLD_SIZE, LOCAL_WORLD_SIZE)
 
     for nbytes in available_ds:
         num_elem = nbytes // bytes_per_elem
-
         local_input = _create_data(num_elem, dtype=dtype)
-        output = torch.empty_like(local_input)
 
         def allreduce_op():
-            all_reduce(local_input, output, method=method, ctx=ctx)
+            # perf with output=None: save a copy from symmetric to output for some methods
+            all_reduce(local_input, method=method, ctx=ctx)
 
         sleep_async(100)  # in case CPU bound
         _, duration_ms = perf_func(allreduce_op, warmup_iters=warmup, iters=iters)
@@ -175,12 +176,11 @@ def run_perf(dtype: torch.dtype, method: AllReduceMethod, warmup=5, iters=10):
     ctx.finalize()
 
 
-if __name__ == "__main__":
-    TP_GROUP = initialize_distributed()
-    RANK = int(os.environ.get("RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+def _triton_warmup():
+    triton.compiler.compiler.triton_key()  # warmup. don't include this into torch.profiler.
 
+
+def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max_nbytes", type=int, default=1024 * 4096)
     parser.add_argument("--iters", type=int, default=10)
@@ -195,7 +195,20 @@ if __name__ == "__main__":
     parser.add_argument("--stress", default=False, action="store_true")
     parser.add_argument("--debug", default=False, action="store_true")
     parser.add_argument("--profile", default=False, action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    if args.method in ["one_shot_multimem", "two_shot_multimem"]:
+        if not is_nvshmem_multimem_supported():
+            warnings.warn(f"Skip {args.method} because nvshmem multimem is not supported")
+            sys.exit(0)
+
+    TP_GROUP = initialize_distributed()
+    RANK = int(os.environ.get("RANK", 0))
+    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 
     DTYPE = {
         "fp32": torch.float32,
@@ -217,6 +230,7 @@ if __name__ == "__main__":
     if args.stress:
         stress_test(DTYPE, args, method=method)
     else:
+        _triton_warmup()
         with group_profile(f"all_reduce_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=TP_GROUP):
             run_perf(DTYPE, method, warmup=args.warmup_iters, iters=args.iters)
 

@@ -25,7 +25,6 @@
 #include <dlfcn.h>
 #include <map>
 #include <mutex>
-#include <stdio.h>
 
 #ifdef __cplusplus
 #define TRITON_DIST_EXTERN extern "C" __attribute__((visibility("hidden")))
@@ -52,120 +51,6 @@
     }                                                                          \
   } while (0)
 
-struct DynamicLibrary {
-  DynamicLibrary(const char *name);
-  void *Symbol(const char *name);
-  ~DynamicLibrary();
-  DynamicLibrary(const DynamicLibrary &) = delete;
-  void operator=(const DynamicLibrary &) = delete;
-
-private:
-  void *handle_ = nullptr;
-};
-
-DynamicLibrary::DynamicLibrary(const char *name) {
-  handle_ = dlopen(name, RTLD_LOCAL | RTLD_NOW);
-  CHECK(handle_ != nullptr);
-}
-
-void *DynamicLibrary::Symbol(const char *name) {
-  if (handle_ == nullptr) {
-    return nullptr;
-  }
-  void *func = dlsym(handle_, name);
-  CHECK(func != nullptr);
-  return func;
-}
-
-DynamicLibrary::~DynamicLibrary() {
-  if (!handle_)
-    return;
-  dlclose(handle_);
-}
-
-DynamicLibrary &GetCUDALibrary() {
-  static DynamicLibrary lib("libcuda.so.1");
-  return lib;
-}
-TRITON_DIST_EXTERN
-CUresult cuLaunchKernel_stub(CUfunction f, unsigned int gridDimX,
-                             unsigned int gridDimY, unsigned int gridDimZ,
-                             unsigned int blockDimX, unsigned int blockDimY,
-                             unsigned int blockDimZ,
-                             unsigned int sharedMemBytes, CUstream hStream,
-                             void **kernelParams, void **extra) {
-  using FuncType = decltype(cuLaunchKernel);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuLaunchKernel");
-  CHECK(func != nullptr);
-  return func(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
-              sharedMemBytes, hStream, kernelParams, extra);
-}
-
-TRITON_DIST_EXTERN CUresult cuCtxGetCurrent_stub(CUcontext *pctx) {
-  using FuncType = decltype(cuCtxGetCurrent);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuCtxGetCurrent");
-  CHECK(func != nullptr);
-  return func(pctx);
-}
-
-TRITON_DIST_EXTERN CUresult cuDeviceGetAttribute_stub(int *pi,
-                                                      CUdevice_attribute attrib,
-                                                      CUdevice dev) {
-  using FuncType = decltype(cuDeviceGetAttribute);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuDeviceGetAttribute");
-  CHECK(func != nullptr);
-  return func(pi, attrib, dev);
-}
-
-TRITON_DIST_EXTERN CUresult cuGetErrorString_stub(CUresult error,
-                                                  const char **pStr) {
-  using FuncType = decltype(cuGetErrorString);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuGetErrorString");
-  CHECK(func != nullptr);
-  return func(error, pStr);
-}
-
-TRITON_DIST_EXTERN CUresult cuModuleUnload_stub(CUmodule hmod) {
-  using FuncType = decltype(cuModuleUnload);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuModuleUnload");
-  CHECK(func != nullptr);
-  return func(hmod);
-}
-
-TRITON_DIST_EXTERN CUresult cuModuleLoadData_stub(CUmodule *module,
-                                                  const void *image) {
-  using FuncType = decltype(cuModuleLoadData);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuModuleLoadData");
-  CHECK(func != nullptr);
-  return func(module, image);
-}
-
-TRITON_DIST_EXTERN CUresult cuModuleGetFunction_stub(CUfunction *hfunc,
-                                                     CUmodule hmod,
-                                                     const char *name) {
-  using FuncType = decltype(cuModuleGetFunction);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuModuleGetFunction");
-  CHECK(func != nullptr);
-  return func(hfunc, hmod, name);
-}
-
-TRITON_DIST_EXTERN CUresult cuFuncSetAttribute_stub(CUfunction hfunc,
-                                                    CUfunction_attribute attrib,
-                                                    int value) {
-  using FuncType = decltype(cuFuncSetAttribute);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuFuncSetAttribute");
-  CHECK(func != nullptr);
-  return func(hfunc, attrib, value);
-}
-
-TRITON_DIST_EXTERN CUresult cuFuncSetCacheConfig_stub(CUfunction hfunc,
-                                                      CUfunc_cache config) {
-  using FuncType = decltype(cuFuncSetCacheConfig);
-  FuncType *func = (FuncType *)GetCUDALibrary().Symbol("cuFuncSetCacheConfig");
-  CHECK(func != nullptr);
-  return func(hfunc, config);
-}
-
 class CUDAModule {
 public:
   CUDAModule(const void *image) : image_(image) {}
@@ -179,7 +64,7 @@ public:
     if (module_.find(context) != module_.end()) {
       return CUDA_ERROR_UNKNOWN;
     }
-    auto rtn = cuModuleUnload_stub(module_[context]);
+    auto rtn = cuModuleUnload(module_[context]);
     module_.erase(context);
     return rtn;
   }
@@ -202,7 +87,7 @@ private:
     if (iter != module_.end()) {
       return CUDA_ERROR_UNKNOWN;
     }
-    return cuModuleLoadData_stub(&module_[context], image_);
+    return cuModuleLoadData(&module_[context], image_);
   }
 
 private:
@@ -239,7 +124,7 @@ private:
     if (iter != func_.end()) { // duplicate load
       return CUDA_ERROR_UNKNOWN;
     }
-    return cuModuleGetFunction_stub(&func_[context], mod, name_);
+    return cuModuleGetFunction(&func_[context], mod, name_);
   }
 
 private:
@@ -256,7 +141,7 @@ TRITON_DIST_EXTERN CUresult CUDAModuleLoadData(CUDAModuleHandle *module,
                                                const void *image) {
   CUDAModule *mod = new CUDAModule(image);
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CHECK_RTN_RETURN(mod->Load(context));
   *module = mod;
   return CUDA_SUCCESS;
@@ -267,7 +152,7 @@ TRITON_DIST_EXTERN CUresult CUDAModuleGetFunction(CUDAFunctionHandle *hfunc,
                                                   const char *name) {
   CUDAFunction *func = new CUDAFunction(hmod, name);
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CHECK_RTN_RETURN(func->Load(context));
   *hfunc = func;
   return CUDA_SUCCESS;
@@ -275,7 +160,7 @@ TRITON_DIST_EXTERN CUresult CUDAModuleGetFunction(CUDAFunctionHandle *hfunc,
 
 TRITON_DIST_EXTERN CUresult CUDAModuleUnload(CUDAModuleHandle hmod) {
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CHECK_RTN_RETURN(hmod->Unload(context));
   return CUDA_SUCCESS;
 }
@@ -284,19 +169,19 @@ TRITON_DIST_EXTERN CUresult CUDAFuncSetAttribute(CUDAFunctionHandle func,
                                                  CUfunction_attribute attrib,
                                                  int value) {
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CUfunction f;
   CHECK_RTN_RETURN(func->GetOrLoad(context, &f));
-  return cuFuncSetAttribute_stub(f, attrib, value);
+  return cuFuncSetAttribute(f, attrib, value);
 }
 
 TRITON_DIST_EXTERN CUresult CUDAFuncSetCacheConfig(CUDAFunctionHandle func,
                                                    CUfunc_cache config) {
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CUfunction f;
   CHECK_RTN_RETURN(func->GetOrLoad(context, &f));
-  return cuFuncSetCacheConfig_stub(f, config);
+  return cuFuncSetCacheConfig(f, config);
 }
 
 TRITON_DIST_EXTERN CUresult CUDALaunchKernel(
@@ -305,10 +190,10 @@ TRITON_DIST_EXTERN CUresult CUDALaunchKernel(
     unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
     void **kernelParams, void **extra) {
   CUcontext context;
-  CHECK_RTN_RETURN(cuCtxGetCurrent_stub(&context));
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CUfunction func;
   CHECK_RTN_RETURN(f->GetOrLoad(context, &func));
-  return cuLaunchKernel_stub(func, gridDimX, gridDimY, gridDimZ, blockDimX,
-                             blockDimY, blockDimZ, sharedMemBytes, hStream,
-                             kernelParams, extra);
+  return cuLaunchKernel(func, gridDimX, gridDimY, gridDimZ, blockDimX,
+                        blockDimY, blockDimZ, sharedMemBytes, hStream,
+                        kernelParams, extra);
 }

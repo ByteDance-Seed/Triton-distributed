@@ -38,7 +38,7 @@ static inline void gpuAssert(CUresult code, const char *file, int line) {{
   if (code != CUDA_SUCCESS) {{
     const char *prefix = "Triton Error [CUDA]: ";
     const char *str;
-    cuGetErrorString_stub(code, &str);
+    cuGetErrorString(code, &str);
     char err[1024] = {{0}};
     strcat(err, prefix);
     strcat(err, str);
@@ -67,7 +67,7 @@ void load_{kernel_name}() {{
     CUDA_CHECK(CUDAModuleGetFunction(&{kernel_name}_func, {kernel_name}_mod, "{triton_kernel_name}"));
     // set dynamic shared memory if necessary
     int shared_optin;
-    CUDA_CHECK(cuDeviceGetAttribute_stub(&shared_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, dev));
+    CUDA_CHECK(cuDeviceGetAttribute(&shared_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, dev));
     if (shared > 49152 && shared_optin > 49152) {{
       CUDA_CHECK(CUDAFuncSetCacheConfig({kernel_name}_func, CU_FUNC_CACHE_PREFER_SHARED));
       CUDA_CHECK(CUDAFuncSetAttribute({kernel_name}_func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shared_optin))

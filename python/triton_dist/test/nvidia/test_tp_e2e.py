@@ -36,7 +36,7 @@ from triton_dist.models.config import ModelConfig
 from triton_dist.models import AutoLLM
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import seed_everything
-from triton_dist.utils import finalize_distributed, perf_func, dist_print, group_profile, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream
+from triton_dist.utils import finalize_distributed, initialize_distributed, perf_func, dist_print, group_profile, nvshmem_barrier_all_on_stream
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -81,8 +81,8 @@ def parse_args():
     parser.add_argument("--bsz", default=128, type=int, help="batch size")
     parser.add_argument("--seq_len", default=128, type=int, help="sequence length")
     parser.add_argument("--model", default="Qwen/Qwen3-32B", type=str, help="HuggingFace model name")
-    parser.add_argument("--warmup", default=20, type=int, help="warmup iterations")
-    parser.add_argument("--iters", default=100, type=int, help="perf iterations")
+    parser.add_argument("--warmup", default=10, type=int, help="warmup iterations")
+    parser.add_argument("--iters", default=20, type=int, help="perf iterations")
     parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
     parser.add_argument("--mode", default="prefill", type=str, choices=["prefill", "decode"],
                         help="mode of operation, prefill or decode")
@@ -127,25 +127,8 @@ if __name__ == "__main__":
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    TP_GROUP = initialize_distributed()
 
-    current_stream = torch.cuda.current_stream()
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
     DTYPE = DTYPE_MAP[args.dtype]
     ATOL = THRESHOLD_MAP[DTYPE]
     RTOL = THRESHOLD_MAP[DTYPE]
@@ -204,8 +187,9 @@ if __name__ == "__main__":
         position_ids = torch.arange(0, SEQ_LEN, dtype=torch.int64, device="cuda").unsqueeze(0).expand(BSZ, -1)
         kv_cache.kv_offset.fill_(0)
         mempool = torch.cuda.graph_pool_handle()
-        model.set_fwd(mode='torch')
-        torch_graph = make_cuda_graph(mempool, partial(model.inference, input_ids, position_ids, kv_cache, True))
+        if model.model_type == 'dense':  # torch native moe impl cannot use cuda graph due to cpu sync
+            model.set_fwd(mode='torch')
+            torch_graph = make_cuda_graph(mempool, partial(model.inference, input_ids, position_ids, kv_cache, True))
 
         if not args.use_allreduce:
             dist_x = input_ids.split(BSZ // WORLD_SIZE, dim=0)[RANK].contiguous()
@@ -218,7 +202,12 @@ if __name__ == "__main__":
 
         with group_profile("tp_e2e_prefill", profile, group=TP_GROUP):
             torch.cuda.synchronize()
-            _, torch_perf = perf_func(torch_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+            if model.model_type == 'dense':
+                _, torch_perf = perf_func(torch_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+            else:
+                model.set_fwd(mode='torch')
+                _, torch_perf = perf_func(partial(model.inference, input_ids, position_ids, kv_cache, True),
+                                          iters=args.iters, warmup_iters=args.warmup)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             torch.cuda.synchronize()
 
@@ -234,7 +223,9 @@ if __name__ == "__main__":
         else:
             dist_print(f"dist-triton-AR_{args.allreduce_method} prefill #{RANK}", dist_triton_perf,
                        f"{torch_perf/dist_triton_perf}x", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-        del torch_graph, triton_dist_graph, mempool
+        if model.model_type == 'dense':
+            del torch_graph
+        del triton_dist_graph, mempool
     else:
         # decode
         if not args.use_allreduce:
@@ -245,8 +236,9 @@ if __name__ == "__main__":
         position_ids = torch.arange(SEQ_LEN, SEQ_LEN + 1, dtype=torch.int64, device="cuda").unsqueeze(0).expand(BSZ, -1)
         kv_cache.kv_offset.fill_(SEQ_LEN)
         mempool = torch.cuda.graph_pool_handle()
-        model.set_fwd(mode='torch')
-        torch_graph = make_cuda_graph(mempool, partial(model.inference, input_ids, position_ids, kv_cache, True))
+        if model.model_type == 'dense':  # torch native moe impl cannot use cuda graph due to cpu sync
+            model.set_fwd(mode='torch')
+            torch_graph = make_cuda_graph(mempool, partial(model.inference, input_ids, position_ids, kv_cache, True))
 
         if not args.use_allreduce:
             dist_x = input_ids.split(BSZ // WORLD_SIZE, dim=0)[RANK].contiguous()
@@ -259,7 +251,12 @@ if __name__ == "__main__":
 
         with group_profile("tp_e2e_decode", profile, group=TP_GROUP):
             torch.cuda.synchronize()
-            _, torch_perf = perf_func(torch_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+            if model.model_type == 'dense':
+                _, torch_perf = perf_func(torch_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+            else:
+                model.set_fwd(mode='torch')
+                _, torch_perf = perf_func(partial(model.inference, input_ids, position_ids, kv_cache, True),
+                                          iters=args.iters, warmup_iters=args.warmup)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
             torch.cuda.synchronize()
 
@@ -275,7 +272,9 @@ if __name__ == "__main__":
         else:
             dist_print(f"dist-triton-AR_{args.allreduce_method} decode #{RANK}", dist_triton_perf,
                        f"{torch_perf/dist_triton_perf}x", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-        del torch_graph, triton_dist_graph, mempool
+        if model.model_type == 'dense':
+            del torch_graph
+        del triton_dist_graph, mempool
 
     model.finalize()
     finalize_distributed()

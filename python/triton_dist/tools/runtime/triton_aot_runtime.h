@@ -29,11 +29,6 @@
 extern "C" {
 #endif
 
-// CUDA driver stubs to avoid direct dependency on libcuda.so
-CUresult cuGetErrorString_stub(CUresult error, const char **pStr);
-CUresult cuDeviceGetAttribute_stub(int *pi, CUdevice_attribute attrib,
-                                   CUdevice dev);
-
 // CUDA patch for Multiple CUDA context support: using any CUDA context
 typedef struct CUDAModule *CUDAModuleHandle;
 typedef struct CUDAFunction *CUDAFunctionHandle;

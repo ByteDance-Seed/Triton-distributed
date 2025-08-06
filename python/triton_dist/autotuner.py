@@ -69,29 +69,29 @@ class ContextualAutoTuner:
     def __call__(self, *args, **kwargs):
         f_run = lambda: self.fn(*args, **kwargs)
 
-        if ContextualAutoTuner._INSTANCE is not None:
+        assert ContextualAutoTuner._INSTANCE is None
+        ContextualAutoTuner._INSTANCE = self
+        self._ctxs = []
+        try:
+            while True:
+                try:
+                    ret = f_run()
+                    break
+                except self.KernelError:
+                    continue
+            if len(self._ctxs) <= 0:
+                return ret
+            while not all(ctx.finished for ctx in self._ctxs):
+                # if self.dist:
+                #     torch.distributed.barrier()
+                try:
+                    f_run()
+                except self.KernelError:
+                    continue
             return f_run()
-        else:
-            ContextualAutoTuner._INSTANCE = self
+        finally:
+            ContextualAutoTuner._INSTANCE = None
             self._ctxs = []
-            try:
-                while True:
-                    try:
-                        f_run()
-                        break
-                    except self.KernelError:
-                        continue
-                while not all(ctx.finished for ctx in self._ctxs):
-                    # if self.dist:
-                    #     torch.distributed.barrier()
-                    try:
-                        f_run()
-                    except self.KernelError:
-                        continue
-                return f_run()
-            finally:
-                ContextualAutoTuner._INSTANCE = None
-                self._ctxs = []
 
 
 def contextual_autotune(is_dist=False, n_repeat=5, n_warmup=3):
@@ -103,9 +103,12 @@ def contextual_autotune(is_dist=False, n_repeat=5, n_warmup=3):
 
 
 def _do_bench_iterator(funcs, n_repeat=5, n_warmup=3, quantiles=None, return_mode="mean"):
+    assert return_mode in ["min", "max", "mean", "median", "all"]
     if not isinstance(funcs, Iterable):
         funcs = [funcs]
     di = triton.runtime.driver.active.get_device_interface()
+    device = triton.runtime.driver.active.get_active_torch_device()
+    cache = triton.runtime.driver.active.get_empty_cache_for_benchmark().to(device)
     for i, fn in enumerate(funcs):
         try:
             for j in range(n_warmup):
@@ -114,6 +117,7 @@ def _do_bench_iterator(funcs, n_repeat=5, n_warmup=3, quantiles=None, return_mod
             start_event = [di.Event(enable_timing=True) for _ in range(n_repeat)]
             end_event = [di.Event(enable_timing=True) for _ in range(n_repeat)]
             for j in range(n_repeat):
+                triton.runtime.driver.active.clear_cache(cache)
                 stream = di.current_stream()
                 start_event[j].record(stream)
                 ret = fn()
@@ -128,15 +132,6 @@ def _do_bench_iterator(funcs, n_repeat=5, n_warmup=3, quantiles=None, return_mod
 
 
 def _bench_fn(self: Autotuner, *args, config, **meta):
-    # check for conflicts, i.e. meta-parameters both provided
-    # as kwargs and by the autotuner
-    # conflicts = meta.keys() & config.kwargs.keys()
-    # if conflicts:
-    #     raise ValueError(f"Conflicting meta-parameters: {', '.join(conflicts)}."
-    #                      " Make sure that you don't re-define auto-tuned symbols.")
-    # augment meta-parameters with tunable ones
-    # current = dict(meta, **config.all_kwargs())
-    # full_nargs = {**self.nargs, **current}
     full_nargs = dict({**self.nargs, **meta}, **config.all_kwargs())
 
     def kernel_call():
@@ -187,7 +182,7 @@ def _contextual_tuning_run(self: Autotuner, *args, **kwargs):
     ctx: _TuningContext = getattr(self, "_tuning_context", None)
     ctx_tuner = ContextualAutoTuner._INSTANCE
     key, kvs = f_key()
-    if ctx is None or ctx.finished:
+    if ctx is None:
         config = self.cache.get(key, None)
         if config is not None:
             return f_run(config)
@@ -224,7 +219,6 @@ def _contextual_tuning_run(self: Autotuner, *args, **kwargs):
                 raise RuntimeError("cannot find valid config")
             if ctx_tuner.is_dist:
                 import torch
-                torch.cuda.Event.elapsed_time
 
                 times_tensor = torch.tensor(ctx.config_times, device="cuda")
                 torch.distributed.all_reduce(times_tensor, torch.distributed.ReduceOp.MAX)

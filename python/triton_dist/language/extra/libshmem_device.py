@@ -284,6 +284,11 @@ def putmem_signal_rma_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, p
     pass
 
 
+# TEAM translate
+def team_translate_pe(src_team, pe_in_src_team, dest_team):
+    ...
+
+
 # class nvshmemi_cmp_type(Enum):
 NVSHMEM_CMP_EQ = 0
 NVSHMEM_CMP_NE = 1

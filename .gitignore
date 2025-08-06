@@ -51,7 +51,6 @@ shmem/rocshmem_bind/pyrocshmem/python/*.egg-info
 shmem/rocshmem_bind/pyrocshmem/dist
 
 build
-python/dist
 python/triton_dist/_C/*.so
 python/triton_dist/*nvshmem
 python/triton_dist/_C/*nvshmem
@@ -62,3 +61,7 @@ temp_merge_repo
 conflict_list.txt
 
 dev_output/
+
+# cibuildwheel temp
+wheelhouse/
+setup.cfg

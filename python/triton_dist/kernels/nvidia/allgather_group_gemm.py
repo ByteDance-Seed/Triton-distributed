@@ -29,15 +29,16 @@ import torch
 
 import triton
 import triton.language as tl
+from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda
 import triton_dist.language as dl
 from triton.language.extra.cuda.language_extra import __syncthreads
 from triton_dist.kernels.nvidia.allgather import (AllGatherMethod, cp_engine_producer_all_gather_inter_node,
                                                   cp_engine_producer_all_gather_intra_node, get_auto_all_gather_method)
-from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid, next_power_of_2, set_signal)
+from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid, next_power_of_2)
 from triton_dist.kernels.nvidia.threadblock_swizzle_ag_moe_triton import \
     threadblock_swizzle_ag_moe_kernel
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, launch_cooperative_grid_options, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync
 
 
 @triton.jit(do_not_specialize=["rank"])
@@ -50,13 +51,14 @@ def _copy_and_reset_and_barrier_all_kernel(
     NUM_RANKS: tl.constexpr,
     grid_barrier_ptr,
     BLOCK_SIZE: tl.constexpr,
+    use_cooperative: tl.constexpr,
 ):
     pid = tl.program_id(0)
     npid = tl.num_programs(0)
     # barrier_all
     if pid == 0:
         libshmem_device.barrier_all_block()
-    barrier_on_this_grid(grid_barrier_ptr)
+    barrier_on_this_grid(grid_barrier_ptr, use_cooperative)
 
     # copy data
     num_blocks = tl.cdiv(N, BLOCK_SIZE)
@@ -76,7 +78,7 @@ def _copy_and_reset_and_barrier_all_kernel(
     # barrier_all
     if pid == 0:
         libshmem_device.barrier_all_block()
-    barrier_on_this_grid(grid_barrier_ptr)
+    barrier_on_this_grid(grid_barrier_ptr, use_cooperative)
 
 
 @triton.jit
@@ -311,7 +313,7 @@ class MoEAllGatherGroupGEMMTensorParallelContext:
         self.symm_barrier.zero_()
         dst = self.symm_workspace[self.rank * M_per_rank:(self.rank + 1) * M_per_rank, :]
         dst.copy_(local_data)
-        set_signal(self.symm_barrier[self.rank].data_ptr(), 1, torch.cuda.current_stream(), self.is_multinode)
+        _set_signal_cuda(self.symm_barrier[self.rank], 1, torch.cuda.current_stream())
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     def copy_and_reset_and_barrier_all_triton(self, local_data):
@@ -327,7 +329,8 @@ class MoEAllGatherGroupGEMMTensorParallelContext:
             self.grid_barrier,
             BLOCK_SIZE=1024 * 16 // local_data.itemsize,
             num_warps=32,
-            launch_cooperative_grid=True,
+            use_cooperative=True,
+            **launch_cooperative_grid_options(),
         )
 
 
@@ -571,7 +574,7 @@ def kernel_consumer_m_parallel_scatter_group_gemm(
     tiled_m = tl.load(tiled_m_ptr + pid_m)
     offs_token_id = tiled_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
-    token_mask = offs_token < M
+    token_mask = (offs_token < M) & (offs_token >= 0)
 
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = (a_ptr + offs_token[:, None] // TOP_K * stride_am + offs_k[None, :] * stride_ak)

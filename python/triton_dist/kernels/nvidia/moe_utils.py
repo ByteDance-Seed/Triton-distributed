@@ -22,6 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+from typing import Optional
 import triton
 import triton.language as tl
 import torch
@@ -29,10 +30,10 @@ from triton_dist.kernels.nvidia.common_ops import next_power_of_2, bisect_right_
 from triton.language.extra.cuda.language_extra import __syncthreads
 
 
-def calc_gather_index_torch(choosed_experts: torch.Tensor, stable=True):
-    assert choosed_experts.ndim == 2 and choosed_experts.is_cuda
-    ntokens, topk = choosed_experts.shape
-    _, index_choosed_experts = choosed_experts.flatten().sort(stable=stable)
+def calc_gather_index_torch(chosen_experts: torch.Tensor, stable=True):
+    assert chosen_experts.ndim == 2 and chosen_experts.is_cuda
+    ntokens, topk = chosen_experts.shape
+    _, index_choosed_experts = chosen_experts.flatten().sort(stable=stable)
     gather_index = index_choosed_experts.to(torch.int32) // topk
     topk_index = torch.arange(0, topk, dtype=torch.int32, device="cuda").repeat(ntokens)[index_choosed_experts]
     return gather_index, topk_index
@@ -86,9 +87,9 @@ def calc_gather_index_from_scatter_index(
     return gather_index, topk_index
 
 
-def histogram_by_expert_torch(choosed_experts: torch.Tensor, nexperts: int):
-    assert choosed_experts.is_cuda and choosed_experts.ndim == 2
-    return torch.bincount(choosed_experts.flatten(), minlength=nexperts).to(torch.int32)
+def histogram_by_expert_torch(chosen_experts: torch.Tensor, nexperts: int):
+    assert chosen_experts.is_cuda and chosen_experts.ndim == 2
+    return torch.bincount(chosen_experts.flatten(), minlength=nexperts).to(torch.int32)
 
 
 @triton.jit
@@ -105,8 +106,8 @@ def histogram_block_kernel(values_ptr, N, BLOCK_SIZE: tl.constexpr, NUM_BINS: tl
     return out
 
 
-def histogram_by_expert_triton(choosed_experts: torch.Tensor, nexperts: int):
-    assert choosed_experts.is_cuda and choosed_experts.ndim == 2
+def histogram_by_expert_triton(chosen_experts: torch.Tensor, nexperts: int):
+    assert chosen_experts.is_cuda and chosen_experts.ndim == 2
 
     @triton.jit
     def _kernel(
@@ -123,11 +124,11 @@ def histogram_by_expert_triton(choosed_experts: torch.Tensor, nexperts: int):
         mask = offs < NEXPERTS
         tl.store(ntokens_by_expert_ptr + offs, ntokens_by_expert, mask=mask)
 
-    ntokens_by_expert = torch.zeros(nexperts, dtype=torch.int32, device=choosed_experts.device)
+    ntokens_by_expert = torch.zeros(nexperts, dtype=torch.int32, device=chosen_experts.device)
     _kernel[(1, )](
-        choosed_experts,
+        chosen_experts,
         ntokens_by_expert,
-        choosed_experts.numel(),
+        chosen_experts.numel(),
         BLOCK_SIZE=1024,
         NEXPERTS=nexperts,
         num_warps=32,
@@ -135,8 +136,8 @@ def histogram_by_expert_triton(choosed_experts: torch.Tensor, nexperts: int):
     return ntokens_by_expert
 
 
-def calc_scatter_index_torch(choosed_experts, stable=True):
-    return (choosed_experts.flatten().argsort(stable=stable).argsort().int().view(choosed_experts.shape))
+def calc_scatter_index_torch(chosen_experts, stable=True):
+    return (chosen_experts.flatten().argsort(stable=stable).argsort().int().view(chosen_experts.shape))
 
 
 @triton.jit
@@ -216,12 +217,12 @@ def calc_gather_scatter_index_kernel(
 
 
 def calc_gather_scatter_index_triton(
-    choosed_experts: torch.Tensor,
+    chosen_experts: torch.Tensor,
     nexperts: int,
     alignment_by_expert: int = 1,
 ):
-    assert choosed_experts.is_cuda and choosed_experts.ndim == 2
-    ntokens, topk = choosed_experts.shape
+    assert chosen_experts.is_cuda and chosen_experts.ndim == 2
+    ntokens, topk = chosen_experts.shape
     M = ntokens * topk
     ntokens_by_expert = torch.empty(nexperts, dtype=torch.int32, device="cuda")
     ntiles_approx = (triton.cdiv(M, alignment_by_expert) + nexperts)
@@ -231,7 +232,7 @@ def calc_gather_scatter_index_triton(
     M_pad = torch.empty((1, ), dtype=torch.int32, device="cuda")
     workspace = torch.empty(nexperts, dtype=torch.int32, device="cuda")
     calc_gather_scatter_index_kernel[(1, )](
-        choosed_experts,
+        chosen_experts,
         ntokens_by_expert,
         gather_index,
         scatter_index,
@@ -251,7 +252,7 @@ def calc_gather_scatter_index_triton(
 @triton.jit
 def reduce_topk_tma_kernel(
     input_ptr,  # of shape [M * topk, H]
-    expert_weight_ptr,  # TODO(houqi.1993) suppose expert_weight == 1 now
+    scale_ptr,  # TODO(houqi.1993) not used now
     # output
     output_ptr,  # of shape [M // WORLD_SIZE, H]
     # args
@@ -283,7 +284,8 @@ def reduce_topk_tma_kernel(
 @triton.jit
 def reduce_topk_kernel(
     input_ptr,  # of shape [M, topk, H]
-    expert_weight_ptr,  # TODO(houqi.1993) suppose expert_weight == 1 now
+    scale_ptr,  # weight = weight or torch.ones()
+    bias_ptr,  # bias = bias or torch.zeros()
     # output
     output_ptr,  # of shape [M // WORLD_SIZE, H]
     # args
@@ -311,40 +313,49 @@ def reduce_topk_kernel(
         offs_out = offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
         inptrs = input_ptr + offs_in
         mask = mask_m[:, None] & mask_n[None, :]
-        reduced_topk = tl.load(inptrs, mask=mask)
-        if expert_weight_ptr:
-            weight = tl.load(expert_weight_ptr + offs_m, mask=mask_m)[:, None]
-            reduced_topk = reduced_topk * weight
 
-        for i in range(1, TOPK):
-            val = tl.load(inptrs + i * stride_m, mask=mask)
-            if expert_weight_ptr:
-                weight = tl.load(expert_weight_ptr + offs_m + i, mask=mask_m)[:, None]
-                val = val * weight
-            reduced_topk += val
+        if scale_ptr:  # rely on the compiler to move scale_ptr out of for-loop
+            reduced_topk = tl.load(inptrs, mask=mask)
+            weight = tl.load(scale_ptr + offs_m, mask=mask_m)[:, None]
+            reduced_topk = reduced_topk * weight
+            for i in range(1, TOPK):
+                val = tl.load(inptrs + i * stride_m, mask=mask)
+                weight = tl.load(scale_ptr + offs_m + i, mask=mask_m)[:, None]
+                reduced_topk += val * weight
+        else:
+            reduced_topk = tl.load(inptrs, mask=mask)
+            for i in range(1, TOPK):
+                val = tl.load(inptrs + i * stride_m, mask=mask)
+                reduced_topk += val
+
+        if bias_ptr:  # first local reduce, then add bias. don't reduce to bias
+            bias = tl.load(bias_ptr + offs_out, mask=mask)
+            reduced_topk += bias
 
         tl.store(output_ptr + offs_out, reduced_topk, mask=mask)
 
 
-def reduce_topk_non_tma(data: torch.Tensor, weight: torch.Tensor, out: torch.Tensor):
+def reduce_topk_non_tma(data: torch.Tensor, scale: Optional[torch.Tensor], bias: Optional[torch.Tensor],
+                        out: torch.Tensor):
     """
-    data is organized by choosed_experts, that is data is of shape (ntokens, topk, H)
+    data is organized by chosen_experts, that is data is of shape (ntokens, topk, H)
     this function do:
         data_topk_reduced = weighted_sum(data, weight, dim=1)
         out = reduce_scatter(data_topk_reduced)
     """
     assert data.ndim == 2 and data.is_cuda
-    assert weight.ndim == 2 and weight.is_cuda
+    assert scale.ndim == 2 and scale.is_cuda
     assert data.stride(0) == out.stride(0)
     assert data.stride(1) == out.stride(1) == 1
     M, N = data.shape
-    ntokens, topk = weight.shape
+    ntokens, topk = scale.shape
     assert M == ntokens * topk
     assert N == triton.next_power_of_2(N), f"N={N} should be power of 2"
     grid = lambda meta: (triton.cdiv(ntokens, meta["BLOCK_SIZE_M"]) * triton.cdiv(N, meta["BLOCK_SIZE_N"]), )
     reduce_topk_kernel[grid](
         data,
-        weight,  # expert_weight
+        scale,  # expert_weight
+        bias,
         out,
         ntokens,
         N,
@@ -357,19 +368,19 @@ def reduce_topk_non_tma(data: torch.Tensor, weight: torch.Tensor, out: torch.Ten
     )
 
 
-def reduce_topk_tma(data: torch.Tensor, weight: torch.Tensor, out: torch.Tensor):
+def reduce_topk_tma(data: torch.Tensor, scale: torch.Tensor, bias: Optional[torch.Tensor], out: torch.Tensor):
     """
-    data is organized by choosed_experts, that is data is of shape (ntokens, topk, H)
+    data is organized by chosen_experts, that is data is of shape (ntokens, topk, H)
     this function do:
         data_topk_reduced = weighted_sum(data, weight, dim=1)
         out = reduce_scatter(data_topk_reduced)
     """
     assert data.ndim == 2 and data.is_cuda
-    assert weight.ndim == 2 and weight.is_cuda
+    assert scale.ndim == 2 and scale.is_cuda
     assert data.stride(0) == out.stride(0)
     assert data.stride(1) == out.stride(1) == 1
     M, N = data.shape
-    ntokens, topk = weight.shape
+    ntokens, topk = scale.shape
     assert M == ntokens * topk
     assert N == triton.next_power_of_2(N), f"N={N} should be power of 2"
 
@@ -379,7 +390,7 @@ def reduce_topk_tma(data: torch.Tensor, weight: torch.Tensor, out: torch.Tensor)
 
     reduce_topk_tma_kernel[(64, )](
         data,
-        weight,  # expert_weight
+        scale,  # expert_weight
         out,
         ntokens,
         N,

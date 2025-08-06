@@ -25,15 +25,11 @@
 import triton
 import torch
 import triton.language as tl
+from typing import Optional
 
-from triton_dist.utils import (
-    HIP_CHECK, )
+from triton.language.extra.hip.libdevice import (thread_idx, load_acquire_system)
 from hip import hip
-
-from triton.language.extra.hip.libdevice import (
-    thread_idx,
-    load_acquire_system,
-)
+from triton_dist.utils import HIP_CHECK
 
 
 @triton.jit
@@ -73,12 +69,13 @@ def barrier_all_on_stream(
         barrier_all_ipc[(1, )](rank, num_ranks, sync_bufs_ptr)
 
 
-def wait_eq(ptr: int, val: int, stream: torch.cuda.Stream, require_i64=False):
+def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):
     mask = 0xFFFFFFFF
-    if not require_i64:
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
         call_result = hip.hipStreamWaitValue32(
             stream.cuda_stream,
-            ptr,
+            signal_tensor.data_ptr(),
             val,
             hip.hipStreamWaitValueEq,
             mask,
@@ -86,7 +83,7 @@ def wait_eq(ptr: int, val: int, stream: torch.cuda.Stream, require_i64=False):
     else:
         call_result = hip.hipStreamWaitValue64(
             stream.cuda_stream,
-            ptr,
+            signal_tensor.data_ptr(),
             val,
             hip.hipStreamWaitValueEq,
             mask,
@@ -94,18 +91,19 @@ def wait_eq(ptr: int, val: int, stream: torch.cuda.Stream, require_i64=False):
     HIP_CHECK(call_result)
 
 
-def set_signal(ptr: int, val: int, stream: torch.cuda.Stream, require_i64=False):
-    if not require_i64:
+def _set_signal_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
         call_result = hip.hipStreamWriteValue32(
             stream.cuda_stream,
-            ptr,
+            signal_tensor.data_ptr(),
             val,
             0,
         )
     else:
         call_result = hip.hipStreamWriteValue64(
             stream.cuda_stream,
-            ptr,
+            signal_tensor.data_ptr(),
             val,
             0,
         )

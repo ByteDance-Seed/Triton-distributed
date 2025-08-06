@@ -24,9 +24,6 @@
 ################################################################################
 import sys
 
-import torch
-import torch.distributed
-
 try:
     from _pyrocshmem import *  # noqa: F403
 except Exception as e:
@@ -36,27 +33,3 @@ except Exception as e:
         file=sys.stderr,
     )
     raise e
-
-
-def broadcast_cpu(tensor: torch.Tensor, src: int, group: torch.distributed.ProcessGroup):
-    if not tensor.is_cuda:
-        tensor_gpu = tensor.cuda()
-        torch.distributed.broadcast(tensor_gpu, src=src, group=group)
-        tensor.copy_(tensor_gpu)
-    else:
-        torch.distributed.broadcast(tensor, src=src, group=group)
-    torch.cuda.synchronize()
-
-
-# def init_rocshmem_by_uniqueid(group: torch.distributed.ProcessGroup):
-#     rank, nranks = group.rank(), group.size()
-#     if rank == 0:
-#         unique_id: bytes = rocshmemx_get_uniqueid()  # noqa: F405
-#         unique_id = torch.frombuffer(unique_id, dtype=torch.uint8).clone()
-#     else:
-#         unique_id = torch.empty(128, dtype=torch.uint8)
-#
-#     broadcast_cpu(tensor=unique_id, group=group, src=0)
-#
-#     unique_id = unique_id.numpy().tobytes()
-#     rocshmemx_init_attr_with_uniqueid(rank, nranks, unique_id)  # noqa: F405

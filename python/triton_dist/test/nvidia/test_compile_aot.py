@@ -28,9 +28,11 @@
 
 from typing import Optional
 import os
+import warnings
 import torch
 import triton
 import triton.language as tl
+from triton_dist.utils import has_tma
 from triton_dist.tools.compile_aot import aot_compile_spaces
 
 USE_AOT_ENV = os.environ.get("USE_TRITON_DISTRIBUTED_AOT", "0")
@@ -82,6 +84,10 @@ def matmul_tma_persistent_get_configs(pre_hook=None):
     ]
 
 
+def _get_default_num_stages():
+    return 4 if torch.cuda.get_device_capability()[0] >= 9 else 2
+
+
 def get_matmul_kernel_descriptor_persistent_info():
     return {
         "NUM_SMS": NUM_SMS,
@@ -89,7 +95,7 @@ def get_matmul_kernel_descriptor_persistent_info():
         "BN": 128,
         "BK": 64,
         "num_warps": 4,
-        "num_stages": 4,
+        "num_stages": _get_default_num_stages(),
     }
 
 
@@ -182,6 +188,9 @@ def test_matmul_descriptor_persistent():
     """
     TMA descriptors require a global memory allocation
     """
+    if not has_tma():
+        warnings.warn("TMA is not enabled, skip the test")
+        return
     dtype = torch.bfloat16
     M, N, K = 2048, 4096, 2048
     a = torch.randn((M, K), dtype=dtype)

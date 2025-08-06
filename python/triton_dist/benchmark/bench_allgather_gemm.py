@@ -32,7 +32,7 @@ import nvshmem.core
 
 from triton_dist.kernels.nvidia import (ag_gemm, create_ag_gemm_context, gemm_persistent)
 from triton_dist.kernels.nvidia.allgather import cp_engine_producer_all_gather_intra_node, cp_engine_producer_all_gather_inter_node
-from triton_dist.utils import (get_torch_prof_ctx, initialize_distributed, TP_GROUP, perf_func, dist_print,
+from triton_dist.utils import (get_torch_prof_ctx, initialize_distributed, perf_func, dist_print,
                                nvshmem_barrier_all_on_stream)
 
 dtype = torch.float16
@@ -181,18 +181,18 @@ layer_configs = {
 }
 
 if __name__ == "__main__":
-    initialize_distributed()
+    TP_GROUP = initialize_distributed()
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 8))
     perf_res = []
 
     for _, config in layer_configs.items():
-        triton_perf, torch_perf = perf_test(args.M, config, TP_GROUP())
+        triton_perf, torch_perf = perf_test(args.M, config, TP_GROUP)
         perf_res.append([triton_perf, torch_perf])
 
-    if args.dump_csv and TP_GROUP().rank() == 0:
+    if args.dump_csv and TP_GROUP.rank() == 0:
         if not os.path.exists("csv"):
             os.makedirs("csv")
-        csv_file = Path("csv") / f"perf_ag_gemm_{TP_GROUP().size()}_ranks.csv"
+        csv_file = Path("csv") / f"perf_ag_gemm_{TP_GROUP.size()}_ranks.csv"
 
         with open(csv_file, "w") as fout:
             print(

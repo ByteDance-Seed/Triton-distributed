@@ -33,8 +33,7 @@ import triton.language as tl
 import numpy as np
 import random
 
-import datetime
-from triton_dist.utils import finalize_distributed, init_nvshmem_by_torch_process_group
+from triton_dist.utils import finalize_distributed, initialize_distributed
 from triton_dist.kernels.nvidia import fast_all_to_all, create_all_to_all_context, all_to_all_post_process
 
 DTYPE_MAP = {
@@ -85,25 +84,6 @@ def init_seed(seed=0):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     np.random.seed(3 + seed)
     random.seed(3 + seed)
-
-
-def initialize_distributed():
-    global EP_GROUP
-    assert EP_GROUP is None, "EP_GROUP has already been initialized"
-
-    torch.cuda.set_device(LOCAL_RANK)
-    dist.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert dist.is_initialized()
-
-    EP_GROUP = dist.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    init_seed(seed=RANK)
-    init_nvshmem_by_torch_process_group(EP_GROUP)
-    return EP_GROUP
 
 
 def generate_random_exp_indices(token_num: int, total_num_experts: int, topk: int):
@@ -161,8 +141,8 @@ def calc_gather_index(
     return gather_index, topk_index
 
 
-def calc_scatter_index_stable(choosed_experts: torch.Tensor):
-    return choosed_experts.flatten().argsort(stable=True).argsort().int().view(choosed_experts.shape)
+def calc_scatter_index_stable(chosen_experts: torch.Tensor):
+    return chosen_experts.flatten().argsort(stable=True).argsort().int().view(chosen_experts.shape)
 
 
 @triton.jit

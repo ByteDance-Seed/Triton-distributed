@@ -29,7 +29,7 @@ import functools
 from enum import Enum
 from typing import List
 
-import nvshmem.bindings
+import nvshmem.bindings.nvshmem as pynvshmem
 import nvshmem.core
 import torch
 from cuda import cuda, cudart
@@ -37,9 +37,9 @@ from cuda import cuda, cudart
 import triton
 import triton.language as tl
 from triton.language.extra.cuda.language_extra import __syncthreads, tid
-from triton_dist.kernels.nvidia.common_ops import set_signal, wait_eq
+from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda, _wait_eq_cuda
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, get_has_fullmesh_nvlink, get_numa_world_size,
+from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, has_fullmesh_nvlink, get_numa_world_size,
                                nvshmem_barrier_all_on_stream, sleep_async)
 
 
@@ -55,7 +55,7 @@ class AllGatherMethod(Enum):
 
 @functools.lru_cache()
 def get_auto_all_gather_method(num_ranks, num_local_ranks):
-    if get_has_fullmesh_nvlink():
+    if has_fullmesh_nvlink():
         if num_ranks == num_local_ranks:
             return AllGatherMethod.All2All_IntraNode
         else:
@@ -351,7 +351,7 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
                 M_end = M_start + M_per_rank
                 src = remote_tensor_buffers[local_rank][M_start:M_end, :]
                 # with gridDim = 1
-                nvshmem.bindings.nvshmem.putmem_signal_on_stream(
+                pynvshmem.putmem_signal_on_stream(
                     src.data_ptr(),
                     src.data_ptr(),
                     nbytes_per_rank,
@@ -513,22 +513,12 @@ def cp_engine_producer_all_gather_full_mesh_pull_inter_node(
                 intranode_ag_stream.cuda_stream,
             )
             CUDA_CHECK(err)
-            set_signal(
-                signal_buffer[local_dst_rank][rank].data_ptr(),
-                signal_target,
-                intranode_ag_stream,
-                True,
-            )
+            _set_signal_cuda(signal_buffer[local_dst_rank][rank], signal_target, intranode_ag_stream)
 
         for i in range(1, n_nodes):
             recv_rank = (local_rank + (node_rank + n_nodes - i) % n_nodes * local_world_size)
             recv_segment = recv_rank * M_per_rank * N
-            wait_eq(
-                signal_buffer[local_rank][recv_rank].data_ptr(),
-                signal_target,
-                intranode_ag_stream,
-                True,
-            )
+            _wait_eq_cuda(signal_buffer[local_rank][recv_rank], signal_target, intranode_ag_stream)
             src_ptr = (ag_buffer[local_rank].data_ptr() + recv_segment * local_tensor.element_size())
             for j in range(1, local_world_size):
                 local_dst_rank = (local_rank + local_world_size - j) % local_world_size
@@ -541,12 +531,7 @@ def cp_engine_producer_all_gather_full_mesh_pull_inter_node(
                     intranode_ag_stream.cuda_stream,
                 )
                 CUDA_CHECK(err)
-                set_signal(
-                    signal_buffer[local_dst_rank][recv_rank].data_ptr(),
-                    signal_target,
-                    intranode_ag_stream,
-                    True,
-                )
+                _set_signal_cuda(signal_buffer[local_dst_rank][recv_rank], signal_target, intranode_ag_stream)
 
     intranode_ag_stream.wait_stream(internode_ag_stream)
 

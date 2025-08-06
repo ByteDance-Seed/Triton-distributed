@@ -26,11 +26,6 @@ option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
 
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
-endif()
-
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
@@ -191,7 +186,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
                                       ${PYTHON_DIST_SRC_PATH}/passes.cc
                                       ${PYTHON_DIST_SRC_PATH}/ir.cc)
-  target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
+  target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)

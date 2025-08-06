@@ -36,27 +36,27 @@ from triton_dist.utils import perf_func, assert_allclose, sleep_async
 
 
 def _generate_random_choosed_experts(ntokens, topk, nexperts, generator: torch.Generator = None):
-    choosed_experts = torch.multinomial(
+    chosen_experts = torch.multinomial(
         torch.ones(ntokens, nexperts, device="cuda", dtype=torch.float32),
         topk,
         replacement=False,
         generator=generator,
     ).to(torch.int32)
-    return choosed_experts
+    return chosen_experts
 
 
 def test_histogram(ntokens, topk, nexperts):
-    choosed_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
-    ntokens_by_expert_triton = histogram_by_expert_triton(choosed_experts, nexperts)
-    ntokens_by_expert_torch = histogram_by_expert_torch(choosed_experts, nexperts)
+    chosen_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
+    ntokens_by_expert_triton = histogram_by_expert_triton(chosen_experts, nexperts)
+    ntokens_by_expert_torch = histogram_by_expert_torch(chosen_experts, nexperts)
     assert torch.allclose(ntokens_by_expert_triton, ntokens_by_expert_torch)
     print("✅ test_histogram passes")
 
 
 def test_calc_gather_scatter_index(ntokens, topk, nexperts):
-    choosed_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
+    chosen_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
     ntokens_by_expert, scatter_index, gather_index, expert_index, M_pad = calc_gather_scatter_index_triton(
-        choosed_experts, nexperts)
+        chosen_experts, nexperts)
     torch.testing.assert_close(
         scatter_index.flatten().sort()[0],
         torch.arange(ntokens * topk, device="cuda", dtype=torch.int32),
@@ -66,17 +66,17 @@ def test_calc_gather_scatter_index(ntokens, topk, nexperts):
         M_start = int(ntokens_by_expert[:n].sum())
         M_end = M_start + int(ntokens_by_expert[n])
         torch.testing.assert_close(
-            scatter_index[choosed_experts == n].flatten().sort()[0],
+            scatter_index[chosen_experts == n].flatten().sort()[0],
             torch.arange(M_start, M_end, device="cuda", dtype=torch.int32),
         )
 
         token_index: torch.Tensor = gather_index[M_start:M_end] // topk  # has a expert_id of n
-        assert torch.all(torch.any(choosed_experts[token_index, :] == n, 1))
+        assert torch.all(torch.any(chosen_experts[token_index, :] == n, 1))
 
     print("✅ test_calc_gather_scatter_index passes")
     sleep_async(100)
     _, duration_ms = perf_func(
-        lambda: calc_gather_scatter_index_triton(choosed_experts, nexperts),
+        lambda: calc_gather_scatter_index_triton(chosen_experts, nexperts),
         iters=10,
         warmup_iters=5,
     )
@@ -85,7 +85,7 @@ def test_calc_gather_scatter_index(ntokens, topk, nexperts):
 
 def test_reduce_topk(ntokens, topk, N, dtype: torch.dtype, n_split, nexperts):
     t_in = torch.randn(ntokens * topk, N, dtype=dtype, device="cuda")
-    choosed_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
+    chosen_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
     out_torch = torch.sum(t_in.view(ntokens, topk, N), dim=1)
     out_triton = torch.empty_like(out_torch)
 
@@ -96,20 +96,19 @@ def test_reduce_topk(ntokens, topk, N, dtype: torch.dtype, n_split, nexperts):
     assert N % n_split == 0
     N_per_split = N // n_split
     assert N_per_split == triton.next_power_of_2(N_per_split)
-    weight = torch.ones_like(choosed_experts)
+    weight = torch.ones_like(chosen_experts)
 
     for reduce_topk_fn in reduce_topk_fns:
-
         for n in range(n_split):
             n_start = N_per_split * n
             n_end = n_start + N_per_split
-            reduce_topk_fn(t_in[:, n_start:n_end], weight, out_triton[:, n_start:n_end])
+            reduce_topk_fn(t_in[:, n_start:n_end], weight, None, out_triton[:, n_start:n_end])
         assert_allclose(out_triton, y=out_torch, rtol=1e-2, atol=1e-2, verbose=False)
         print(f"✅ test_reduce_topk with {reduce_topk_fn.__name__} passes")
 
         sleep_async(100)
         _, duration_ms = perf_func(
-            lambda: reduce_topk_fn(t_in, weight, out_triton),
+            lambda: reduce_topk_fn(t_in, weight, None, out_triton),
             iters=10,
             warmup_iters=5,
         )
@@ -121,6 +120,6 @@ def test_reduce_topk(ntokens, topk, N, dtype: torch.dtype, n_split, nexperts):
 
 
 if __name__ == "__main__":
-    # test_histogram(1024, 5, 32)
-    # test_calc_gather_scatter_index(8192, 5, 64)
+    test_histogram(1024, 5, 32)
+    test_calc_gather_scatter_index(8192, 5, 64)
     test_reduce_topk(1024, 2, 4096, torch.float16, 1, 64)

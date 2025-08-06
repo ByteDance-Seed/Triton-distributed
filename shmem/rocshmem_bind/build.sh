@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT=$(realpath ${SCRIPT_DIR})
 
 function apt_install_deps() {
+    apt update -y
     apt-get install -y miopen-hip
 }
 

@@ -24,18 +24,17 @@
 ################################################################################
 from typing import Optional
 
-import nvshmem.bindings
+from cuda import cuda, cudart
+import nvshmem.bindings.nvshmem as pynvshmem
 import nvshmem.core
 import torch
-from cuda import cuda
 
 import triton
 import triton.language as tl
+from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, ntid, st,
-                                                       tid)
-from triton_dist.utils import (CUDA_CHECK, check_p2p_native_atomic_supported, nvshmem_barrier_all_on_stream,
-                               nvshmem_create_tensor)
+from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st, tid)
+from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor)
 
 
 @triton.jit
@@ -55,7 +54,7 @@ def _is_gpu_master():
 
 
 @triton.jit
-def barrier_on_this_grid(ptr):
+def unsafe_barrier_on_this_grid(ptr):
     """ triton implementation of cooperative_group::thid_grid().sync()
     WARNING: use with care. better launch triton with launch_cooperative_grid=True to throw an explicit error instead of hang without notice.
     """
@@ -131,6 +130,14 @@ def cooperative_barrier_on_this_grid():
     __syncthreads()
 
 
+@triton.jit
+def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
+    if use_cooperative:
+        cooperative_barrier_on_this_grid()
+    else:
+        unsafe_barrier_on_this_grid(ptr)
+
+
 @triton.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
 def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, symm_flag_ptr):
     """ NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
@@ -169,20 +176,15 @@ def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_fl
 
         symm_flags [0, num_ranks * 2) is used to sync all ranks.
     """
-    tl.static_assert(symm_flags.dtype.element_ty == tl.int32)
+    tl.static_assert(symm_flags.dtype.element_ty == tl.int32 or symm_flags.dtype.element_ty == tl.int64)
     _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags, target_value)
-
-    # barrier all CTAs
-    barrier_on_this_grid(symm_flags + 2 * num_ranks)
-
     # next iter
     _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags + num_ranks, target_value)
 
-    barrier_on_this_grid(symm_flags + 2 * num_ranks)
-
 
 @triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
-def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, target_value):
+def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, target_value,
+                                      use_cooperative: tl.constexpr):
     """ symm_flags is expected to:
         1. of int32 dtype
         2. has at least num_ranks * 2 + 1 elements
@@ -197,13 +199,14 @@ def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, t
         _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags, target_value)
 
     # barrier all CTAs
-    barrier_on_this_grid(symm_flags + 2 * num_ranks)
+    barrier_on_this_grid(symm_flags + 2 * num_ranks, use_cooperative)
 
     # next iter
     if pid == 0:
         _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags + num_ranks, target_value)
 
-    barrier_on_this_grid(symm_flags + 2 * num_ranks)
+    # barrier all CTAs
+    barrier_on_this_grid(symm_flags + 2 * num_ranks, use_cooperative)
 
 
 class BarrierAllContext:
@@ -215,10 +218,11 @@ class BarrierAllContext:
 
     def __init__(self, is_intra_node):
         self.is_intra_node = is_intra_node
+        self.target_value = 1
         if self.is_intra_node:
-            self.rank = nvshmem.bindings.nvshmem.my_pe()
-            self.local_rank = nvshmem.bindings.nvshmem.team_my_pe(nvshmem.core.Teams.TEAM_NODE)
-            self.num_local_ranks = nvshmem.bindings.nvshmem.team_n_pes(nvshmem.core.Teams.TEAM_NODE)
+            self.rank = pynvshmem.my_pe()
+            self.local_rank = pynvshmem.team_my_pe(nvshmem.core.Teams.TEAM_NODE)
+            self.num_local_ranks = pynvshmem.team_n_pes(nvshmem.core.Teams.TEAM_NODE)
             self.symm_barrier = nvshmem_create_tensor((1, ), torch.int32)
             self.symm_barrier.fill_(0)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
@@ -231,50 +235,12 @@ def barrier_all_on_stream(ctx: BarrierAllContext, stream: Optional[torch.cuda.St
     if ctx is None or not ctx.is_intra_node:
         return nvshmem_barrier_all_on_stream(stream)
 
-    if check_p2p_native_atomic_supported():
+    if supports_p2p_native_atomic():
         barrier_all_intra_node_atomic_cas_block[(1, )](ctx.local_rank, ctx.rank, ctx.num_local_ranks, ctx.symm_barrier)
     else:
         barrier_all_intra_node_non_atomic_block[(1, )](ctx.local_rank, ctx.rank, ctx.num_local_ranks, ctx.symm_barrier,
                                                        ctx.target_value)
         ctx.target_value += 1
-
-
-def wait_eq(ptr: int, signal: int, stream: Optional[torch.cuda.Stream] = None, require_i64=False):
-    stream = stream or torch.cuda.current_stream()
-    if not require_i64:
-        (err, ) = cuda.cuStreamWaitValue32(
-            stream.cuda_stream,
-            ptr,
-            signal,
-            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-    else:
-        (err, ) = cuda.cuStreamWaitValue64(
-            stream.cuda_stream,
-            ptr,
-            signal,
-            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-    CUDA_CHECK(err)
-
-
-def set_signal(ptr: int, signal: int, stream: Optional[torch.cuda.Stream] = None, require_i64=False):
-    stream = stream or torch.cuda.current_stream()
-    if not require_i64:
-        (err, ) = cuda.cuStreamWriteValue32(
-            stream.cuda_stream,
-            ptr,
-            signal,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
-    else:
-        (err, ) = cuda.cuStreamWriteValue64(
-            stream.cuda_stream,
-            ptr,
-            signal,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
-    CUDA_CHECK(err)
 
 
 @tl.constexpr_function
@@ -284,14 +250,7 @@ def log2(n):
 
 @tl.constexpr_function
 def next_power_of_2(n: tl.constexpr):
-    n -= 1
-    n |= n >> 1
-    n |= n >> 2
-    n |= n >> 4
-    n |= n >> 8
-    n |= n >> 16
-    n += 1
-    return n
+    return triton.next_power_of_2(n)
 
 
 @triton.jit
@@ -385,57 +344,54 @@ def bisect_right_kernel_aligned(
     return low
 
 
-# copied from https://github.com/cchan/tccl/blob/main/triton_double_tree_allreduce.py
-@triton.jit
-def load_b64_v2(addrs, mask):
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .pred %p0;
-            setp.eq.s32             %p0, $3, 1;
-            @%p0 ld.global.v2.b64   {$0, $1}, [$2];
-        }
-        """,
-        "=l,=l,l,r",
-        args=[addrs, mask.to(tl.int32)],
-        dtype=(tl.int64, tl.int64),
-        is_pure=True,
-        pack=1,
-    )
+def _wait_eq_cuda(signal_tensor: torch.Tensor, signal: int, stream: Optional[torch.cuda.Stream] = None,
+                  require_i64=False):
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
+        (err, ) = cuda.cuStreamWaitValue32(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
+        )
+        CUDA_CHECK(err)
+    elif signal_tensor.dtype == NVSHMEM_SIGNAL_DTYPE:
+        (err, ) = cuda.cuStreamWaitValue64(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
+        )
+        CUDA_CHECK(err)
+    else:
+        raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
 
 
-# copied from https://github.com/cchan/tccl/blob/main/triton_double_tree_allreduce.py
-@triton.jit
-def add_v8_bf16(a_hi, a_lo, b_hi, b_lo):
-    #TODO(lsy.314)
-    # v8 doesn't seem necessary and needs to be replaced, given that bf16 can only use x2 add instruction
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .v4 .b32 %acc, %tmp;
-            mov.v4.b32  %acc, 0;
-            mov.b64     {%acc.x, %acc.y}, $2;
-            mov.b64     {%acc.z, %acc.w}, $3;
-            mov.b64     {%tmp.x, %tmp.y}, $4;
-            mov.b64     {%tmp.z, %tmp.w}, $5;
-            add.bf16x2  %acc.x, %acc.x, %tmp.x;
-            add.bf16x2  %acc.y, %acc.y, %tmp.y;
-            add.bf16x2  %acc.z, %acc.z, %tmp.z;
-            add.bf16x2  %acc.w, %acc.w, %tmp.w;
-            mov.b64     $0, {%acc.x, %acc.y};
-            mov.b64     $1, {%acc.z, %acc.w};
-        }
-        """,
-        "=l,=l,l,l,l,l",
-        args=[a_hi, a_lo, b_hi, b_lo],
-        dtype=(tl.int64, tl.int64),
-        is_pure=True,
-        pack=1,
-    )
+def _set_signal_cuda(signal_tensor: torch.Tensor, signal: int, stream: Optional[torch.cuda.Stream] = None):
+    stream = stream or torch.cuda.current_stream()
+    if signal_tensor.dtype == torch.int32:
+        (err, ) = cuda.cuStreamWriteValue32(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        CUDA_CHECK(err)
+    elif signal_tensor.dtype == NVSHMEM_SIGNAL_DTYPE:
+        (err, ) = cuda.cuStreamWriteValue64(
+            stream.cuda_stream,
+            signal_tensor.data_ptr(),
+            signal,
+            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        CUDA_CHECK(err)
+    else:
+        raise Exception(f"Unsupported signal dtype {signal_tensor.dtype}")
 
 
-@triton.jit
-def get_flat_tid():
-    tid_x, tid_y, tid_z = tid(0), tid(1), tid(2)
-    ntid_x, ntid_y = ntid(0), ntid(1)
-    return tid_z * ntid_y * ntid_x + tid_y * ntid_x + tid_x
+def _memcpy_async_cuda(dst: torch.Tensor, src: torch.Tensor, nbytes: int, stream: Optional[torch.cuda.Stream] = None):
+    stream = stream or torch.cuda.current_stream()
+    (err, ) = cudart.cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), nbytes, cudart.cudaMemcpyKind.cudaMemcpyDefault,
+                                     stream.cuda_stream)
+
+    CUDA_CHECK(err)

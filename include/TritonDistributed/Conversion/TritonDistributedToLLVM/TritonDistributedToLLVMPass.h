@@ -73,6 +73,7 @@ createConvertTritonDistributedToLLVMPass(int32_t computeCapability,
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertLibDeviceToLLVMPass(bool ftz);
+
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertAMDDistributedToLLVMPass(StringRef targetArch, bool ftz);
 } // namespace triton

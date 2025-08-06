@@ -32,8 +32,8 @@ import nvshmem.core
 from triton_dist.kernels.nvidia import (ag_group_gemm, create_ag_group_gemm_context)
 from triton_dist.kernels.nvidia.comm_perf_model import (estimate_all_gather_time_ms, get_nic_gbps_per_gpu)
 from triton_dist.kernels.nvidia.gemm_perf_model import (get_dram_gbps, get_tensorcore_tflops)
-from triton_dist.utils import (TP_GROUP, assert_allclose, dist_print, get_device_max_shared_memory_size,
-                               get_intranode_max_speed, group_profile, initialize_distributed, perf_func, sleep_async)
+from triton_dist.utils import (assert_allclose, dist_print, get_device_max_shared_memory_size, get_intranode_max_speed,
+                               group_profile, initialize_distributed, perf_func, sleep_async)
 
 
 def torch_moe_scatter_group_gemm(in_features, expert_weights, topk_ids):
@@ -78,15 +78,14 @@ def estimate_gemm_max_stages(BM, BN, BK, a_dtype, b_dtype, shared_memory_limit: 
     return shared_memory_limit // estimate_gemm_shared_memory_size(BM, BN, BK, a_dtype, b_dtype, 2) + 1
 
 
-def perf_test(name, input_len, dtype: torch.dtype, config, debug=False):
+def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed.ProcessGroup, debug=False):
     M = input_len
     N = config["N"]
     K = config["K"]
     E = config["E"]
     topk = config["TOPK"]
-    tp_group = TP_GROUP()
-    RANK = tp_group.rank()
-    WORLD_SIZE = tp_group.size()
+    RANK = pg.rank()
+    WORLD_SIZE = pg.size()
     LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", WORLD_SIZE))
 
     assert M % WORLD_SIZE == 0
@@ -132,7 +131,7 @@ def perf_test(name, input_len, dtype: torch.dtype, config, debug=False):
         local_topk_ids = torch.arange(topk, dtype=local_topk_ids.dtype).cuda().repeat((M_per_rank, 1))
 
     full_topk_ids = torch.zeros(M_per_rank * WORLD_SIZE, topk, dtype=local_topk_ids.dtype).cuda()
-    torch.distributed.all_gather_into_tensor(full_topk_ids, local_topk_ids, group=tp_group)
+    torch.distributed.all_gather_into_tensor(full_topk_ids, local_topk_ids, group=pg)
 
     BM, BN, BK, stage = config["BM"], config["BN"], config["BK"], config["num_stages"]
     shared_memory_limit = get_device_max_shared_memory_size(torch.cuda.current_device())
@@ -161,7 +160,7 @@ def perf_test(name, input_len, dtype: torch.dtype, config, debug=False):
 
     C_triton = ag_group_gemm(A, B, ctx, full_topk_ids)
 
-    _, C_torch = torch_ag_group_gemm(tp_group, A, B, full_topk_ids)
+    _, C_torch = torch_ag_group_gemm(pg, A, B, full_topk_ids)
 
     try:
         assert_allclose(C_torch, C_triton, atol=1e-3, rtol=1e-3, verbose=False)
@@ -173,10 +172,10 @@ def perf_test(name, input_len, dtype: torch.dtype, config, debug=False):
         print(f"✅ RANK {RANK} {name} pass")
 
     triton_func = lambda: ag_group_gemm(A, B, ctx, full_topk_ids)
-    torch_func = lambda: torch_ag_group_gemm(tp_group, A, B, full_topk_ids)
+    torch_func = lambda: torch_ag_group_gemm(pg, A, B, full_topk_ids)
 
     name = name.lower().replace(" ", "_").replace("-", "_")
-    with group_profile(f"ag_moe_{name}_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=tp_group):
+    with group_profile(f"ag_moe_{name}_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=pg):
         sleep_async(100)
         _, duration_triton_ms = perf_func(triton_func, iters=args.iters, warmup_iters=args.warmup_iters)
 
@@ -245,12 +244,12 @@ if __name__ == "__main__":
             configs=configs, key=["M", "N", "K"])(allgather_group_gemm.kernel_consumer_m_parallel_scatter_group_gemm)
         ag_group_gemm = contextual_autotune(is_dist=True)(ag_group_gemm)
 
-    initialize_distributed()
+    TP_GROUP = initialize_distributed()
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
 
     for name, config in layer_configs.items():
-        perf_test(name, args.M, dtype, config, args.debug)
+        perf_test(name, args.M, dtype, config, debug=args.debug, pg=TP_GROUP)
 
     nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

@@ -32,8 +32,8 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 // clang-format off
- #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h.inc"
- #include "TritonDistributed/Dialect/SIMT/IR/SIMTEnums.h.inc"
+#include "TritonDistributed/Dialect/SIMT/IR/Dialect.h.inc"
+#include "TritonDistributed/Dialect/SIMT/IR/SIMTEnums.h.inc"
 // clang-format on
 
 #define GET_ATTRDEF_CLASSES

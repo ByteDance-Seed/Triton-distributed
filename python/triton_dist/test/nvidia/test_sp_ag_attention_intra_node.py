@@ -26,15 +26,12 @@ import torch
 
 import argparse
 import os
-import numpy as np
-import datetime
-import random
 
 from itertools import accumulate
 from functools import partial
 import nvshmem.core
 
-from triton_dist.utils import get_torch_prof_ctx, group_profile, perf_func, dist_print, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream
+from triton_dist.utils import get_torch_prof_ctx, group_profile, initialize_distributed, perf_func, dist_print, nvshmem_barrier_all_on_stream
 from triton_dist.kernels.nvidia import fused_sp_ag_attn_intra_node, create_sp_ag_attention_context_intra_node
 
 ##################################################
@@ -349,35 +346,7 @@ if __name__ == "__main__":
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
     NNODES = WORLD_SIZE // LOCAL_WORLD_SIZE
-
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-
-    os.environ["NCCL_DEBUG"] = "ERROR"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    torch.use_deterministic_algorithms(True, warn_only=True)  # True or False
-    torch.set_printoptions(precision=2)
-    torch.manual_seed(3 + RANK)
-    torch.cuda.manual_seed_all(3 + RANK)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + RANK)
-    random.seed(42)
-
-    current_stream = torch.cuda.current_stream()
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
+    TP_GROUP = initialize_distributed()
 
     rank = TP_GROUP.rank()
     world_size = TP_GROUP.size()

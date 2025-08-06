@@ -38,7 +38,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch_amd.sh ./tutorials/09-AMD-overlapping-allgather-gemm.py
+    bash scripts/launch_amd.sh tutorials/09-AMD-overlapping-allgather-gemm.py
 
 """
 
@@ -116,17 +116,32 @@ assert triton.runtime.driver.active.get_current_target().backend == "hip"
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2,
-                'kpack': 1, 'matrix_instr_nonkdim': 16
-            }, num_warps=8, num_stages=2),
+                'BLOCK_SIZE_M': 256,
+                'BLOCK_SIZE_N': 256,
+                'BLOCK_SIZE_K': 64,
+                'GROUP_SIZE_M': 1,
+                'waves_per_eu': 2,
+                'kpack': 1,
+                'matrix_instr_nonkdim': 16
+            },
+            num_warps=8,
+            num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 0},
-            num_warps=8, num_stages=2),
+            {
+                'BLOCK_SIZE_M': 256,
+                'BLOCK_SIZE_N': 256,
+                'BLOCK_SIZE_K': 64,
+                'GROUP_SIZE_M': 1,
+                'waves_per_eu': 0
+            },
+            num_warps=8,
+            num_stages=2),
     ],
     key=['M', 'N', 'K'],
     use_cuda_graph=True,
 )
-@triton.heuristics({'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0})
+@triton.heuristics(
+    {'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0})
 @triton.jit
 def consumer_gemm_persistent_kernel(
     A,
@@ -183,11 +198,13 @@ def consumer_gemm_persistent_kernel(
         ## swizzle
         num_pid_m_per_copy_chunk = M_PER_CHUNK // BLOCK_SIZE_M
         chunk_offset = pid_m // (num_pid_m_per_copy_chunk * world_size)
-        rank_offset = pid_m % (num_pid_m_per_copy_chunk * world_size) // num_pid_m_per_copy_chunk
+        rank_offset = pid_m % (num_pid_m_per_copy_chunk *
+                               world_size) // num_pid_m_per_copy_chunk
         block_offset = pid_m % num_pid_m_per_copy_chunk
         # swizzle rank offset, launch current rank firstly.
         rank_offset = (rank_offset + rank) % world_size
-        pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
+        pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK +
+                 block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
 
         offs_am = pid_m * BLOCK_SIZE_M
         offs_sig = offs_am // M_PER_CHUNK
@@ -195,7 +212,11 @@ def consumer_gemm_persistent_kernel(
 
         # Skip waiting local tensor as we pass it int kernel function as argument.
         if offs_rank != rank:
-            token = dl.wait(barrier_ptr + offs_sig, 1, "sys", "acquire", waitValue=1)
+            token = dl.wait(barrier_ptr + offs_sig,
+                            1,
+                            "sys",
+                            "acquire",
+                            waitValue=1)
             A = dl.consume_token(A, token)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
@@ -277,8 +298,10 @@ def producer_ag_push_mode(
             ag_stream = ag_stream_pool[stream_pos]
             M_dst_start_pos = rank * M_per_rank + chunk_idx_intra_rank * M_PER_CHUNK
             M_src_start_pos = chunk_idx_intra_rank * M_PER_CHUNK
-            src_ptr = local_tensor.data_ptr() + M_src_start_pos * N * data_elem_size
-            dst_ptr = remote_tensor_buffers[remote_rank].data_ptr() + M_dst_start_pos * N * data_elem_size
+            src_ptr = local_tensor.data_ptr(
+            ) + M_src_start_pos * N * data_elem_size
+            dst_ptr = remote_tensor_buffers[remote_rank].data_ptr(
+            ) + M_dst_start_pos * N * data_elem_size
 
             nbytes = M_PER_CHUNK * N * data_elem_size
             cp_res = hip.hipMemcpyAsync(
@@ -291,7 +314,8 @@ def producer_ag_push_mode(
             HIP_CHECK(cp_res)
             # Set signal through copy-engine. This is a trick for AMD GPU.
             cp_res = hip.hipMemcpyAsync(
-                barrier_buffers[remote_rank].data_ptr() + chunk_pos * barrier_elem_size,
+                barrier_buffers[remote_rank].data_ptr() +
+                chunk_pos * barrier_elem_size,
                 one.data_ptr(),
                 barrier_elem_size,
                 hip.hipMemcpyKind.hipMemcpyDeviceToDeviceNoCU,
@@ -339,28 +363,33 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
             M_PER_CHUNK=M_PER_CHUNK,
         )
 
-    def forward(self, input: torch.Tensor,  # [local_M, K]
-                weight: torch.Tensor,  # [local_N, K]
-                transed_weight: bool,  # indicates whether weight already transposed
-                ):
+    def forward(
+            self,
+            input: torch.Tensor,  # [local_M, K]
+            weight: torch.Tensor,  # [local_N, K]
+            transed_weight: bool,  # indicates whether weight already transposed
+    ):
         current_stream = torch.cuda.current_stream()
         ctx = self.ctx
         M = self.max_M
         K = self.K
         N_PER_RANK = weight.shape[1] if transed_weight else weight.shape[0]
         # Create empty output buffer.
-        output = torch.zeros([M, N_PER_RANK], dtype=input.dtype, device=input.device) + 1.0
+        output = torch.zeros(
+            [M, N_PER_RANK], dtype=input.dtype, device=input.device) + 1.0
 
         # Barrier before the current AG-GEMM operation. This step is necessary when running multiple rounds of computations.
         torch.cuda.synchronize()
-        barrier_all_on_stream(self.rank, ctx.num_ranks, ctx.comm_buf_ptr, current_stream)
+        barrier_all_on_stream(self.rank, ctx.num_ranks, ctx.comm_buf_ptr,
+                              current_stream)
 
         # Sync work streams.
         for ag_stream in ctx.ag_streams:
             ag_stream.wait_stream(current_stream)
 
         # producer allgather
-        producer_ag_push_mode(ctx.rank, ctx.num_ranks, input, ctx.workspace_tensors, ctx.one, ctx.M_PER_CHUNK,
+        producer_ag_push_mode(ctx.rank, ctx.num_ranks, input,
+                              ctx.workspace_tensors, ctx.one, ctx.M_PER_CHUNK,
                               ctx.ag_streams, ctx.barrier_tensors)
         torch.cuda.synchronize()
         torch.distributed.barrier()
@@ -370,7 +399,8 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
 
         grid = lambda META: (min(
             NUM_SMS,
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_PER_RANK, META["BLOCK_SIZE_N"]),
+            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(
+                N_PER_RANK, META["BLOCK_SIZE_N"]),
         ), )
 
         full_input = ctx.workspace_tensors[ctx.rank][:M]
@@ -416,7 +446,9 @@ def torch_ag_gemm(
         weight = weight.T
     assert input.device == weight.device
     # AG + Gemm
-    full_input = torch.empty((local_M * world_size, K), dtype=input.dtype, device=input.device)
+    full_input = torch.empty((local_M * world_size, K),
+                             dtype=input.dtype,
+                             device=input.device)
     torch.distributed.all_gather_into_tensor(full_input, input, group=TP_GROUP)
     output = torch.matmul(full_input, weight)
 
@@ -438,7 +470,8 @@ def init():
         timeout=datetime.timedelta(seconds=1800),
     )
     assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)),
+                                           backend="nccl")
     torch.distributed.barrier(TP_GROUP)
 
     torch.use_deterministic_algorithms(False, warn_only=True)
@@ -485,10 +518,11 @@ if __name__ == "__main__":
 
     # Generate input and weight.
     scale = TP_GROUP.rank() + 1
-    data_config = [((local_M, K), dtype, (0.01 * scale, 0), DEVICE),  # input
-                   ((local_N, K), dtype, (0.01 * scale, 0), DEVICE),  # weight
-                   (None),  # bias
-                   ]
+    data_config = [
+        ((local_M, K), dtype, (0.01 * scale, 0), DEVICE),  # input
+        ((local_N, K), dtype, (0.01 * scale, 0), DEVICE),  # weight
+        (None),  # bias
+    ]
     generator = generate_data(data_config)
     input, weight, bias = next(generator)
 
@@ -498,13 +532,16 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     # dist triton
-    dist_ag_gemm_op = triton_ag_gemm_intra_node(TP_GROUP, M, N, K, chunk_size, input_dtype, output_dtype)
+    dist_ag_gemm_op = triton_ag_gemm_intra_node(TP_GROUP, M, N, K, chunk_size,
+                                                input_dtype, output_dtype)
     tri_out = dist_ag_gemm_op.forward(input, weight, False)
 
     if torch.allclose(tri_out, ref_out, atol=atol, rtol=rtol):
         dist_print("✅ Triton and Torch match")
     else:
-        dist_print(f"The maximum difference between torch and triton is {torch.max(torch.abs(tri_out - ref_out))}")
+        dist_print(
+            f"The maximum difference between torch and triton is {torch.max(torch.abs(tri_out - ref_out))}"
+        )
         dist_print("❌ Triton and Torch differ")
 
     # After all, destroy distributed process group.

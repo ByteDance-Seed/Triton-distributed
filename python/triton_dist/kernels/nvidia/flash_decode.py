@@ -716,7 +716,7 @@ def kernel_gqa_fwd_batch_decode_split_kv_persistent(
         offs_log = bid * stride_o_bs + cur_head * stride_o_h + split_kv_id * stride_o_split + V_DIM
         tl.store(output_ptr + offs_log, e_max + tl.log(e_sum), mask=mask_h)
 
-    barrier_on_this_grid(workspace_ptr)
+    barrier_on_this_grid(workspace_ptr, 0)  # no use cooperative
 
     if sm_id < batch * q_head_num:
 
@@ -954,53 +954,24 @@ def gqa_fwd_batch_decode_persistent(q, k_cache, v_cache, workspace, q_lens, kv_l
                                  device=q.device) if output_combine is None else output_combine
 
     kernel_gqa_fwd_batch_decode_split_kv_persistent[grid_split_kv](
-        q,
-        k_cache,
-        v_cache,
-        output_split,
-        output_combine,
-        scale,
-        block_table,
-        kv_lens,
-        workspace,
+        q, k_cache, v_cache, output_split, output_combine, scale, block_table, kv_lens, workspace,
         # shape,
         batch,
         # strides
-        q.stride(0),
-        q.stride(1),
+        q.stride(0), q.stride(1),
         # q.stride(2),
-        k_cache.stride(-3),
-        k_cache.stride(-2),
+        k_cache.stride(-3), k_cache.stride(-2),
         # k_cache.stride(-1),
-        v_cache.stride(-3),
-        v_cache.stride(-2),
+        v_cache.stride(-3), v_cache.stride(-2),
         # v_cache.stride(-1),
-        output_split.stride(0),
-        output_split.stride(1),
-        output_split.stride(2),
+        output_split.stride(0), output_split.stride(1), output_split.stride(2),
         # output_split.stride(3),
-        output_combine.stride(0),
-        output_combine.stride(1),
-        block_table.stride(0),
+        output_combine.stride(0), output_combine.stride(1), block_table.stride(0),
         # block_table.stride(1),
         # constants
-        kv_group_num,
-        8192,  # max_kv_seq_len
-        q_heads,
-        BLOCK_HEAD_DIM,
-        BLOCK_DPE,
-        BLOCK_DV,
-        BLOCK_N,
-        BLOCK_H,
-        NUM_KV_SPLITS,
-        page_size,
-        soft_cap,
-        k_head_dim,
-        v_head_dim,
-        num_warps=8,
-        num_stages=2,
-        launch_cooperative_grid=True,
-    )
+        kv_group_num, 8192,  # max_kv_seq_len
+        q_heads, BLOCK_HEAD_DIM, BLOCK_DPE, BLOCK_DV, BLOCK_N, BLOCK_H, NUM_KV_SPLITS, page_size, soft_cap, k_head_dim,
+        v_head_dim, num_warps=8, num_stages=2)
 
     return output_combine
 

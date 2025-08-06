@@ -24,28 +24,36 @@
 ################################################################################
 import argparse
 import os
-from functools import partial
 
+import triton
 import torch
-import nvshmem.core
-from triton_dist.kernels.nvidia import (create_moe_rs_context, create_moe_rs_context_colwise, moe_reduce_rs_rowise,
-                                        select_experts)
+from triton_dist.autotuner import contextual_autotune
+from triton_dist.kernels.nvidia import (create_moe_rs_context)
 from triton_dist.kernels.nvidia.comm_perf_model import estimate_reduce_scatter_time_ms, get_nic_gbps_per_gpu
 from triton_dist.kernels.nvidia.gemm_perf_model import get_dram_gbps, get_tensorcore_tflops
-from triton_dist.kernels.nvidia.moe_reduce_rs import moe_reduce_rs_colwise
-from triton_dist.utils import dist_print, get_intranode_max_speed, group_profile, perf_func, initialize_distributed, TP_GROUP, assert_allclose, sleep_async
+from triton_dist.kernels.nvidia.moe_reduce_rs import run_moe_reduce_rs
+from triton_dist.utils import dist_print, finalize_distributed, get_intranode_max_speed, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async
 
 
 def create_rand_tensor(rank, shape, dtype=torch.float16, device="cuda"):
     return (-2 * torch.rand(shape, dtype=dtype, device=device) + 1) / 10 * (rank + 1)
 
 
-THRESHOLD_MAP = {
-    torch.float16: 1e-2,
-    torch.bfloat16: 1e-2,
-    # torch.float8_e4m3fn: 1e-2,
-    # torch.float8_e5m2: 1e-2,
-}
+def select_experts(pg: torch.distributed.ProcessGroup, num_ranks: int, topk: int, dtype: torch.dtype,
+                   router_logits_shard: torch.Tensor):
+    score = torch.softmax(router_logits_shard, dim=-1)
+    local_topk_weight, local_topk_ids = torch.topk(score, topk)
+    # do all-gather
+    ntokens_per_rank = router_logits_shard.shape[0]
+    ntokens = ntokens_per_rank * num_ranks
+    full_topk_ids = torch.zeros((ntokens, topk), dtype=torch.int32, device="cuda")
+    full_topk_weight = torch.zeros((ntokens, topk), dtype=dtype, device="cuda")
+    torch.distributed.all_gather_into_tensor(full_topk_weight, local_topk_weight, group=pg)
+    torch.distributed.all_gather_into_tensor(full_topk_ids, local_topk_ids.to(torch.int32), group=pg)
+    return full_topk_ids, full_topk_weight
+
+
+THRESHOLD_MAP = {torch.float16: (1e-2, 1e-2), torch.bfloat16: (1e-2, 1e-2)}
 
 
 def print_sol_time_estimate(M, K, N, E, topk, dtype, WORLD_SIZE, LOCAL_WORLD_SIZE):
@@ -73,83 +81,26 @@ def print_sol_time_estimate(M, K, N, E, topk, dtype, WORLD_SIZE, LOCAL_WORLD_SIZ
     print(f" MOE+RS SOL time: {max(reduce_scatter_sol_ms, moe_sol_ms):0.2f} ms")
 
 
-class TorchGroupGemmReduceRS(torch.nn.Module):
-
-    def __init__(
-        self,
-        pg: torch.distributed.ProcessGroup,
-        hidden_dim: int,
-        intermediate_size: int,
-        num_experts: int,
-        topk: int,
-        router_logits: torch.Tensor,
-        max_token_num: int = 16 * 1024,
-        input_dtype=torch.float16,
-        output_dtype=torch.float16,
-        device="cuda",
-    ):
-        super(TorchGroupGemmReduceRS, self).__init__()
-        self.pg = pg
-        self.rank = pg.rank()
-        self.world_size = pg.size()
-        self.max_token_num = max_token_num
-        assert (max_token_num %
-                self.world_size == 0), f"max_token_num({max_token_num}) % world_size({self.world_size}) != 0"
-        self.hidden_dim = hidden_dim
-        self.intermediate_size = intermediate_size
-        self.num_experts = num_experts
-        self.topk = topk
-
-        assert (intermediate_size %
-                self.world_size == 0), f"intermediate_size({intermediate_size}) % world_size({self.world_size}) != 0"
-        self.intermediate_size_per_rank = intermediate_size // self.world_size
-
-        self.input_dtype = input_dtype
-        self.output_dtype = output_dtype
-        assert self.input_dtype == self.output_dtype
-        self.device = device
-
-        self.router_logits = router_logits
-
-        self.full_topk_ids, self.full_topk_weight = select_experts(self.pg, self.world_size, self.topk,
-                                                                   self.input_dtype, self.device, self.router_logits)
-
-        self.rs_buffer: torch.Tensor = torch.zeros(
-            [self.max_token_num // self.world_size, self.hidden_dim],
-            dtype=self.output_dtype,
-            device=self.device,
-        )
-
-    def forward(self, intermediate_states, w):
-        final_output_buffer = torch.zeros(
-            self.max_token_num * self.topk,
-            self.hidden_dim,
-            dtype=self.output_dtype,
-            device=self.device,
-        )
-        num_tokens_topk, intermediate_size_per_rank = intermediate_states.shape
-        ntokens = num_tokens_topk // self.topk
-        topk_ids = self.full_topk_ids[:ntokens].view(-1)
-        topk_weight = self.full_topk_weight[:ntokens].view(-1)
-        out = final_output_buffer[:num_tokens_topk, :]
-        for i in range(self.num_experts):
-            mask = topk_ids == i
-            if mask.sum():
-                out[mask] = (intermediate_states[mask] @ w[i]) * topk_weight[mask, None]
-        output = torch.sum(
-            out.reshape(ntokens, self.topk, -1),
-            dim=1,
-            keepdim=False,
-        )
-        # torch.save(out, f"grouped_gemm_out_torch_{self.rank}.pt")
-        # torch.save(output, f"reduced_torch_{self.rank}.pt")
-        torch.distributed.reduce_scatter_tensor(
-            self.rs_buffer[:ntokens // self.world_size, :],
-            output,
-            group=self.pg,
-        )
-
-        return self.rs_buffer[:ntokens // self.world_size, :]
+def moe_reduce_rs_torch(x: torch.Tensor, w: torch.Tensor, chosen_experts: torch.Tensor, expert_weight: torch.Tensor,
+                        pg: torch.distributed.ProcessGroup):
+    M, _ = x.shape
+    ntokens, topk = expert_weight.shape
+    num_experts, _, hidden_dim = w.shape
+    world_size = pg.size()
+    ntokens_per_rank = ntokens // world_size
+    assert ntokens * topk == M
+    assert x.shape[1] == w.shape[1]
+    grouped_gemm_out = torch.zeros((M, hidden_dim), dtype=x.dtype, device="cuda")
+    chosen_experts = chosen_experts.view(-1)
+    expert_weight = expert_weight.view(-1)
+    for i in range(num_experts):
+        mask = chosen_experts == i
+        if mask.sum():
+            grouped_gemm_out[mask] = (x[mask] @ w[i]) * expert_weight[mask, None]
+    out_reduce_topk = torch.sum(grouped_gemm_out.reshape(ntokens, topk, hidden_dim), dim=1, keepdim=False)
+    out_rs = torch.zeros((ntokens_per_rank, hidden_dim), dtype=x.dtype, device="cuda")
+    torch.distributed.reduce_scatter_tensor(out_rs, out_reduce_topk, group=pg)
+    return out_rs
 
 
 class MoEReduceRSTensorParallel(torch.nn.Module):
@@ -162,12 +113,8 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
         intermediate_size: int,
         num_experts: int,
         topk: int,
-        router_logits: torch.Tensor,
         max_token_num: int = 16 * 1024,
         input_dtype=torch.float16,
-        output_dtype=torch.float16,
-        device="cuda",
-        moe_block_size=128,
     ):
         super(MoEReduceRSTensorParallel, self).__init__()
         self.pg = pg
@@ -186,29 +133,8 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
         self.intermediate_size_per_rank = intermediate_size // self.world_size
 
         self.input_dtype = input_dtype
-        self.output_dtype = output_dtype
-        assert self.input_dtype == self.output_dtype
-        self.device = device
-
-        self.moe_block_size = moe_block_size
-
-        self.router_logits = router_logits
 
         self.ctx = create_moe_rs_context(
-            self.pg,
-            self.local_world_size,
-            self.max_token_num,
-            self.hidden_dim,
-            self.num_experts,
-            self.topk,
-            self.input_dtype,
-            self.output_dtype,
-            self.device,
-            self.moe_block_size,
-            self.router_logits,
-        )
-
-        self.ctx_colwise = create_moe_rs_context_colwise(
             self.rank,
             self.world_size,
             self.local_world_size,
@@ -219,37 +145,19 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
             self.input_dtype,
         )
 
-    def forward(self, intermediate_states, w: torch.Tensor):
-        assert hasattr(self, "ctx") and self.ctx is not None
-        num_tokens_per_rank = self.ctx.precompute_ctx.num_tokens_per_rank
-        num_tokens = num_tokens_per_rank * self.world_size
-
-        self.ctx.dataflow_config.RS_BLOCK_M = num_tokens // self.world_size
-
-        output = moe_reduce_rs_rowise(
-            self.rank,
-            self.world_size,
-            self.local_world_size,
-            intermediate_states,
+    def forward(
+        self,
+        x: torch.Tensor,
+        w: torch.Tensor,
+        chosen_experts: torch.Tensor,
+        expert_weight: torch.Tensor,
+    ):
+        output = run_moe_reduce_rs(
+            x,
             w,
-            self.ctx,
-        )
-
-        return output
-
-    def forward_colwise(self, intermediate_states, w: torch.Tensor):
-        assert hasattr(self, "ctx") and self.ctx is not None
-        num_tokens_per_rank = self.ctx.precompute_ctx.num_tokens_per_rank
-        num_tokens = num_tokens_per_rank * self.world_size
-
-        self.ctx.dataflow_config.RS_BLOCK_M = num_tokens // self.world_size
-
-        output = moe_reduce_rs_colwise(
-            intermediate_states,
-            w,
-            self.ctx.precompute_ctx.full_topk_ids,
-            self.ctx.precompute_ctx.full_topk_weight,
-            ctx=self.ctx_colwise,
+            chosen_experts,
+            expert_weight,
+            ctx=self.ctx,
             n_chunks=4,
         )
         return output
@@ -276,141 +184,82 @@ if __name__ == "__main__":
     args = parse_args()
 
     if args.autotune:
-
-        import triton
-        from triton_dist.autotuner import contextual_autotune
-        from triton_dist.kernels.nvidia import moe_reduce_rs
-
         configs = [
-            triton.Config({"BLOCK_N": BN, "BLOCK_K": BK}, num_stages=s, num_warps=w)
-            for BN in [128, 256]
+            triton.Config({"BLOCK_SIZE_N": BN, "BLOCK_SIZE_K": BK}, num_stages=s, num_warps=w)
+            for BN in [128]
             for BK in [32, 64]
             for s in [3, 4]
             for w in [4, 8]
         ]
-        moe_reduce_rs.kernel_producer_group_gemm_tp_scatter_input = triton.autotune(
-            configs=configs, key=["EM", "N", "K_per_rank"])(moe_reduce_rs.kernel_producer_group_gemm_tp_scatter_input)
-        moe_reduce_rs_rowise = contextual_autotune(is_dist=True)(moe_reduce_rs_rowise)
+        from triton_dist.kernels.nvidia import moe_reduce_rs
+        moe_reduce_rs.moe_gather_rs_grouped_gemm_kernel = triton.autotune(configs=configs, key=["M", "N", "K"])(
+            moe_reduce_rs.moe_gather_rs_grouped_gemm_kernel)
+        run_moe_reduce_rs = contextual_autotune(is_dist=True)(run_moe_reduce_rs)
 
-    initialize_distributed()
-    tp_group = TP_GROUP()
+    tp_group = initialize_distributed(args.seed)
     RANK = tp_group.rank()
     WORLD_SIZE = tp_group.size()
     LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE"))
 
-    num_tokens_per_rank = args.M // WORLD_SIZE
+    ntokens = args.M  # this is actually the tokens
+    ntokens_per_rank = ntokens // WORLD_SIZE
     hidden_size = args.N
     intermediate_size = args.K
     num_experts = args.E
     topk = args.TOPK
 
     max_token_num = 16 * 1024
-    DTYPE_MAP = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-    input_dtype = DTYPE_MAP[args.dtype]
-    output_dtype = DTYPE_MAP[args.dtype]
-    device = "cuda"
+    dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
 
     iters = args.iters
     warmup_iters = args.warmup
 
-    with torch.no_grad():
-        router_logits = create_rand_tensor(
-            RANK,
-            (num_tokens_per_rank, num_experts),
-            device="cuda",
-            dtype=input_dtype,
-        )
+    router_logits = create_rand_tensor(RANK, (ntokens_per_rank, num_experts), device="cuda", dtype=dtype)
 
-        M = num_tokens_per_rank * WORLD_SIZE * topk
-        K_per_rank = intermediate_size // WORLD_SIZE
-        intermediate_states = create_rand_tensor(
-            RANK,
-            (M, K_per_rank),
-            device="cuda",
-            dtype=input_dtype,
-        )
-        down_weight = create_rand_tensor(
-            RANK,
-            (num_experts, K_per_rank, hidden_size),
-            device="cuda",
-            dtype=input_dtype,
-        )
-        if args.debug:
-            intermediate_states.copy_(
-                torch.arange(0, M * K_per_rank, device="cuda", dtype=torch.float32).view(M, K_per_rank) // K_per_rank +
-                (RANK + 1) / 10)
-            intermediate_states.fill_((RANK + 1) / 10)
-            for n in range(num_experts):
-                down_weight.fill_(n // hidden_size)
-            router_logits = torch.arange(0, num_experts, device="cuda", dtype=router_logits.dtype).repeat(
-                (num_tokens_per_rank, 1))
+    M = ntokens * topk
+    K_per_rank = intermediate_size // WORLD_SIZE
+    intermediate_states = create_rand_tensor(RANK, (M, K_per_rank), device="cuda", dtype=dtype)
+    w = create_rand_tensor(RANK, (num_experts, K_per_rank, hidden_size), device="cuda", dtype=dtype)
+    if args.debug:
+        intermediate_states.fill_((RANK + 1) / 10)
+        for n in range(num_experts):
+            w.fill_((n + 1) // hidden_size)
+        router_logits = torch.arange(0, num_experts, device="cuda", dtype=router_logits.dtype).repeat(
+            (ntokens_per_rank, 1))
 
-        moe_block_size = 128
+    choosed_expert, expert_weight = select_experts(tp_group, WORLD_SIZE, topk, dtype, router_logits)
 
-        module = MoEReduceRSTensorParallel(
-            tp_group,
-            LOCAL_WORLD_SIZE,
-            hidden_size,
-            intermediate_size,
-            num_experts,
-            topk,
-            router_logits,
-            max_token_num,
-            input_dtype=input_dtype,
-            output_dtype=output_dtype,
-            device=device,
-        )
+    module = MoEReduceRSTensorParallel(
+        tp_group,
+        LOCAL_WORLD_SIZE,
+        hidden_size,
+        intermediate_size,
+        num_experts,
+        topk,
+        max_token_num,
+        input_dtype=dtype,
+    )
 
-        torch_module = TorchGroupGemmReduceRS(
-            tp_group,
-            hidden_size,
-            intermediate_size,
-            num_experts,
-            topk,
-            router_logits,
-            max_token_num,
-            input_dtype=input_dtype,
-            output_dtype=output_dtype,
-            device=device,
-        )
+    func_torch = lambda: moe_reduce_rs_torch(intermediate_states, w, choosed_expert, expert_weight, tp_group)
+    func_triton = lambda: module.forward(intermediate_states, w, choosed_expert, expert_weight)
+    # runs
+    output_torch = func_torch()
+    output_triton = func_triton()
+    atol, rtol = THRESHOLD_MAP[dtype]
+    assert_allclose(output_triton, output_torch, atol=atol, rtol=rtol)
 
-        # runs
-        output_torch = torch_module.forward(intermediate_states, down_weight)
-        output_triton = module.forward(intermediate_states, down_weight)
-        output_triton_colwise = module.forward_colwise(intermediate_states, down_weight)
-        # import sys
-        # sys.exit(0)
-        atol = THRESHOLD_MAP[output_dtype]
-        rtol = THRESHOLD_MAP[output_dtype]
-        assert_allclose(output_triton, output_torch, atol=atol, rtol=rtol)
-        assert_allclose(output_triton_colwise, output_torch, atol=atol, rtol=rtol)
+    # don't care torch profile
+    sleep_async(200)  # in case CPU bound
+    torch_output, duration_ms_torch = perf_func(func_torch, iters=iters, warmup_iters=warmup_iters)
 
-        # don't care torch profile
-        sleep_async(200)  # in case CPU bound
-        torch_output, duration_ms_torch = perf_func(partial(torch_module.forward, intermediate_states, down_weight),
-                                                    iters=iters, warmup_iters=warmup_iters)
+    with group_profile(f"moe_rs_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=tp_group):
+        sleep_async(100)  # in case CPU bound
+        output, duration_ms_triton = perf_func(func_triton, iters=iters, warmup_iters=warmup_iters)
 
-        with group_profile(f"moe_rs_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=tp_group):
-            sleep_async(100)  # in case CPU bound
-            output, duration_ms_triton = perf_func(partial(module.forward, intermediate_states, down_weight),
-                                                   iters=iters, warmup_iters=warmup_iters)
-
-            sleep_async(100)  # in case CPU bound
-            output, duration_ms_triton_colwise = perf_func(
-                partial(module.forward_colwise, intermediate_states, down_weight), iters=iters,
-                warmup_iters=warmup_iters)
-
-    print_sol_time_estimate(args.M, args.K, args.N, args.E, args.TOPK, input_dtype, WORLD_SIZE, LOCAL_WORLD_SIZE)
+    print_sol_time_estimate(args.M, args.K, args.N, args.E, args.TOPK, dtype, WORLD_SIZE, LOCAL_WORLD_SIZE)
     dist_print(f"dist-triton #{RANK} {duration_ms_triton:0.2f} ms/iter", need_sync=True,
-               allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"dist-triton-colwise #{RANK} {duration_ms_triton_colwise:0.2f} ms/iter", need_sync=True,
                allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK} {duration_ms_torch:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
     module.ctx.finalize()
-    module.ctx_colwise.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

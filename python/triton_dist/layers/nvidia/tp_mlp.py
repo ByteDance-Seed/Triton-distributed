@@ -187,7 +187,7 @@ class TP_MLP:
         if self.world_size > 1:
             out_ar = torch.empty_like(out)
             assert self.ar_ctx is not None, "AllReduce context is not initialized."
-            out = all_reduce(out.contiguous(), out_ar, method=self.ar_method, ctx=self.ar_ctx)
+            out = all_reduce(out.contiguous(), output=out_ar, method=self.ar_method, ctx=self.ar_ctx)
         return out.view_as(x)
 
     @torch.inference_mode()

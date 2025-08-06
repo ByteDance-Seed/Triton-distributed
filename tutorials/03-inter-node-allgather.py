@@ -30,21 +30,20 @@ In this tutorial, you will write a low latency all gather kernel using using Tri
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch.sh ./tutorials/03-inter-node-allgather.py
+    source ./scripts/sentenv.sh
+    bash ./scripts/launch.sh tutorials/03-inter-node-allgather.py
 
 """
-import datetime
 import os
 from dataclasses import dataclass
 
-import nvshmem.core
 import torch
 
 import triton
 import triton.language as tl
 from triton.language.extra.cuda.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, perf_func, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
+from triton_dist.utils import finalize_distributed, initialize_distributed, nvshmem_barrier_all_on_stream, perf_func, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
 
 
 @dataclass
@@ -59,7 +58,8 @@ class AllGatherContext:
 
 
 @triton.jit(do_not_specialize=["rank", "signal_value"])
-def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag, WORLD_SIZE: tl.constexpr, rank, signal_value):
+def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag,
+                              WORLD_SIZE: tl.constexpr, rank, signal_value):
     pid = tl.program_id(0)
     thread_idx = tid(0)
     # there are WORLD_SIZE programs processing different data.
@@ -82,8 +82,10 @@ def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag, WORLD_SIZE: t
         # sends `segment` at `rank` to `segment` at `peer` and set `flag[segment]` at `peer` to `signal_value`
         # NVSHMEM takes care of memory barrier semantic, so don't worry.
         libshmem_device.putmem_signal_block(
-            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + segment * bytes_per_rank,
-            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + segment * bytes_per_rank,
+            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) +
+            segment * bytes_per_rank,
+            tl.cast(symm_ptr, tl.pointer_type(tl.int8)) +
+            segment * bytes_per_rank,
             bytes_per_rank,
             symm_flag + segment,
             signal_value,
@@ -177,24 +179,33 @@ def all_gather_push_2d_kernel(
 def all_gather_push_2d(ctx: AllGatherContext, symm_buffer: torch.Tensor):
     ctx.signal_value += 1
     all_gather_push_2d_kernel[(ctx.num_ranks, )](
-        symm_buffer, symm_buffer.nbytes // ctx.num_ranks, ctx.symm_signals[ctx.signal_value % 2], ctx.num_nodes,
-        ctx.num_ranks, ctx.rank, ctx.signal_value, num_warps=32,  # use as many threads as possible
+        symm_buffer,
+        symm_buffer.nbytes // ctx.num_ranks,
+        ctx.symm_signals[ctx.signal_value % 2],
+        ctx.num_nodes,
+        ctx.num_ranks,
+        ctx.rank,
+        ctx.signal_value,
+        num_warps=32,  # use as many threads as possible
     )
 
     return symm_buffer
 
 
-def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int, ctx: AllGatherContext):
+def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
+            ctx: AllGatherContext):
     nbytes_per_rank = nbytes // WORLD_SIZE
 
     ref_tensor = torch.arange(nbytes, dtype=torch.int8).cuda()
-    ref_tensor = (torch.randint(0, 9999, [nbytes // 4], dtype=torch.int32).view(torch.int8).cuda())
+    ref_tensor = (torch.randint(0, 9999, [nbytes // 4],
+                                dtype=torch.int32).view(torch.int8).cuda())
     torch.distributed.broadcast(ref_tensor, src=0)
 
     # local copy
     ag_buffer = ag_buffers[ctx.signal_value % 2]
     # suppose You already write to ag_bufferp[index_start:index_end], so here copy does not count in profile
-    index_start, index_end = nbytes_per_rank * RANK, nbytes_per_rank * (RANK + 1)
+    index_start, index_end = nbytes_per_rank * RANK, nbytes_per_rank * (RANK +
+                                                                        1)
     ag_buffer[index_start:index_end].copy_(ref_tensor[index_start:index_end])
 
     def _run_all_gather_triton():
@@ -202,7 +213,8 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int, ctx: AllGatherContext):
         return func(ctx, ag_buffer)
 
     def _run_all_gather_nccl():
-        torch.distributed.all_gather_into_tensor(ref_tensor, ref_tensor[index_start:index_end], group=TP_GROUP)
+        torch.distributed.all_gather_into_tensor(
+            ref_tensor, ref_tensor[index_start:index_end], group=TP_GROUP)
 
     result = _run_all_gather_triton()
 
@@ -243,20 +255,7 @@ LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 NNODES = WORLD_SIZE // LOCAL_WORLD_SIZE
-
-torch.cuda.set_device(LOCAL_RANK)
-# create a TP_GROUP by NCCL
-torch.distributed.init_process_group(
-    backend="nccl",
-    world_size=WORLD_SIZE,
-    rank=RANK,
-    timeout=datetime.timedelta(seconds=1800),
-)
-assert torch.distributed.is_initialized()
-TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-torch.cuda.synchronize()
-
-init_nvshmem_by_torch_process_group(TP_GROUP)
+TP_GROUP = initialize_distributed()
 
 nbytes = 8 * 1024  # total bytes for AllGather
 
@@ -271,7 +270,9 @@ ctx = AllGatherContext(
     node=RANK // LOCAL_WORLD_SIZE,
     num_ranks=WORLD_SIZE,
     num_nodes=NNODES,
-    symm_signals=[nvshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE) for _ in range(2)],
+    symm_signals=[
+        nvshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE) for _ in range(2)
+    ],
     signal_value=10,
 )
 print("using push 1d...")
@@ -292,5 +293,4 @@ nvshmem_free_tensor_sync(symm_ag_buffer)
 nvshmem_free_tensor_sync(ctx.symm_signals[0])
 nvshmem_free_tensor_sync(ctx.symm_signals[1])
 
-nvshmem.core.finalize()
-torch.distributed.destroy_process_group()
+finalize_distributed()

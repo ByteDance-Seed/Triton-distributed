@@ -22,13 +22,11 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import datetime
 import os
 import random
 import pytest
 
 import torch
-import torch.distributed
 import triton
 import triton.language as tl
 
@@ -38,7 +36,7 @@ from triton_dist.kernels.nvidia.common_ops import (barrier_all_intra_node_non_at
                                                    cooperative_barrier_on_this_grid, bisect_left_kernel,
                                                    bisect_left_kernel_aligned, bisect_right_kernel,
                                                    bisect_right_kernel_aligned)
-from triton_dist.utils import check_p2p_native_atomic_supported, nvshmem_barrier_all_on_stream, init_nvshmem_by_torch_process_group, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
+from triton_dist.utils import supports_p2p_native_atomic, finalize_distributed, initialize_distributed, launch_cooperative_grid_options, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async, support_launch_cooperative_grid
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
@@ -57,22 +55,19 @@ def test_barrier_on_this_grid():
     print(">> barrier_on_this_grid start...")
     flag = torch.zeros((1, ), dtype=torch.int32, device="cuda")
     for _ in range(100):
-        barrier_on_this_grid[(random.randint(1, 1024), )](flag, launch_cooperative_grid=True)
+        barrier_on_this_grid[(random.randint(1, 1024), )](flag, **launch_cooperative_grid_options())
     print("✅ barrier_on_this_grid passed")
 
-    from cuda import cudart
-    err, = cudart.cudaGetLastError()
-    print(err)
-
     for _ in range(100):
-        cooperative_barrier_on_this_grid[(random.randint(1, 1024), )](launch_cooperative_grid=True)
+        cooperative_barrier_on_this_grid[(random.randint(1, 1024), )](**launch_cooperative_grid_options())
     print("✅ cooperative_barrier_on_this_grid passed")
 
     # If launch_cooperative_grid is False, then it should raise an error.
-    with pytest.raises(RuntimeError, match="an illegal memory access was encountered"):
-        cooperative_barrier_on_this_grid[(random.randint(1, 1024), )](launch_cooperative_grid=False)
-        torch.cuda.synchronize()
-    print("✅ cooperative_barrier_on_this_grid with launch_cooperative_grid=False passed")
+    if support_launch_cooperative_grid():
+        with pytest.raises(RuntimeError, match="an illegal memory access was encountered"):
+            cooperative_barrier_on_this_grid[(random.randint(1, 1024), )](launch_cooperative_grid=False)
+            torch.cuda.synchronize()
+        print("✅ cooperative_barrier_on_this_grid with launch_cooperative_grid=False passed")
 
 
 def test_barrier_all_intra_node_non_atomic():
@@ -92,14 +87,14 @@ def test_barrier_all_intra_node_non_atomic():
         _random_sleep()
         # print(f"iter {n}", flush=True)
         barrier_all_intra_node_non_atomic[(random.randint(1, 1024), )](LOCAL_RANK, RANK, LOCAL_WORLD_SIZE, symm_flag,
-                                                                       n + 1)
+                                                                       n + 1, use_cooperative=True)
 
     print("✅ barrier_all_intra_node_non_atomic passed")
     nvshmem_free_tensor_sync(symm_flag)
 
 
 def test_barrier_all_intra_node():
-    if not check_p2p_native_atomic_supported():
+    if not supports_p2p_native_atomic():
         print("P2P native atomic access is not supported. skip this test...")
         return
 
@@ -199,19 +194,11 @@ def test_bisect_cases():
 
 if __name__ == "__main__":
     torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    init_nvshmem_by_torch_process_group(TP_GROUP)
+    initialize_distributed()
 
     test_barrier_all_intra_node_non_atomic()
     test_barrier_all_intra_node()
 
     # this test corrupt the CUDA context. leave it in last
     test_barrier_on_this_grid()
+    finalize_distributed()

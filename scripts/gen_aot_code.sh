@@ -21,4 +21,7 @@ done < $PARAMS_FILE
 echo $AOT_KERNELS
 
 rm -rf ${SCRIPT_DIR}/../csrc/triton_aot_generated
-python3 ${SCRIPT_DIR}/../python/triton_dist/tools/compile_aot.py --workspace ${SCRIPT_DIR}/../csrc/triton_aot_generated --kernels ${AOT_KERNELS[@]}  --library triton_distributed_kernel
+python3 ${SCRIPT_DIR}/../python/triton_dist/tools/compile_aot.py \
+    --workspace ${SCRIPT_DIR}/../csrc/triton_aot_generated \
+    --kernels ${AOT_KERNELS[@]}  \
+    --library triton_distributed_kernel

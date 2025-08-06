@@ -382,7 +382,7 @@ static int _register_{meta.orig_kernel_name}_ops [[maybe_unused]] = []() {{
         {', '.join([f'py::arg("{arg}")' for arg in meta.arg_names])},
         py::arg("algo_info")
     );
-      
+
     }});
     return 0;
   }}();
@@ -651,11 +651,9 @@ def link_all(workspace: Path, libname: str, context: Dict[str, Dict]):
     out_path = workspace / "pybind" / (libname + "_pybind")
 
     #include "registry.h"
-    #include <c10/cuda/CUDAStream.h>
     #include "triton_aot_generated/triton_distributed_kernel.h"
     content = ""
     content += "#include \"registry.h\"\n"
-    content += "#include <c10/cuda/CUDAStream.h>\n"
     content += f"#include \"{workspace}/{libname}.h\"\n"
     content += """
 namespace distributed {
@@ -707,28 +705,8 @@ def libcuda_dirs():
 
 
 @functools.lru_cache()
-def triton_cuda_home():
-    import triton.backends.nvidia
-
-    return Path(triton.backends.nvidia.__file__).parent
-
-
-@functools.lru_cache()
-def library_dirs():
-    return [triton_cuda_home() / "lib", *libcuda_dirs()]
-
-
-@functools.lru_cache()
 def aot_runtime_path():
     return Path(__file__).parent / "runtime"
-
-
-@functools.lru_cache()
-def include_dirs(with_runtime: bool = False):
-    dirs = [str(triton_cuda_home() / "include")]
-    if with_runtime:
-        dirs.append(aot_runtime_path())
-    return dirs
 
 
 CMAKE_TEMPLATE = """
@@ -742,24 +720,10 @@ SET(TRITON_DIST_AOT_RUNTIME_FILES {TRITON_DIST_AOT_RUNTIME_FILE})
 SET(LIB_FILES
   ${{C_FILES}}
   ${{TRITON_DIST_AOT_RUNTIME_FILES}})
-# SET(CUDA_HOME {CUDA_HOME})
-find_package(CUDAToolkit REQUIRED)
-
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES native)
-endif()
 
 add_distributed_library({LIBNAME} ${{LIB_FILES}})
-target_link_libraries({LIBNAME} PUBLIC
-  CUDA::cudart
-  CUDA::cuda_driver
-  -L${{CUDA_HOME}}/lib -ldl)
-target_include_directories(triton_distributed_kernel PUBLIC
-  ${{CUDAToolkit_INCLUDE_DIRS}}  # 使用 CMake 提供的头文件路径
-)
-target_compile_options({LIBNAME} PUBLIC
-  -I${{CUDA_HOME}}/include
-)
+target_link_libraries({LIBNAME} PUBLIC -ldl -lcuda)
+target_compile_options({LIBNAME} PUBLIC {CCFLAGS})
 install(TARGETS {LIBNAME}
   RUNTIME DESTINATION bin
   LIBRARY DESTINATION lib)
@@ -772,9 +736,10 @@ def gen_cmakelists(workspace: Path, libname: str, with_runtime: bool = False):
         _copy_if_changed(workspace / "triton_aot_runtime.cc", aot_runtime_path() / "triton_aot_runtime.cc")
         _copy_if_changed(workspace / "triton_aot_runtime.h", aot_runtime_path() / "triton_aot_runtime.h")
 
+    include_dirs = [os.path.join(triton.__path__[0], "backends/nvidia/include")]
     content = CMAKE_TEMPLATE.format(
         LIBNAME=libname,
-        CUDA_HOME=triton_cuda_home(),
+        CCFLAGS=" ".join([f"-I{x}" for x in include_dirs]),
         TRITON_DIST_AOT_RUNTIME_FILE="triton_aot_runtime.cc" if with_runtime else "",
     )
     _write_if_changed(workspace / "CMakeLists.txt", content)
@@ -795,7 +760,8 @@ if __name__ == "__main__":
     def _parse_args():
         import argparse
 
-        parser = argparse.ArgumentParser(description="Compile Triton kernels")
+        parser = argparse.ArgumentParser(
+            description="Compile Triton kernels. Limitations: does not support cooperative launch and PDL")
         parser.add_argument("--workspace", type=str, default="workspace")
         parser.add_argument(
             "--from-scratch",

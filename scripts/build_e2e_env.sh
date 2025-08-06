@@ -99,27 +99,37 @@ fi
 # --- Install common packages ---
 echo "Installing common packages: transformers and numpy..."
 pip install transformers==4.51.3 numpy==1.26.4 termcolor
+pip install --upgrade deepspeed
 
-# --- Download Hugging Face model ---
-MODEL_NAME="Qwen/Qwen3-32B"
-while true; do
-  echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
-  # Use timeout to prevent the script from hanging indefinitely.
-  timeout 120s huggingface-cli download "$MODEL_NAME"
+# --- Define Hugging Face models to download ---
+MODELS=(
+  "Qwen/Qwen3-32B"
+  "Qwen/Qwen3-30B-A3B"
+)
+
+# --- Loop through each model and download it ---
+for MODEL_NAME in "${MODELS[@]}"; do
+  while true; do
+    echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
+    # Use timeout to prevent the script from hanging indefinitely.
+    timeout 120s huggingface-cli download "$MODEL_NAME"
 
     EXIT_CODE=$?
 
-  if [ $EXIT_CODE -eq 0 ]; then
-    echo "Model '$MODEL_NAME' downloaded successfully!"
-    break
-  elif [ $EXIT_CODE -eq 124 ]; then
-    echo "Download timed out. Retrying in 5 seconds..."
-  else
-    echo "Download failed with exit code $EXIT_CODE. Retrying in 5 seconds..."
-  fi
+    if [ $EXIT_CODE -eq 0 ]; then
+      echo "Model '$MODEL_NAME' downloaded successfully! 🎉"
+      break # Exit the while loop and move to the next model
+    elif [ $EXIT_CODE -eq 124 ]; then
+      echo "Download timed out for '$MODEL_NAME'. Retrying in 5 seconds... ⏳"
+    else
+      echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE. Retrying in 5 seconds... 🔁"
+    fi
 
-  sleep 5
+    sleep 5
+  done
 done
+
+echo "All specified models have been downloaded."
 
 # --- Final check ---
 if [[ $? -eq 0 ]]; then

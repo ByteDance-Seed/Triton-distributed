@@ -41,7 +41,8 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch.sh ./tutorials/01-distributed-notify-wait.py
+    source ./scripts/sentenv.sh
+    bash ./scripts/launch.sh tutorials/01-distributed-notify-wait.py
 
 """
 
@@ -49,14 +50,12 @@ In doing so, you will learn about:
 # Kernel
 # --------------
 import torch
-import os
-import datetime
 import nvshmem.core
 
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, dist_print, init_nvshmem_by_torch_process_group, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, dist_print, initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 from triton.language.extra.cuda.language_extra import (__syncthreads)
 
 
@@ -87,23 +86,32 @@ def producer_consumer_kernel(
             queue_repeat = i // queue_size
             token = dl.wait(
                 # Use `symm_at` to map the data pointer to remote peer rank
-                dl.symm_at(signal_ptr, peer_rank) + queue_offset, 1,  # The number of signals to wait
+                dl.symm_at(signal_ptr, peer_rank) + queue_offset,
+                1,  # The number of signals to wait
                 "sys",  # The scope of the barrier, `gpu` or `sys`
                 "acquire",  # The semantic of the wait
-                waitValue=queue_repeat * 2,  # The value expected, should conform to certain order
+                waitValue=queue_repeat *
+                2,  # The value expected, should conform to certain order
             )  # This wait ensures that the corresponding position is empty
-            input_ptr = dl.consume_token(input_ptr, token)  # consume the token to make sure the `wait` is needed
+            input_ptr = dl.consume_token(
+                input_ptr,
+                token)  # consume the token to make sure the `wait` is needed
             data = tl.load(input_ptr + i * BLOCK_SIZE + offs)
             # Use `symm_at` to map the data pointer to remote peer rank
-            tl.store(dl.symm_at(queue_ptr, peer_rank) + queue_offset * BLOCK_SIZE + offs, data)
+            tl.store(
+                dl.symm_at(queue_ptr, peer_rank) + queue_offset * BLOCK_SIZE +
+                offs, data)
             # need a syncthreads to make sure all the data has been sent
             __syncthreads()
             # `notify` is also single thread scope, we need to use a different thread from `wait`
-            dl.notify(signal_ptr + queue_offset, peer_rank,  # Notify the signal object on the peer rank
-                      signal=queue_repeat * 2 + 1,  # Write a value to the signal
-                      sig_op="set",  # Set the value. Another choice is `add`
-                      comm_scope="intra_node",  # This example is intra-node, another choice is `inter_node`
-                      )  # This notifies the consumer that the data is ready
+            dl.notify(
+                signal_ptr + queue_offset,
+                peer_rank,  # Notify the signal object on the peer rank
+                signal=queue_repeat * 2 + 1,  # Write a value to the signal
+                sig_op="set",  # Set the value. Another choice is `add`
+                comm_scope=
+                "intra_node",  # This example is intra-node, another choice is `inter_node`
+            )  # This notifies the consumer that the data is ready
     elif pid < NUM_PRODUCER_SMS + NUM_CONSUMER_SMS:
         #
         # Consumer
@@ -113,48 +121,28 @@ def producer_consumer_kernel(
         for i in range(pid, num_inputs, NUM_CONSUMER_SMS):
             queue_offset = i % queue_size
             queue_repeat = i // queue_size
-            token = dl.wait(signal_ptr + queue_offset,  # The base *Pointer* of signals at the current rank
-                            1,  # The number of signals to wait
-                            "sys",  # The scope of the barrier
-                            "acquire",  # The semantic of the wait
-                            waitValue=queue_repeat * 2 + 1,  # The value expected
-                            )  # This wait ensures that the corresponding position is full
+            token = dl.wait(
+                signal_ptr +
+                queue_offset,  # The base *Pointer* of signals at the current rank
+                1,  # The number of signals to wait
+                "sys",  # The scope of the barrier
+                "acquire",  # The semantic of the wait
+                waitValue=queue_repeat * 2 + 1,  # The value expected
+            )  # This wait ensures that the corresponding position is full
             queue_ptr = dl.consume_token(queue_ptr, token)
             data = tl.load(queue_ptr + queue_offset * BLOCK_SIZE + offs)
             tl.store(output_ptr + i * BLOCK_SIZE + offs, data)
             __syncthreads()
-            dl.notify(signal_ptr + queue_offset, rank,  # Notify the signal object on the current rank
-                      signal=queue_repeat * 2 + 2,  # Write a value to the signal
-                      sig_op="set",  # Set the value. Another choice is `add`
-                      comm_scope="intra_node",  # This example is intra-node, another choice is `inter_node`
-                      )  # This notifies the consumer that the data is ready
+            dl.notify(
+                signal_ptr + queue_offset,
+                rank,  # Notify the signal object on the current rank
+                signal=queue_repeat * 2 + 2,  # Write a value to the signal
+                sig_op="set",  # Set the value. Another choice is `add`
+                comm_scope=
+                "intra_node",  # This example is intra-node, another choice is `inter_node`
+            )  # This notifies the consumer that the data is ready
     else:
         pass
-
-
-# %%
-# Initialization
-# --------------
-def initialize_distributed():
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    assert WORLD_SIZE <= 8  # This example only runs on a single node
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    torch.cuda.synchronize()
-    # You need to use `init_nvshmem_by_uniqueid` to initialize
-    # the distributed system
-    init_nvshmem_by_torch_process_group(TP_GROUP)
-    return TP_GROUP
 
 
 INPUT_SIZE = 2025  # A large input size
@@ -165,8 +153,9 @@ BLOCK_SIZE = 128
 def main(TP_GROUP):
     stream = torch.cuda.current_stream()
     # The created tensor is by-default on current cuda device
-    queue = nvshmem_create_tensor((QUEUE_SIZE * BLOCK_SIZE, ),  # Shape on each device
-                                  torch.float32)
+    queue = nvshmem_create_tensor(
+        (QUEUE_SIZE * BLOCK_SIZE, ),  # Shape on each device
+        torch.float32)
     signal = nvshmem_create_tensor((QUEUE_SIZE, ), NVSHMEM_SIGNAL_DTYPE)
     queue.fill_(-1)
     signal.fill_(0)  # The initial value of signal should be 0s
@@ -180,14 +169,16 @@ def main(TP_GROUP):
     num_ranks = TP_GROUP.size()
 
     # Prepare torch local data
-    input_data = torch.randn((INPUT_SIZE * BLOCK_SIZE, ), dtype=torch.float32).cuda()
+    input_data = torch.randn((INPUT_SIZE * BLOCK_SIZE, ),
+                             dtype=torch.float32).cuda()
     output_data = torch.empty_like(input_data)
 
     NUM_REPEAS = 20
     # For distributed programming, you have to run it multiple times to ensure
     # your program is correct, including reseting signals, avoiding racing, etc.
     for iters in range(NUM_REPEAS):
-        input_data = torch.randn((INPUT_SIZE * BLOCK_SIZE, ), dtype=torch.float32).cuda()
+        input_data = torch.randn((INPUT_SIZE * BLOCK_SIZE, ),
+                                 dtype=torch.float32).cuda()
         # Need to reset the barrier every time, you may also omit this step for better performance
         # by using flipping barriers. We will cover this optimization in future tutorial.
         # TODO: tutorial for flipping barriers.
@@ -210,15 +201,27 @@ def main(TP_GROUP):
         )
 
         # Check results
-        inputs_all_ranks = [torch.empty_like(input_data) for _ in range(num_ranks)]
-        torch.distributed.all_gather(inputs_all_ranks, input_data, group=TP_GROUP)
+        inputs_all_ranks = [
+            torch.empty_like(input_data) for _ in range(num_ranks)
+        ]
+        torch.distributed.all_gather(inputs_all_ranks,
+                                     input_data,
+                                     group=TP_GROUP)
         golden = inputs_all_ranks[(rank - 1 + num_ranks) % num_ranks]
         if iters == NUM_REPEAS - 1:
-            dist_print(f"rank{rank}", output_data, need_sync=True, allowed_ranks=list(range(num_ranks)))
-            dist_print(f"rank{rank}", golden, need_sync=True, allowed_ranks=list(range(num_ranks)))
+            dist_print(f"rank{rank}",
+                       output_data,
+                       need_sync=True,
+                       allowed_ranks=list(range(num_ranks)))
+            dist_print(f"rank{rank}",
+                       golden,
+                       need_sync=True,
+                       allowed_ranks=list(range(num_ranks)))
         assert torch.allclose(output_data, golden, atol=1e-5, rtol=1e-5)
         if iters == NUM_REPEAS - 1:
-            dist_print(f"rank{rank} Passed✅!", need_sync=True, allowed_ranks=list(range(num_ranks)))
+            dist_print(f"rank{rank} Passed✅!",
+                       need_sync=True,
+                       allowed_ranks=list(range(num_ranks)))
 
     nvshmem_free_tensor_sync(queue)
     nvshmem_free_tensor_sync(signal)
