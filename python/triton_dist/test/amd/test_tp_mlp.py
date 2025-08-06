@@ -301,4 +301,5 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         torch.distributed.barrier(TP_GROUP)
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()

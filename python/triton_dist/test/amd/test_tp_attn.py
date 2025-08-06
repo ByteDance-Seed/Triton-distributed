@@ -300,4 +300,6 @@ if __name__ == "__main__":
         torch_graph.reset()
         triton_dist_graph.reset()
         del torch_graph, triton_dist_graph, mempool
+
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()
