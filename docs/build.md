@@ -43,10 +43,10 @@ Dependencies with other versions may also work well, but this is not guaranteed.
     pip3 install torch==2.4.1
     pip3 install cuda-python==12.4 # need to align with your nvcc version
     pip3 install ninja cmake wheel pybind11 numpy chardet pytest
-    pip3 install pynvml>=11.5.3
+    pip3 install nvidia-ml-py>=12
     ```
 5. Install NVSHMEM.
-    
+
     ```
     pip3 install nvidia-nvshmem-cu12==3.3.9 cuda.core==0.2.0 "Cython>=0.29.24"
 
