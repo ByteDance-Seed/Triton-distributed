@@ -29,6 +29,7 @@ import torch
 import torch.distributed
 from functools import partial
 from transformers import AutoModelForCausalLM
+import pyrocshmem
 
 from triton_dist.layers.amd.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
@@ -126,6 +127,23 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    
+    num_ranks = torch.distributed.get_world_size()
+    rank_id = torch.distributed.get_rank()
+
+    if rank_id==0:
+        uid = pyrocshmem.rocshmem_get_uniqueid()
+        bcast_obj = [uid]
+    else:
+        bcast_obj = [None]
+
+    torch.distributed.broadcast_object_list(bcast_obj, src=0)
+    torch.distributed.barrier()
+
+    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+    
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
 
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
