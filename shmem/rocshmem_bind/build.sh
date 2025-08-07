@@ -40,6 +40,15 @@ function build_pyrocshmem_setup() {
 
 function download_and_copy() {
     local dst_path=${PROJECT_ROOT}/../../3rdparty/triton/third_party/amd/backend/lib
+    rocshmem_dir=${ROCSHMEM_DIR:-${PROJECT_ROOT}/rocshmem_build/install}
+    lib_file=$rocshmem_dir/lib/librocshmem_device.bc
+    if ! mv -f $lib_file $dst_path; then
+      echo "File move failed" >&2
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+
+    echo "Move done."
 }
 
 # build rocshmem
@@ -56,9 +65,14 @@ apt_install_deps
 
 bash -x ${PROJECT_ROOT}/build_rocshmem.sh
 
+bash -x ${PROJECT_ROOT}/scripts/build_rocshmem_device_bc.sh
+
+bash -x ${PROJECT_ROOT}/scripts/build_rocshmem_wrapper.sh
+
+download_and_copy
+
 # build pyrocshmem
 build_pyrocshmem_setup
-build_rocshmem_hsaco
-download_and_copy
+# build_rocshmem_hsaco
 
 echo "done"
