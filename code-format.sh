@@ -154,6 +154,14 @@ else
     echo "Formatting pyi files by ruff..."
     echo $files_to_check_pyi | xargs ruff check --config python/pyproject.toml --fix
   fi
+
+  echo "Ensuring final newline for Python files..."
+  for f in $files_to_check_py $files_to_check_pyi; do
+    # If the file is not empty and does not end with a newline, add one.
+    if [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ]; then
+      echo >> "$f"
+    fi
+  done
 fi
 
 if [[ "$fail_on_diff" -eq 1 ]] && [[ "$has_diff" -eq 1 ]]; then
