@@ -22,7 +22,6 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-# from triton.language.extra import libshmem_device
 
 import argparse
 import os
@@ -58,6 +57,48 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
+def test_rocshmem_device():
+    @triton.jit
+    def _rocshmem_device(comm_buf, ctx):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = dl.rank()
+        npes = dl.num_ranks()
+
+        # mype = libshmem_device.my_pe()
+        # npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+        tl.store(comm_buf, mype)
+        comm_buf+=1
+        tl.store(comm_buf, npes)
+    
+    print("**test_rocshmem_device start!")
+
+    mype = pyrocshmem.rocshmem_my_pe()
+
+    npes =  pyrocshmem.rocshmem_n_pes()
+    peer = (mype + 1) % npes
+
+    ctx = pyrocshmem.rocshmem_get_device_ctx()
+    comm_buf = pyrocshmem.rocshmem_create_tensor((2,), torch.int32)
+    torch.cuda.synchronize()
+    _rocshmem_device[(1, )](comm_buf, ctx)
+
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    
+    print(f"mype#: {mype} comm_buffs: {comm_buf}")
+
+    try:
+        torch.testing.assert_close(
+            comm_buf,
+            torch.tensor([mype, npes], dtype=torch.int32,
+                         device="cuda")), comm_buf
+    except Exception as e:
+        print(f" _rocshmem_device #{mype} failed")
+        raise (e)
+    else:
+        print(f"✅ _rocshmem_device #{mype} pass")
 
 def test_rocshmem_basic():
     @triton.jit
@@ -145,22 +186,6 @@ def test_rocshmem_memcpy():
     else:
         print(f"✅ _rocshmem_basic #{mype} - Check tensor_list pass")
 
-
-def perf_func(func, iters, warmup_iters):
-    start_event = torch.cuda.Event(enable_timing=True)
-    stop_event = torch.cuda.Event(enable_timing=True)
-    for n in range(iters + warmup_iters):
-        if n == warmup_iters:
-            start_event.record()
-        func()
-    stop_event.record()
-    start_event.wait()
-    stop_event.wait()
-    torch.cuda.current_stream().synchronize()
-    duration_ms = start_event.elapsed_time(stop_event)
-    return duration_ms / iters
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
@@ -222,6 +247,9 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     test_rocshmem_basic()
+    
+    test_rocshmem_device()
+
     ctx = get_torch_prof_ctx(args.profile)
     
     with ctx:
