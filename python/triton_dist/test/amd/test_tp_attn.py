@@ -31,6 +31,7 @@ from functools import partial
 from transformers import AutoModelForCausalLM
 import pyrocshmem
 
+import pyrocshmem
 from triton_dist.layers.amd.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.utils import perf_func, dist_print, group_profile
@@ -145,6 +146,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]

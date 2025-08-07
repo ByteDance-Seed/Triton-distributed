@@ -52,6 +52,7 @@ import triton_dist.language as dl
 
 from hip import hip
 from typing import Optional, List
+import pyrocshmem
 from triton_dist.utils import (
     HIP_CHECK,
     generate_data,
@@ -500,6 +501,7 @@ def destroy():
 if __name__ == "__main__":
     # init
     RANK, LOCAL_RANK, WORLD_SIZE, TP_GROUP = init()
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     # NOTE: We should get device after process group init.
     DEVICE = triton.runtime.driver.active.get_active_torch_device()
@@ -544,5 +546,6 @@ if __name__ == "__main__":
         )
         dist_print("❌ Triton and Torch differ")
 
+    pyrocshmem.rocshmem_finalize()
     # After all, destroy distributed process group.
     destroy()

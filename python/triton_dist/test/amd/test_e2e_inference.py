@@ -27,6 +27,7 @@ import torch
 import os
 from argparse import ArgumentParser, Namespace
 
+import pyrocshmem
 from triton_dist.models import ModelConfig
 from triton_dist.models.engine import Engine
 from triton_dist.models.utils import seed_everything
@@ -77,6 +78,7 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]
@@ -103,3 +105,6 @@ if __name__ == "__main__":
 
     engine.serve(input_ids=input_ids, gen_len=gen_len)
     engine.logger.log("✅ Inference completed!", "success")
+
+    pyrocshmem.rocshmem_finalize()
+    torch.distributed.destroy_process_group()

@@ -33,6 +33,7 @@ import numpy as np
 
 from functools import partial
 
+import pyrocshmem
 from triton_dist.utils import (
     generate_data,
     get_torch_prof_ctx,
@@ -193,6 +194,7 @@ if __name__ == "__main__":
     
     torch.cuda.synchronize()
     torch.distributed.barrier()
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype

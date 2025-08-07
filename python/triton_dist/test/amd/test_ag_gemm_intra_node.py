@@ -35,6 +35,7 @@ import pyrocshmem
 
 from hip import hip
 
+import pyrocshmem
 from triton_dist.utils import (generate_data, get_torch_prof_ctx, perf_func, dist_print)
 from triton_dist.kernels.amd import ag_gemm_intra_node, create_ag_gemm_intra_node_context
 
@@ -170,6 +171,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+
     torch.cuda.set_device(LOCAL_RANK)
     torch.distributed.init_process_group(
         backend="nccl",
@@ -209,6 +211,7 @@ if __name__ == "__main__":
     
     torch.cuda.synchronize()
     torch.distributed.barrier()
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype

@@ -30,6 +30,7 @@ import argparse
 from functools import partial
 from transformers import AutoModelForCausalLM
 
+import pyrocshmem
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.config import ModelConfig
 from triton_dist.models import AutoLLM
@@ -120,6 +121,7 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]
@@ -229,4 +231,5 @@ if __name__ == "__main__":
                    allowed_ranks=list(range(WORLD_SIZE)))
         del torch_graph, triton_dist_graph, mempool
 
+    pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()

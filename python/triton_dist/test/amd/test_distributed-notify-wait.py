@@ -144,16 +144,15 @@ def main(TP_GROUP):
     num_ranks = TP_GROUP.size()
 
     # The created tensor is by-default on current cuda device
-    queue_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [
+    queue_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
         QUEUE_SIZE * BLOCK_SIZE,
-    ],  # Shape on each device
-                                                      torch.float32)
+    ], torch.float32)
     # Currently we use `store.release.u32` to impl notify signal, dl.notify requires 64bit unsigned signal type,
-    signal_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [
+    signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
         QUEUE_SIZE,
     ], torch.int32)
 
-    comm_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [num_ranks], torch.int32)
+    comm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
     comm_bufs[rank].fill_(0)
     comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_bufs], device=torch.cuda.current_device(),
                                 requires_grad=False)
@@ -214,7 +213,9 @@ def main(TP_GROUP):
 
 # Initialize the distributed system
 TP_GROUP = initialize_distributed()
+pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 # The main function
 main(TP_GROUP)
 # Finalize
+pyrocshmem.rocshmem_finalize()
 torch.distributed.destroy_process_group()
