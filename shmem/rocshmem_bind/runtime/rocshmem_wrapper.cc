@@ -54,10 +54,5 @@ __device__ void __attribute__((visibility("default"))) rocshmem_int_p_wrapper(
   rocshmem_int_p(dest, value, pe);
 }
 
-__device__ void * __attribute__((visibility("default")))  get_device_ctx_ipc_base_wrapper(int pe){
-  void * ptr = get_device_ctx_ipc_base(pe);
-  return ptr;
-}
-
 }
 
