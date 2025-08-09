@@ -28,12 +28,12 @@ import argparse
 import torch
 import torch.distributed
 from functools import partial
-from transformers import AutoModelForCausalLM
-import pyrocshmem
+from transformers import AutoConfig
 
 import pyrocshmem
 import triton
 from triton_dist.layers.amd.tp_mlp import TP_MLP
+from triton_dist.models.utils import init_model_cpu
 from triton_dist.utils import perf_func, dist_print, group_profile
 
 THRESHOLD_MAP = {
@@ -133,7 +133,8 @@ if __name__ == "__main__":
     ATOL = THRESHOLD_MAP[DTYPE]
     RTOL = THRESHOLD_MAP[DTYPE]
 
-    hf_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=DTYPE)
+    config = AutoConfig.from_pretrained(args.model)
+    hf_model = init_model_cpu(model_name=args.model, dtype=DTYPE)
     hf_mlp = hf_model.model.layers[0].mlp.eval()
     mlp = TP_MLP(rank=RANK, world_size=WORLD_SIZE, group=TP_GROUP)
     mlp._init_parameters(hf_mlp, verbose=True)

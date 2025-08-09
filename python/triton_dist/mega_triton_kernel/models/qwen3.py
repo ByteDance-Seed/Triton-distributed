@@ -23,9 +23,10 @@
 #
 ################################################################################
 import torch
-from transformers import Qwen3ForCausalLM, Qwen3Config
+from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
 from triton_dist.models import ModelConfig
+from triton_dist.models.utils import init_model_cpu
 from .utils import prepare_cos_sin_cache
 from .layers import TPMLPBuilder, TPAttnBuilder
 from .paged_kv_cache import PagedKVCache
@@ -142,7 +143,7 @@ class Qwen3Model:
             torch.distributed.barrier()
 
     def init_parameters(self):
-        hf_model = Qwen3ForCausalLM.from_pretrained(self.model_name, torch_dtype=self.dtype)
+        hf_model = init_model_cpu(self.model_name, dtype=self.dtype)
         self.embed_tokens = hf_model.model.embed_tokens.weight.detach().cuda()
         self.lm_head = hf_model.lm_head.weight.detach().cuda()
         self.norm_weight = hf_model.model.norm.weight.detach().cuda()

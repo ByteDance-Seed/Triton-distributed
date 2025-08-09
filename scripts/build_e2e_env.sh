@@ -114,6 +114,8 @@ pip install --upgrade deepspeed
 
 # --- Define Hugging Face models to download ---
 MODELS=(
+  "Qwen/Qwen3-0.6B"
+  "Qwen/Qwen3-8B"
   "Qwen/Qwen3-32B"
   "Qwen/Qwen3-30B-A3B"
 )
@@ -158,6 +160,9 @@ if [ "$download_model" = true ]; then
 else
     echo "No Model download required. If you want to download model, add '--download_model' option."
 fi
+
+pip install accelerate
+pip uninstall triton -y
 
 # --- Final check ---
 if [[ $? -eq 0 ]]; then

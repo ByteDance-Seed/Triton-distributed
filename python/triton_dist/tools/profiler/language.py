@@ -50,6 +50,7 @@ def globaltimer_lo(_semantic=None):
         _semantic=_semantic,
     )
 
+
 @core.extern
 def smid(_semantic=None):
     return tl.inline_asm_elementwise(
@@ -61,6 +62,7 @@ def smid(_semantic=None):
         pack=1,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def membar(scope: core.constexpr = core.constexpr("cta"), _semantic=None):
@@ -76,6 +78,7 @@ def membar(scope: core.constexpr = core.constexpr("cta"), _semantic=None):
         pack=1,
         _semantic=_semantic,
     )
+
 
 @tl.core._aggregate
 class Profiler:

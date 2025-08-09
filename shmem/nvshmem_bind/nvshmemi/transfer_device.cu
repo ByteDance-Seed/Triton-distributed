@@ -136,14 +136,14 @@ extern "C" {
 #endif
 #define TRANSFER_DECL_RMA_SCOPE_IMPL(SCOPE, SC_SUFFIX, SC_PREFIX)              \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_rma_put##SC_SUFFIX(void *rptr, void *lptr, size_t bytes,   \
-                                       int pe) {                               \
+      nvshmemi_transfer_rma_put##SC_SUFFIX(void *rptr, void *lptr,             \
+                                           size_t bytes, int pe) {             \
     nvshmemi_transfer_rma<nvshmemi_threadgroup_##SCOPE, NVSHMEMI_OP_PUT>(      \
         rptr, lptr, bytes, pe);                                                \
   }                                                                            \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_rma_get##SC_SUFFIX(void *rptr, void *lptr, size_t bytes,   \
-                                       int pe) {                               \
+      nvshmemi_transfer_rma_get##SC_SUFFIX(void *rptr, void *lptr,             \
+                                           size_t bytes, int pe) {             \
     nvshmemi_transfer_rma<nvshmemi_threadgroup_##SCOPE, NVSHMEMI_OP_GET>(      \
         rptr, lptr, bytes, pe);                                                \
   }
@@ -155,14 +155,14 @@ TRANSFER_DECL_RMA_SCOPE_IMPL(block, _block, x)
 
 #define TRANSFER_DECL_RMA_SCOPE_IMPL(SCOPE, SC_SUFFIX, SC_PREFIX)              \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_rma_put_nbi##SC_SUFFIX(void *rptr, void *lptr,             \
-                                           size_t bytes, int pe) {             \
+      nvshmemi_transfer_rma_put_nbi##SC_SUFFIX(void *rptr, void *lptr,         \
+                                               size_t bytes, int pe) {         \
     nvshmemi_transfer_rma_nbi<nvshmemi_threadgroup_##SCOPE, NVSHMEMI_OP_PUT>(  \
         rptr, lptr, bytes, pe);                                                \
   }                                                                            \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_rma_nbi_get##SC_SUFFIX(void *rptr, void *lptr,             \
-                                           size_t bytes, int pe) {             \
+      nvshmemi_transfer_rma_nbi_get##SC_SUFFIX(void *rptr, void *lptr,         \
+                                               size_t bytes, int pe) {         \
     nvshmemi_transfer_rma_nbi<nvshmemi_threadgroup_##SCOPE, NVSHMEMI_OP_GET>(  \
         rptr, lptr, bytes, pe);                                                \
   }
@@ -174,16 +174,16 @@ TRANSFER_DECL_RMA_SCOPE_IMPL(block, _block, x)
 
 #define TRANSFER_DECL_RMA_SCOPE_IMPL(SCOPE, SC_SUFFIX, SC_PREFIX)              \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_put_signal##SC_SUFFIX(                                     \
-      void *rptr, void *lptr, size_t bytes, void *sig_addr, uint64_t signal,   \
-      nvshmemi_amo_t sig_op, int pe, bool is_nbi) {                            \
+      nvshmemi_transfer_put_signal##SC_SUFFIX(                                 \
+          void *rptr, void *lptr, size_t bytes, void *sig_addr,                \
+          uint64_t signal, nvshmemi_amo_t sig_op, int pe, bool is_nbi) {       \
     nvshmemi_transfer_put_signal<nvshmemi_threadgroup_##SCOPE>(                \
         rptr, lptr, bytes, sig_addr, signal, sig_op, pe, false);               \
   }                                                                            \
   NVSHMEMI_DEVICE_PREFIX NVSHMEMI_DEVICE_ALWAYS_INLINE void                    \
-  nvshmemi_transfer_put_signal_nbi##SC_SUFFIX(                                 \
-      void *rptr, void *lptr, size_t bytes, void *sig_addr, uint64_t signal,   \
-      nvshmemi_amo_t sig_op, int pe, bool is_nbi) {                            \
+      nvshmemi_transfer_put_signal_nbi##SC_SUFFIX(                             \
+          void *rptr, void *lptr, size_t bytes, void *sig_addr,                \
+          uint64_t signal, nvshmemi_amo_t sig_op, int pe, bool is_nbi) {       \
     nvshmemi_transfer_put_signal<nvshmemi_threadgroup_##SCOPE>(                \
         rptr, lptr, bytes, sig_addr, signal, sig_op, pe, true);                \
   }

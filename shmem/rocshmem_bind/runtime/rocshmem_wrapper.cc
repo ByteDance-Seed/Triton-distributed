@@ -31,9 +31,8 @@ __device__ int __attribute__((visibility("default"))) rocshmem_my_pe_wrapper() {
   return rocshmem_my_pe();
 }
 
-
-__device__ void __attribute__((visibility("default"))) rocshmem_set_rocshmem_ctx(
-  void *ctx) {
+__device__ void __attribute__((visibility("default")))
+rocshmem_set_rocshmem_ctx(void *ctx) {
   ROCSHMEM_CTX_DEFAULT.ctx_opaque = ctx;
 }
 
@@ -41,15 +40,13 @@ __device__ int __attribute__((visibility("default"))) rocshmem_n_pes_wrapper() {
   return rocshmem_n_pes();
 }
 
-__device__ void * __attribute__((visibility("default"))) rocshmem_ptr_wrapper(void *dest,
-                                                                     int pe) {
+__device__ void *__attribute__((visibility("default")))
+rocshmem_ptr_wrapper(void *dest, int pe) {
   return rocshmem_ptr(dest, pe);
 }
 
-__device__ void __attribute__((visibility("default"))) rocshmem_int_p_wrapper(
-    int *dest, int value, int pe) {
+__device__ void __attribute__((visibility("default")))
+rocshmem_int_p_wrapper(int *dest, int value, int pe) {
   rocshmem_int_p(dest, value, pe);
 }
-
 }
-

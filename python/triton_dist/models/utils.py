@@ -115,8 +115,50 @@ def init_model_cpu(model_name: str, dtype: torch.dtype):
                 model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype,
                                                          attn_implementation="flash_attention_2")
             model.to_empty(device="cuda")
-            model.init_weights()
+            # inv_freq = 1.0 / (config.rope_theta**(torch.arange(0, config.head_dim, 2) / config.head_dim))
+            if torch.cuda.is_available():
+                # TODO: fix the random initialization
+                #     def _reset_params_on_gpu(module):
+                #         if isinstance(module, (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d,
+                #                                torch.nn.ConvTranspose1d, torch.nn.ConvTranspose2d)):
+                #             module.weight.data.uniform_(0, 0.01)
+                #             if module.bias is not None:
+                #                 module.bias.data.zero_()
+                #         elif isinstance(module, torch.nn.Embedding):
+                #             module.weight.data.uniform_(0, 0.01)
+                #         elif (isinstance(
+                #                 module,
+                #             (torch.nn.GroupNorm, torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d))
+                #               or "LayerNorm" in module.__class__.__name__ or "RMSNorm" in module.__class__.__name__):
+                #             if hasattr(module, "weight") and module.weight is not None:
+                #                 module.weight.data.fill_(1.0)
+                #             if hasattr(module, "bias") and module.bias is not None:
+                #                 module.bias.data.zero_()
 
+                #     gpu_module = model.model.embed_tokens.to("cuda")
+                #     gpu_module.apply(_reset_params_on_gpu)
+                #     model.model.embed_tokens.load_state_dict(gpu_module.state_dict())
+                #     del gpu_module
+                #     gpu_block = model.model.layers[0].to("cuda")
+                #     for i, block in enumerate(model.model.layers):
+                #         gpu_block.apply(_reset_params_on_gpu)
+                #         block.load_state_dict(gpu_block.state_dict())
+                #     del gpu_block
+                #     if hasattr(model.model, 'norm') and model.model.norm is not None:
+                #         gpu_module = model.model.norm.to("cuda")
+                #         gpu_module.apply(_reset_params_on_gpu)
+                #         model.model.norm.load_state_dict(gpu_module.state_dict())
+                #         del gpu_module
+                #     if hasattr(model.model, 'lm_head') and model.model.lm_head is not None:
+                #         gpu_module = model.model.lm_head.to("cuda")
+                #         gpu_module.apply(_reset_params_on_gpu)
+                #         model.model.lm_head.load_state_dict(gpu_module.state_dict())
+                #         del gpu_module
+                model.init_weights()
+            else:
+                model.init_weights()
+
+            # model.model.rotary_emb.inv_freq = inv_freq
             return model
 
         else:

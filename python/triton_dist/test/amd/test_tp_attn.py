@@ -28,12 +28,12 @@ import argparse
 import torch
 import torch.distributed
 from functools import partial
-from transformers import AutoModelForCausalLM
-import pyrocshmem
+from transformers import AutoConfig
 
 import pyrocshmem
 from triton_dist.layers.amd.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
+from triton_dist.models.utils import init_model_cpu
 from triton_dist.utils import perf_func, dist_print, group_profile
 
 THRESHOLD_MAP = {
@@ -128,11 +128,11 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    
+
     num_ranks = torch.distributed.get_world_size()
     rank_id = torch.distributed.get_rank()
 
-    if rank_id==0:
+    if rank_id == 0:
         uid = pyrocshmem.rocshmem_get_uniqueid()
         bcast_obj = [uid]
     else:
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
-    
+
     torch.cuda.synchronize()
     torch.distributed.barrier()
 
@@ -154,8 +154,8 @@ if __name__ == "__main__":
     RTOL = THRESHOLD_MAP[DTYPE]
     MODE = args.mode
 
-    hf_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=DTYPE,
-                                                    attn_implementation="flash_attention_2")
+    config = AutoConfig.from_pretrained(args.model)
+    hf_model = init_model_cpu(model_name=args.model, dtype=DTYPE)
     hf_attn = hf_model.model.layers[0].self_attn.eval()
     attn = TP_Attn(rank=RANK, world_size=WORLD_SIZE, group=TP_GROUP)
     cos_sin_cache = _set_cos_sin_cache(hf_model.model.rotary_emb.inv_freq.cuda(), max_length=args.seq_len + 128)

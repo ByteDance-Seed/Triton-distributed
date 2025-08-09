@@ -71,6 +71,7 @@ def test_rocshmem_basic():
     else:
         print(f"✅ _rocshmem_basic #{mype} pass")
 
+
 def test_rocshmem_memcpy():
     print("**rocshmem memcpy start!")
 
@@ -115,6 +116,7 @@ def test_rocshmem_memcpy():
         raise (e)
     else:
         print(f"✅ _rocshmem_basic #{mype} - Check tensor_list pass")
+
 
 def parse_args():
     parser = argparse.ArgumentParser()

@@ -66,9 +66,9 @@ extensions = [
 ]
 
 sphinx_gallery_conf = {
-    'examples_dirs': 'examples',   
-    'gallery_dirs': 'auto_examples',  
-    'thumbnail_size': (250, 250), 
+    'examples_dirs': 'examples',
+    'gallery_dirs': 'auto_examples',
+    'thumbnail_size': (250, 250),
     'run_stale_examples': False,
 }
 

@@ -33,9 +33,6 @@ import numpy as np
 from functools import partial
 import pyrocshmem
 
-from hip import hip
-
-import pyrocshmem
 from triton_dist.utils import (generate_data, get_torch_prof_ctx, perf_func, dist_print)
 from triton_dist.kernels.amd import ag_gemm_intra_node, create_ag_gemm_intra_node_context
 
@@ -198,7 +195,7 @@ if __name__ == "__main__":
     num_ranks = torch.distributed.get_world_size()
     rank_id = torch.distributed.get_rank()
 
-    if rank_id==0:
+    if rank_id == 0:
         uid = pyrocshmem.rocshmem_get_uniqueid()
         bcast_obj = [uid]
     else:
@@ -208,7 +205,7 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
-    
+
     torch.cuda.synchronize()
     torch.distributed.barrier()
     pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
@@ -263,7 +260,7 @@ if __name__ == "__main__":
     if args.profile:
         # run_id = os.environ["TORCHELASTIC_RUN_ID"]
         run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
-        prof_dir = f"prof_ag_gemm_rshmem"
+        prof_dir = "prof_ag_gemm_rshmem"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 

@@ -31,7 +31,7 @@ from setuptools.command.sdist import sdist
 
 import pybind11
 
-from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, softlink_apply_patches, copy_file
+from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, copy_file
 
 from setuptools.command.build_ext import build_ext
 

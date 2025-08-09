@@ -41,8 +41,6 @@ from triton_dist.utils import (
     dist_print,
 )
 
-import pyrocshmem
-
 from triton_dist.kernels.amd import gemm_rs_intra_node, create_gemm_rs_intra_node_context
 
 
@@ -181,7 +179,7 @@ if __name__ == "__main__":
     num_ranks = torch.distributed.get_world_size()
     rank_id = torch.distributed.get_rank()
 
-    if rank_id==0:
+    if rank_id == 0:
         uid = pyrocshmem.rocshmem_get_uniqueid()
         bcast_obj = [uid]
     else:
@@ -191,7 +189,7 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
-    
+
     torch.cuda.synchronize()
     torch.distributed.barrier()
     pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)

@@ -43,6 +43,8 @@ prof
 triton_aot_generated
 rank-*.log
 python/*.egg-info
+shmem/rocshmem_build
+shmem/rocshmem_bind/pyrocshmem/.eggs/*
 shmem/rocshmem_bind/runtime/*.o
 shmem/rocshmem_bind/rocshmem_build
 shmem/rocshmem_bind/ompi_build
@@ -54,6 +56,9 @@ build
 python/triton_dist/_C/*.so
 python/triton_dist/*nvshmem
 python/triton_dist/_C/*nvshmem
+
+hf_configs*
+*.whl
 
 # conflicts
 temp_conflicts

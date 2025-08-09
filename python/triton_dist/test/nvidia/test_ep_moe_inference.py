@@ -450,7 +450,8 @@ class DistributedMoELayer:
         splits, recv_buf, scale_buf = fast_all_to_all(self.all2all_ctx, local_out, input_splits_cumsum, scale)
         combined_tokens, combined_scale = all_to_all_post_process(self.all2all_ctx, splits, recv_buf, scale_buf)
         # 3.1. reduce: [num_tokens_local_rank * topk] => [num_tokens_local_rank]
-        combine_reduced_out = torch.zeros((input.shape[0] // self.topk, input.shape[1]), dtype=input.dtype, device=input.device)
+        combine_reduced_out = torch.zeros((input.shape[0] // self.topk, input.shape[1]), dtype=input.dtype,
+                                          device=input.device)
         combine_reduced_out.index_add_(0, gather_idx_cur_rank, combined_tokens)
 
         return combine_reduced_out
