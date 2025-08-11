@@ -44,7 +44,6 @@ ROCSHMEM_TEAM_INVALID = -1
 ROCSHMEM_TEAM_WORLD = 0
 
 
-# symm_rocshmem_buffer
 class SymmRocShmemBuffer:
 
     def __init__(self, ptr, nbytes, dtype: torch.dtype, own_data: bool = True):

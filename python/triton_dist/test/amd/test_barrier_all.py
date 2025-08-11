@@ -64,24 +64,6 @@ def get_torch_prof_ctx(do_prof: bool):
     return ctx
 
 
-def create_tensor_ipc(shape, dtype):
-    input_buffer = torch.zeros(shape, dtype=dtype, device=torch.cuda.current_device(), requires_grad=False)
-    input_buffer_offset = input_buffer.storage_offset()
-    shm_handle = input_buffer._typed_storage()._share_cuda_()[1]  # cudaIpcMemHandle_t
-    shm_handle = shm_handle[2:]  # skip first two bytes for rocm backend
-    shm_offset = input_buffer._typed_storage()._share_cuda_()[3]
-    shm_handle_ts_cuda = torch.ByteTensor(torch.ByteStorage._from_buffer(shm_handle)).cuda()
-    shm_handles = [torch.empty_like(shm_handle_ts_cuda) for _ in range(WORLD_SIZE)]
-    torch.distributed.all_gather(shm_handles, shm_handle_ts_cuda, group=TP_GROUP)
-    offset_value = shm_offset + input_buffer_offset
-    offset_list = [None for _ in range(WORLD_SIZE)]
-    torch.distributed.all_gather_object(offset_list, offset_value, group=TP_GROUP)
-    shm_buffers = pyrocshmem.rocshmem_get_tensors_from_ipchandle(LOCAL_RANK, WORLD_SIZE, shm_handles, offset_list,
-                                                                 input_buffer.shape, dtype)
-    shm_buffers.insert(LOCAL_RANK, input_buffer)
-    return shm_buffers
-
-
 @triton.jit
 def barrier_all(rank, num_ranks, comm_buf_base_ptrs):
     tid = libdevice.thread_idx(axis=0)  # noqa: F841
@@ -115,11 +97,13 @@ def barrier_all2(rank, num_ranks, comm_buf_base_ptrs, zero_ptr, one_ptr):
 
 
 if __name__ == "__main__":
+    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
+
     profile = True
     torch.cuda.set_device(LOCAL_RANK)
     torch.cuda.synchronize()
     dtype = torch.float16
-    signals = create_tensor_ipc([
+    signals = pyrocshmem.rocshmem_create_tensor_list_intra_node([
         WORLD_SIZE,
     ], torch.int32)
     if LOCAL_RANK % 4 == 0:
@@ -153,4 +137,5 @@ if __name__ == "__main__":
     dist.barrier()
     print("after sync:", signals[LOCAL_RANK])
 
+    pyrocshmem.rocshmem_finalize()
     dist.destroy_process_group()

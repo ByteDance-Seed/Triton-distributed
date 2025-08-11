@@ -31,7 +31,6 @@ ROCSHMEM_TEAM_INVALID = -1
 ROCSHMEM_TEAM_WORLD = 0
 
 
-# FIXME: class SymmHeap:
 class symm_rocshmem_buffer:
 
     def __init__(self, nbytes: int):
@@ -95,7 +94,6 @@ def rocshmem_get_uniqueid() -> bytes:
     ...
 
 
-# def rocshmem_init_attr_with_uniqueid(rank: np.int32, nranks: np.int32, unique_id: bytes) -> None:
 def rocshmem_init_attr(rank: np.int32, nranks: np.int32,
                        unique_id: bytes) -> None:
     ...
