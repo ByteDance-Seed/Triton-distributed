@@ -59,18 +59,48 @@ def hip_check(call_result):
 
 def test_rocshmem_device():
     @triton.jit
-    def _rocshmem_device(comm_buf, ctx):
+    def _rocshmem_device(comm_buf, ctx, ptr):
         libshmem_device.set_rocshmem_ctx(ctx)
 
         mype = dl.rank()
         npes = dl.num_ranks()
 
-        # mype = libshmem_device.my_pe()
-        # npes = libshmem_device.n_pes()
+        libshmem_device.test_func(comm_buf)
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
         peer = (mype + 1) % npes
         tl.store(comm_buf, mype)
         comm_buf+=1
         tl.store(comm_buf, npes)
+    
+    @triton.jit
+    def _rocshmem_put(ptr,ctx):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+
+        libshmem_device.int_p(ptr, mype, peer)
+
+    @triton.jit
+    def _rocshmem_put_symm_at(buf, ptr,ctx):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+        num_blocks = tl.num_programs(axis=0)
+        start_id = tl.program_id(axis=0)
+        # remote_ptr = dl.symm_at(ptr, peer)
+        remote_ptr = libshmem_device.remote_ptr(ptr, peer)
+        for i in range (1, npes):
+            src_rank = (mype + i) % npes
+            rank_offset = src_rank * 4
+            boffset = start_id + tl.arange(0, 4)
+            val = tl.load(remote_ptr + rank_offset+ boffset)
+            tl.store(buf +rank_offset + boffset, val)
     
     print("**test_rocshmem_device start!")
 
@@ -82,7 +112,7 @@ def test_rocshmem_device():
     ctx = pyrocshmem.rocshmem_get_device_ctx()
     comm_buf = pyrocshmem.rocshmem_create_tensor((2,), torch.int32)
     torch.cuda.synchronize()
-    _rocshmem_device[(1, )](comm_buf, ctx)
+    _rocshmem_device[(1, )](comm_buf, ctx, comm_buf.data_ptr())
 
     torch.cuda.synchronize()
     torch.distributed.barrier()
@@ -99,6 +129,39 @@ def test_rocshmem_device():
         raise (e)
     else:
         print(f"✅ _rocshmem_device #{mype} pass")
+
+    # comm_buf.zero_()
+    put_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
+    torch.cuda.synchronize()
+    # _rocshmem_put[(1, )](put_buf.data_ptr(), ctx)
+    _rocshmem_put[(1, )](put_buf, ctx)
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    
+    print(f"put_buf from pe#{mype}: {put_buf}")
+    
+    # nelems_per_rank = 4
+    # n_elements = npes*nelems_per_rank
+    # dtype = torch.int32
+
+    # put_bufs = pyrocshmem.rocshmem_create_tensor((n_elements,), torch.int32)
+    # ref_tensor = torch.arange(n_elements, dtype=dtype).cuda()
+    # put_bufs[nelems_per_rank * mype : nelems_per_rank *(mype+1)].copy_(ref_tensor[nelems_per_rank * mype : nelems_per_rank *(mype+1)])
+    # torch.cuda.synchronize()
+    # torch.distributed.barrier()    
+    # _rocshmem_put_symm_at[(1, )](put_bufs, put_bufs.data_ptr(), ctx)
+    # torch.cuda.synchronize()
+    # torch.distributed.barrier()
+
+    # print(f"put_buf remote_ptr from pe#{mype}: {put_bufs}")
+
+    # try:
+    #     torch.testing.assert_close(put_bufs, ref_tensor, atol=0, rtol=0)
+    # except Exception as e:
+    #     print(f"❌ RANK[{mype}] check failed")
+    #     raise e
+    # else:
+    #     print(f"✅ RANK[{mype}] check passed")
 
 def test_rocshmem_basic():
     @triton.jit

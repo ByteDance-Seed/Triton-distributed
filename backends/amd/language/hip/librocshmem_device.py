@@ -23,7 +23,6 @@
 #
 ################################################################################
 from triton.language import core
-from triton_dist.language import core as dist_core
 import triton.language as tl
 from triton_dist.language.core import extern_call
 import sys
@@ -38,6 +37,22 @@ def set_rocshmem_ctx(ctx, _semantic=None):
         ],
         {(tl.pointer_type(tl.void), ): (
              "rocshmem_set_rocshmem_ctx",()
+         ),},
+        is_pure=False,
+        _semantic=_semantic,
+    )
+void_ptr = core.pointer_type(core.void)
+
+@core.extern
+def test_func(ptr, _semantic=None):
+    return extern_call(
+        "librocshmem_device",
+        "",
+        [
+            tl.cast(ptr, tl.pointer_type(tl.void), _semantic=_semantic),
+        ],
+        {(tl.pointer_type(tl.void), ): (
+             "rocshmem_test_func",()
          ),},
         is_pure=False,
         _semantic=_semantic,
