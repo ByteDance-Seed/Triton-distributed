@@ -44,21 +44,6 @@ def set_rocshmem_ctx(ctx, _semantic=None):
 void_ptr = core.pointer_type(core.void)
 
 @core.extern
-def test_func(ptr, _semantic=None):
-    return extern_call(
-        "librocshmem_device",
-        "",
-        [
-            tl.cast(ptr, tl.pointer_type(tl.void), _semantic=_semantic),
-        ],
-        {(tl.pointer_type(tl.void), ): (
-             "rocshmem_test_func",()
-         ),},
-        is_pure=False,
-        _semantic=_semantic,
-    )
-
-@core.extern
 def my_pe(_semantic=None):
     return extern_call(
         "librocshmem_device",

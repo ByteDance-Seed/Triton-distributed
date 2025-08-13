@@ -38,13 +38,6 @@ __device__ void __attribute__((visibility("default"))) rocshmem_set_rocshmem_ctx
   ROCSHMEM_CTX_DEFAULT.ctx_opaque = ctx;
 }
 
-
-__device__ void __attribute__((visibility("default"))) rocshmem_test_func(
-  int *ptr) {
-  test_func(ptr);
-}
-
-
 __device__ int __attribute__((visibility("default"))) rocshmem_n_pes_wrapper() {
   return rocshmem_n_pes();
 }
