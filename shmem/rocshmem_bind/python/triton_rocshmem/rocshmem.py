@@ -33,25 +33,25 @@ def patch_triton_module(func):
 ## TODO: add inline asm for rocshmem
 
 
-@patch_triton_module
-@core.extern
-def rocshmem_ptr_wrapper(dest, pe, _builder=None):
-    return core.inline_asm_elementwise()
+# @patch_triton_module
+# @core.extern
+# def rocshmem_ptr_wrapper(dest, pe, _builder=None):
+#     return core.inline_asm_elementwise()
 
 
-@patch_triton_module
-@core.extern
-def rocshmem_my_pe_wrapper(_builder=None):
-    return core.inline_asm_elementwise()
+# @patch_triton_module
+# @core.extern
+# def rocshmem_my_pe_wrapper(_builder=None):
+#     return core.inline_asm_elementwise()
 
 
-@patch_triton_module
-@core.extern
-def rocshmem_n_pes_wrapper(_builder=None):
-    return core.inline_asm_elementwise()
+# @patch_triton_module
+# @core.extern
+# def rocshmem_n_pes_wrapper(_builder=None):
+#     return core.inline_asm_elementwise()
 
 
-@patch_triton_module
-@core.extern
-def rocshmem_int_wait_until_wrapper(_builder=None):
-    return core.inline_asm_elementwise()
+# @patch_triton_module
+# @core.extern
+# def rocshmem_int_wait_until_wrapper(_builder=None):
+#     return core.inline_asm_elementwise()
