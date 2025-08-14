@@ -48,6 +48,9 @@ import random
 
 from triton_dist.utils import (get_torch_prof_ctx)
 
+from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
+
+
 def hip_check(call_result):
     err = call_result[0]
     result = call_result[1:]
@@ -82,21 +85,20 @@ def test_rocshmem_device():
         libshmem_device.int_p(ptr, mype, peer)
 
     @triton.jit
-    def _rocshmem_put_symm_at(buf, ctx):
+    def _rocshmem_get_put_symm_at(local_ptr, ctx):
         libshmem_device.set_rocshmem_ctx(ctx)
 
         mype = libshmem_device.my_pe()
         npes = libshmem_device.n_pes()
-        peer = (mype + 1) % npes
-        start_id = tl.program_id(axis=0)
-        remote_ptr = dl.symm_at(buf, peer)
+        pid = tl.program_id(axis=0)
+        boffset = pid + tl.arange(0, 4)
 
         for i in range (1, npes):
             src_rank = (mype + i) % npes
+            remote_ptr = dl.symm_at(local_ptr, src_rank)
             rank_offset = src_rank * 4
-            boffset = start_id + tl.arange(0, 4)
-            val = tl.load(remote_ptr + rank_offset+ boffset)
-            tl.store(buf +rank_offset + boffset, val)
+            val = tl.load(remote_ptr + rank_offset + boffset)
+            tl.store(local_ptr + rank_offset + boffset, val)
     
     print("**test_rocshmem_device start!")
 
@@ -126,15 +128,14 @@ def test_rocshmem_device():
     else:
         print(f"✅ _rocshmem_device #{mype} pass")
 
-    # comm_buf.zero_()
-    # put_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
-    # torch.cuda.synchronize()
-    # # _rocshmem_put[(1, )](put_buf.data_ptr(), ctx)
-    # _rocshmem_put[(1, )](put_buf, ctx)
-    # torch.cuda.synchronize()
-    # torch.distributed.barrier()
+    comm_buf.zero_()
+    put_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
+    torch.cuda.synchronize()
+    _rocshmem_put[(1, )](put_buf, ctx)
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
     
-    # print(f"put_buf from pe#{mype}: {put_buf}")
+    print(f"put_buf from pe#{mype}: {put_buf}")
     
     nelems_per_rank = 4
     n_elements = npes*nelems_per_rank
@@ -145,7 +146,7 @@ def test_rocshmem_device():
     put_bufs[nelems_per_rank * mype : nelems_per_rank *(mype+1)].copy_(ref_tensor[nelems_per_rank * mype : nelems_per_rank *(mype+1)])
     torch.cuda.synchronize()
     torch.distributed.barrier()    
-    _rocshmem_put_symm_at[(1, )](put_bufs, ctx)
+    _rocshmem_get_put_symm_at[(1, )](put_bufs, ctx)
     torch.cuda.synchronize()
     torch.distributed.barrier()
 

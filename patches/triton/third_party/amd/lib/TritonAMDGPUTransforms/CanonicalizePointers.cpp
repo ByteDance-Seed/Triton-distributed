@@ -1670,8 +1670,9 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
       MaterializeFatPointerVariadic<tt::CallOp>,
       MaterializeFatPointerVariadic<tt::ExternElementwiseOp>,
       MaterializeFatPointerVariadic<tt::ElementwiseInlineAsmOp>,
-      MaterializeFatPointerVariadic<tt::PrintOp>, ConvertSCFForOp,
-      ConvertExpandDims, ConvertSCFYieldOp, ConvertSCFIfOp,
+      MaterializeFatPointerVariadic<tt::PrintOp>,
+      MaterializeFatPointerVariadic<triton::distributed::ExternCallOp>,
+      ConvertSCFForOp, ConvertExpandDims, ConvertSCFYieldOp, ConvertSCFIfOp,
       ConvertSCFConditionOp, ConvertSCFWhileOp, ConvertCFCondBranch,
       ConvertCFBranch, ConvertArithSelectOp, ConvertReturnOp>(
       patterns.getContext(), opsToRewrite, fatPrs);
