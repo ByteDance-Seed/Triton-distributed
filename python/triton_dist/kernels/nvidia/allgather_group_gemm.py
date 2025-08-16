@@ -197,6 +197,57 @@ def calc_sorted_gather_index(
     return sorted_pad_gather_index, ntokens_by_rank_by_expert
 
 
+def sort_topk_ids_align_block_size(
+    topk_ids: torch.Tensor,  # [ntokens, topk]
+    num_experts: int,
+    rank: int,
+    num_ranks: int,
+    num_local_ranks: int,
+    block_size: int,
+):
+    sorted_gather_index, ntokens_by_rank_by_expert = calc_sorted_gather_index(topk_ids, num_ranks, num_experts,
+                                                                              block_size)
+    ntokens, topk = topk_ids.shape
+    #  maybe a little more than needed, but never mind
+    ntiles_pad_approx = triton.cdiv(ntokens * topk, block_size) + num_experts
+
+    expert_idx = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
+    tile_index = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
+    segment_start = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
+    segment_end = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
+    ntiles_pad_gpu = torch.empty((1, ), dtype=torch.int32, device="cuda")
+
+    ntokens_by_expert_by_rank_acc = torch.empty((num_experts, num_ranks), dtype=torch.int32, device="cuda")
+    ntiles_by_expert_acc = torch.empty((num_experts, ), dtype=torch.int32, device="cuda")
+    ntiles_by_expert_by_stage = torch.empty((num_experts, num_ranks), dtype=torch.int32,
+                                            device="cuda")  # this will be used as counter. zero before use.
+    ntiles_by_expert_by_stage_acc = torch.empty((num_experts, num_ranks), dtype=torch.int32, device="cuda")
+
+    threadblock_swizzle_ag_moe_kernel[(1, )](
+        ntokens_by_rank_by_expert,
+        # output
+        expert_idx,
+        tile_index,
+        segment_start,
+        segment_end,
+        ntiles_pad_gpu,
+        # workspace buffer
+        ntokens_by_expert_by_rank_acc,
+        ntiles_by_expert_acc,
+        ntiles_by_expert_by_stage,
+        ntiles_by_expert_by_stage_acc,
+        rank,
+        num_experts,
+        num_ranks,
+        num_local_ranks,
+        triton.next_power_of_2(ntiles_pad_approx),
+        BLOCK_SIZE_M=block_size,
+        DEBUG=False,
+    )
+
+    return sorted_gather_index, expert_idx, tile_index, segment_start, segment_end, ntiles_pad_gpu
+
+
 @dataclass
 class MoEAllGatherGroupGEMMTensorParallelContext:
     # problem size
@@ -255,57 +306,6 @@ class MoEAllGatherGroupGEMMTensorParallelContext:
     def finalize(self):
         nvshmem_free_tensor_sync(self.symm_barrier)
         nvshmem_free_tensor_sync(self.symm_workspace)
-
-    @staticmethod
-    def sort_topk_ids_align_block_size(
-        topk_ids: torch.Tensor,  # [ntokens, topk]
-        num_experts: int,
-        rank: int,
-        num_ranks: int,
-        num_local_ranks: int,
-        block_size: int,
-    ):
-        sorted_gather_index, ntokens_by_rank_by_expert = calc_sorted_gather_index(topk_ids, num_ranks, num_experts,
-                                                                                  block_size)
-        ntokens, topk = topk_ids.shape
-        #  maybe a little more than needed, but never mind
-        ntiles_pad_approx = triton.cdiv(ntokens * topk, block_size) + num_experts
-
-        expert_idx = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
-        tile_index = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
-        segment_start = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
-        segment_end = torch.empty((ntiles_pad_approx, ), dtype=torch.int32, device="cuda")
-        ntiles_pad_gpu = torch.empty((1, ), dtype=torch.int32, device="cuda")
-
-        ntokens_by_expert_by_rank_acc = torch.empty((num_experts, num_ranks), dtype=torch.int32, device="cuda")
-        ntiles_by_expert_acc = torch.empty((num_experts, ), dtype=torch.int32, device="cuda")
-        ntiles_by_expert_by_stage = torch.empty((num_experts, num_ranks), dtype=torch.int32,
-                                                device="cuda")  # this will be used as counter. zero before use.
-        ntiles_by_expert_by_stage_acc = torch.empty((num_experts, num_ranks), dtype=torch.int32, device="cuda")
-
-        threadblock_swizzle_ag_moe_kernel[(1, )](
-            ntokens_by_rank_by_expert,
-            # output
-            expert_idx,
-            tile_index,
-            segment_start,
-            segment_end,
-            ntiles_pad_gpu,
-            # workspace buffer
-            ntokens_by_expert_by_rank_acc,
-            ntiles_by_expert_acc,
-            ntiles_by_expert_by_stage,
-            ntiles_by_expert_by_stage_acc,
-            rank,
-            num_experts,
-            num_ranks,
-            num_local_ranks,
-            triton.next_power_of_2(ntiles_pad_approx),
-            BLOCK_SIZE_M=block_size,
-            DEBUG=False,
-        )
-
-        return sorted_gather_index, expert_idx, tile_index, segment_start, segment_end, ntiles_pad_gpu
 
     def copy_and_reset_and_barrier_all(self, local_data):
         M_per_rank = local_data.shape[0]
@@ -437,7 +437,7 @@ def rowise_ag_scatter_group_gemm_dispatcher(a,  # local tensor
                                                  ctx.rank, ctx.num_local_ranks, ctx.num_ranks, ctx.ag_intranode_stream,
                                                  ctx.ag_internode_stream, all_gather_method=ctx.all_gather_method)
 
-    sorted_gather_index, expert_idx, tiled_m, segment_start, segment_end, ntiles_gpu = ctx.sort_topk_ids_align_block_size(
+    sorted_gather_index, expert_idx, tiled_m, segment_start, segment_end, ntiles_gpu = sort_topk_ids_align_block_size(
         full_topk_ids,
         ctx.num_experts,
         ctx.rank,
@@ -606,3 +606,132 @@ def kernel_consumer_m_parallel_scatter_group_gemm(
     c_ptrs = (c_ptr + offs_token[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+@triton.jit
+def moe_grouped_gemm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tiled_m_ptr,
+    ntiles_pad_ptr,
+    M,  # M = ntokens_per_rank * WORLD_SIZE
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    TOP_K: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    ntiles_pad = tl.load(ntiles_pad_ptr)
+    num_block_n = tl.cdiv(N, BLOCK_SIZE_N)
+    npid = tl.num_programs(axis=0)
+    num_block_m = npid // num_block_n
+
+    pid_m, pid_n = swizzle_2d(pid, num_block_m, num_block_n, GROUP_SIZE_M)
+
+    if pid_m >= ntiles_pad:
+        return
+
+    tiled_m = tl.load(tiled_m_ptr + pid_m)
+    offs_token_id = tiled_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    token_mask = (offs_token < M) & (offs_token >= 0)
+
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = (a_ptr + offs_token[:, None] // TOP_K * stride_am + offs_k[None, :] * stride_ak)
+
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_be = tl.load(expert_ids_ptr + pid_m)
+    __syncthreads()
+
+    b_ptrs = (b_ptr + offs_be * stride_be + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    __syncthreads()
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K))
+        b = tl.load(b_ptrs, mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K))
+
+        accumulator += tl.dot(a, b)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = (c_ptr + offs_token[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+def run_moe_ag_triton_non_overlap(x_shard: torch.Tensor, weights: torch.Tensor, chosen_experts: torch.Tensor):
+
+    # gather x
+    M_per_rank, K = x_shard.shape
+    M = M_per_rank * torch.distributed.get_world_size()
+    x = torch.empty(
+        (M, K),
+        dtype=x_shard.dtype,
+        device=x_shard.device,
+    )
+    N_per_rank = weights.shape[-1]
+    rank = torch.distributed.get_rank()
+    num_ranks = torch.distributed.get_world_size()
+    torch.distributed.all_gather_into_tensor(x, x_shard, async_op=False)
+    num_experts = weights.shape[0]
+    topk = chosen_experts.shape[1]
+    sorted_gather_index, expert_idx, tiled_m, segment_start, segment_end, ntiles_gpu = sort_topk_ids_align_block_size(
+        chosen_experts,
+        num_experts,
+        rank,
+        num_ranks,
+        num_ranks,
+        128,
+    )
+
+    grouped_gemm_out = torch.empty(
+        (M * topk, N_per_rank),
+        dtype=x.dtype,
+        device=torch.cuda.current_device(),
+    )
+    grid = lambda META: ((triton.cdiv(M * topk, META["BLOCK_SIZE_M"]) + num_experts - 1) * triton.cdiv(
+        N_per_rank, META["BLOCK_SIZE_N"]), )
+    moe_grouped_gemm_kernel[grid](
+        x,
+        weights,
+        grouped_gemm_out,
+        sorted_gather_index,
+        expert_idx,
+        tiled_m,
+        ntiles_gpu,
+        M * topk,
+        N_per_rank,
+        K,
+        x.stride(0),
+        x.stride(1),
+        weights.stride(0),
+        weights.stride(1),
+        weights.stride(2),
+        grouped_gemm_out.stride(0),
+        grouped_gemm_out.stride(1),
+        BLOCK_SIZE_M=128,
+        BLOCK_SIZE_N=256,
+        BLOCK_SIZE_K=64,
+        GROUP_SIZE_M=8,
+        TOP_K=topk,
+        num_stages=3,
+        num_warps=8,
+    )
+
+    return grouped_gemm_out

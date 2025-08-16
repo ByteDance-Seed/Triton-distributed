@@ -28,11 +28,8 @@ import os
 import triton
 import torch
 from triton_dist.autotuner import contextual_autotune
-from triton_dist.kernels.nvidia import (create_moe_rs_context)
-from triton_dist.kernels.nvidia.comm_perf_model import estimate_reduce_scatter_time_ms, get_nic_gbps_per_gpu
-from triton_dist.kernels.nvidia.gemm_perf_model import get_dram_gbps, get_tensorcore_tflops
-from triton_dist.kernels.nvidia.moe_reduce_rs import run_moe_reduce_rs, run_moe_reduce_rs_triton_non_overlap
-from triton_dist.utils import dist_print, finalize_distributed, get_intranode_max_speed, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async
+from triton_dist.kernels.nvidia.moe_reduce_ar import run_moe_reduce_ar_triton_non_overlap, run_moe_reduce_ar, create_moe_ar_context
+from triton_dist.utils import dist_print, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async, finalize_distributed
 
 
 def create_rand_tensor(rank, shape, dtype=torch.float16, device="cuda"):
@@ -56,38 +53,11 @@ def select_experts(pg: torch.distributed.ProcessGroup, num_ranks: int, topk: int
 THRESHOLD_MAP = {torch.float16: (1e-2, 1e-2), torch.bfloat16: (1e-2, 1e-2)}
 
 
-def print_sol_time_estimate(M, K, N, E, topk, dtype, WORLD_SIZE, LOCAL_WORLD_SIZE):
-    K_per_rank = K // WORLD_SIZE
-    flops_per_rank = 2 * M * K * N * topk // WORLD_SIZE
-    tflops = get_tensorcore_tflops(dtype)
-    tensorcore_ms = flops_per_rank / tflops / 1e9
-    dram_gbps = get_dram_gbps()
-    memory_read_per_rank = M * K_per_rank * dtype.itemsize + N * K_per_rank * E * dtype.itemsize
-    memory_write_per_rank = M * N * dtype.itemsize
-    memory_read_ms = memory_read_per_rank / 1e6 / dram_gbps
-    memory_write_ms = memory_write_per_rank / 1e6 / dram_gbps
-    moe_sol_ms = max(tensorcore_ms, memory_read_ms + memory_write_ms)
-    print("  MOE perf estimate")
-    print(f"   TensorCore: {flops_per_rank/1e12:0.2f} TFLOPs {tensorcore_ms:0.2f} ms expected")
-    print(f"   Memory read: {memory_read_per_rank/1e9:0.2f} GB, {memory_read_ms:0.2f} ms expected")
-    print(f"   Memory write: {memory_write_per_rank/1e9:0.2f} GB, {memory_write_ms:0.2f} ms expected")
-    print(f"   SOL time: {moe_sol_ms:0.2f} ms")
-    print("  ReduceScatter perf estimate")
-    intranode_bw = get_intranode_max_speed()
-    internode_bw = get_nic_gbps_per_gpu()
-    reduce_scatter_sol_ms = estimate_reduce_scatter_time_ms(M * N * dtype.itemsize, WORLD_SIZE, LOCAL_WORLD_SIZE,
-                                                            intranode_bw, internode_bw)
-    print(f"   SOL time: {reduce_scatter_sol_ms:0.2f} ms")
-    print(f" MOE+RS SOL time: {max(reduce_scatter_sol_ms, moe_sol_ms):0.2f} ms")
-
-
-def moe_reduce_rs_torch(x: torch.Tensor, w: torch.Tensor, chosen_experts: torch.Tensor, expert_weight: torch.Tensor,
+def moe_reduce_ar_torch(x: torch.Tensor, w: torch.Tensor, chosen_experts: torch.Tensor, expert_weight: torch.Tensor,
                         pg: torch.distributed.ProcessGroup):
     M, _ = x.shape
     ntokens, topk = expert_weight.shape
     num_experts, _, hidden_dim = w.shape
-    world_size = pg.size()
-    ntokens_per_rank = ntokens // world_size
     assert ntokens * topk == M
     assert x.shape[1] == w.shape[1]
     grouped_gemm_out = torch.zeros((M, hidden_dim), dtype=x.dtype, device="cuda")
@@ -98,12 +68,11 @@ def moe_reduce_rs_torch(x: torch.Tensor, w: torch.Tensor, chosen_experts: torch.
         if mask.sum():
             grouped_gemm_out[mask] = (x[mask] @ w[i]) * expert_weight[mask, None]
     out_reduce_topk = torch.sum(grouped_gemm_out.reshape(ntokens, topk, hidden_dim), dim=1, keepdim=False)
-    out_rs = torch.zeros((ntokens_per_rank, hidden_dim), dtype=x.dtype, device="cuda")
-    torch.distributed.reduce_scatter_tensor(out_rs, out_reduce_topk, group=pg)
-    return out_rs
+    torch.distributed.all_reduce(out_reduce_topk)
+    return out_reduce_topk
 
 
-class MoEReduceRSTensorParallel(torch.nn.Module):
+class MoEReduceARTensorParallel(torch.nn.Module):
 
     def __init__(
         self,
@@ -116,7 +85,7 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
         max_token_num: int = 16 * 1024,
         input_dtype=torch.float16,
     ):
-        super(MoEReduceRSTensorParallel, self).__init__()
+        super(MoEReduceARTensorParallel, self).__init__()
         self.pg = pg
         self.rank = pg.rank()
         self.world_size = pg.size()
@@ -134,7 +103,7 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
 
         self.input_dtype = input_dtype
 
-        self.ctx = create_moe_rs_context(
+        self.ctx = create_moe_ar_context(
             self.rank,
             self.world_size,
             self.local_world_size,
@@ -152,7 +121,7 @@ class MoEReduceRSTensorParallel(torch.nn.Module):
         chosen_experts: torch.Tensor,
         expert_weight: torch.Tensor,
     ):
-        output = run_moe_reduce_rs(
+        output = run_moe_reduce_ar(
             x,
             w,
             chosen_experts,
@@ -191,14 +160,14 @@ if __name__ == "__main__":
             for s in [3, 4]
             for w in [4, 8]
         ]
-        from triton_dist.kernels.nvidia import moe_reduce_rs
-        moe_reduce_rs.moe_gather_rs_grouped_gemm_kernel = triton.autotune(configs=configs, key=["M", "N", "K"])(
-            moe_reduce_rs.moe_gather_rs_grouped_gemm_kernel)
-        run_moe_reduce_rs = contextual_autotune(is_dist=True)(run_moe_reduce_rs)
-        moe_reduce_rs.moe_grouped_gemm_kernel = triton.autotune(configs=configs,
+        from triton_dist.kernels.nvidia import moe_reduce_ar
+        moe_reduce_ar.moe_grouped_gemm_kernel = triton.autotune(configs=configs,
                                                                 key=["M", "N",
-                                                                     "K"])(moe_reduce_rs.moe_grouped_gemm_kernel)
-        run_moe_reduce_rs_triton_non_overlap = contextual_autotune(is_dist=True)(run_moe_reduce_rs_triton_non_overlap)
+                                                                     "K"])(moe_reduce_ar.moe_grouped_gemm_kernel)
+        run_moe_reduce_ar_triton_non_overlap = contextual_autotune(is_dist=True)(run_moe_reduce_ar_triton_non_overlap)
+        moe_reduce_ar.moe_gather_ar_grouped_gemm_kernel = triton.autotune(configs=configs, key=["M", "N", "K"])(
+            moe_reduce_ar.moe_gather_ar_grouped_gemm_kernel)
+        run_moe_reduce_ar = contextual_autotune(is_dist=True)(run_moe_reduce_ar)
 
     tp_group = initialize_distributed(args.seed)
     RANK = tp_group.rank()
@@ -212,7 +181,7 @@ if __name__ == "__main__":
     num_experts = args.E
     topk = args.TOPK
 
-    max_token_num = ntokens * topk
+    max_token_num = 64 * 1024
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
 
     iters = args.iters
@@ -233,7 +202,7 @@ if __name__ == "__main__":
 
     choosed_expert, expert_weight = select_experts(tp_group, WORLD_SIZE, topk, dtype, router_logits)
 
-    module = MoEReduceRSTensorParallel(
+    module = MoEReduceARTensorParallel(
         tp_group,
         LOCAL_WORLD_SIZE,
         hidden_size,
@@ -244,8 +213,8 @@ if __name__ == "__main__":
         input_dtype=dtype,
     )
 
-    func_torch = lambda: moe_reduce_rs_torch(intermediate_states, w, choosed_expert, expert_weight, tp_group)
-    func_triton_non_overlap = lambda: run_moe_reduce_rs_triton_non_overlap(intermediate_states, w, choosed_expert,
+    func_torch = lambda: moe_reduce_ar_torch(intermediate_states, w, choosed_expert, expert_weight, tp_group)
+    func_triton_non_overlap = lambda: run_moe_reduce_ar_triton_non_overlap(intermediate_states, w, choosed_expert,
                                                                            expert_weight)
     func_triton = lambda: module.forward(intermediate_states, w, choosed_expert, expert_weight)
 
@@ -258,25 +227,23 @@ if __name__ == "__main__":
     assert_allclose(output_triton_non_overlap, output_torch, atol=atol, rtol=rtol)
     assert_allclose(output_triton, output_torch, atol=atol, rtol=rtol)
 
-    # don't care torch profile
     sleep_async(200)  # in case CPU bound
     torch_output, duration_ms_torch = perf_func(func_torch, iters=iters, warmup_iters=warmup_iters)
 
-    with group_profile(f"moe_rs_non_overlap_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=tp_group):
+    with group_profile("moe_ar_non_overlap", do_prof=args.profile, group=tp_group):
         sleep_async(100)
         output, duration_ms_triton_non_overlap = perf_func(func_triton_non_overlap, iters=iters,
                                                            warmup_iters=warmup_iters)
 
-    with group_profile(f"moe_rs_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=tp_group):
-        sleep_async(100)  # in case CPU bound
+    with group_profile("moe_ar", do_prof=args.profile, group=tp_group):
+        sleep_async(100)
         output, duration_ms_triton = perf_func(func_triton, iters=iters, warmup_iters=warmup_iters)
 
-    print_sol_time_estimate(args.M, args.K, args.N, args.E, args.TOPK, dtype, WORLD_SIZE, LOCAL_WORLD_SIZE)
-    dist_print(f"dist-triton #{RANK} {duration_ms_triton:0.2f} ms/iter", need_sync=True,
-               allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"torch #{RANK} {duration_ms_torch:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"triton non-overlap #{RANK} {duration_ms_triton_non_overlap:0.2f} ms/iter", need_sync=True,
                allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK} {duration_ms_torch:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton #{RANK} {duration_ms_triton:0.2f} ms/iter", need_sync=True,
+               allowed_ranks=list(range(WORLD_SIZE)))
 
     module.ctx.finalize()
     finalize_distributed()

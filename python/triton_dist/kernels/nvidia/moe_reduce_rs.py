@@ -244,6 +244,76 @@ def moe_gather_rs_grouped_gemm_kernel(
             tl.store(counter_ptr + group_id, 0)  # reset counter
 
 
+@triton.jit(repr=_kernel_repr)
+def moe_grouped_gemm_kernel(
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    A_scale_ptr,
+    gather_index_ptr,
+    expert_index_ptr,
+    M_ptr,
+    N,
+    K,
+    E,  # not used
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    TOPK: tl.constexpr,  # not used
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_N: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    M = tl.load(M_ptr)
+
+    num_block_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_block_n = tl.cdiv(N, BLOCK_SIZE_N)
+    if pid >= num_block_m * num_block_n:
+        return
+
+    pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_gather_a = tl.load(gather_index_ptr + offs_m)
+    token_mask = offs_gather_a < M
+
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = A_ptr + offs_gather_a[:, None] * stride_am + offs_k[None, :] * stride_ak
+
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_be = tl.load(expert_index_ptr + pid_m)
+    b_ptrs = B_ptr + offs_be * stride_be + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+
+    if A_ptr.dtype.element_ty == tl.int8:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
+        tl.static_assert(False, "int8 is not supported in this kernel, please use float16 or bfloat16")
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K))
+        b = tl.load(b_ptrs, mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K))
+
+        accumulator += tl.dot(a, b)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = C_ptr + offs_gather_a[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+
+    if A_scale_ptr:
+        accumulator = accumulator * tl.load(A_scale_ptr + offs_gather_a[:, None], mask=token_mask[:, None])
+    accumulator = accumulator.to(A_ptr.dtype.element_ty)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
 def moe_gather_rs_grouped_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -283,6 +353,47 @@ def moe_gather_rs_grouped_gemm(
         C.stride(1),
         tile_counter,
         barrier,
+        TOPK=topk,
+        **config.all_kwargs(),
+    )
+    return C
+
+
+def moe_grouped_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    gather_a_index: torch.Tensor,
+    expert_id: torch.Tensor,
+    M_pad: torch.Tensor,
+    M_pad_approx: int,  # make sure M_pad_approx >= int(M_pad)
+    N: int,
+    K: int,
+    E: int,
+    topk: int,
+    config: triton.Config,
+):
+    grid = lambda META: (triton.cdiv(M_pad_approx, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+
+    moe_grouped_gemm_kernel[grid](
+        A,
+        B,
+        C,
+        A_scale if A_scale is not None else None,  # can be None
+        gather_a_index,
+        expert_id,
+        M_pad,  # torch.Tensor on GPU
+        N,
+        K,
+        E,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(1),
+        B.stride(2),
+        C.stride(0),
+        C.stride(1),
         TOPK=topk,
         **config.all_kwargs(),
     )
@@ -564,6 +675,36 @@ def get_auto_triton_config(M, N, K, N_CHUNKS, dtype: torch.dtype) -> triton.Conf
             N_per_chunk // BLOCK_SIZE_N
         })
     return config
+
+
+def run_moe_reduce_rs_triton_non_overlap(x: torch.Tensor, weights: torch.Tensor, chosen_experts: torch.Tensor,
+                                         expert_weight: torch.Tensor, n_chunks=2,
+                                         config: Optional[triton.Config] = None):
+    M, K_per_rank = x.shape
+    N = weights.shape[-1]
+    num_experts = weights.shape[0]
+    topk = chosen_experts.shape[1]
+    ntokens = M // topk
+    ntokens_per_rank = ntokens // torch.distributed.get_world_size()
+    config = config or get_auto_triton_config(M, N, K_per_rank, n_chunks, x.dtype)
+    block_size_m = config.kwargs["BLOCK_SIZE_M"]
+    _, _, gather_index, expert_index, M_pad_gpu = calc_gather_scatter_index_triton(chosen_experts, num_experts,
+                                                                                   block_size_m)
+    grouped_gemm_out = torch.empty(
+        (M, N),
+        dtype=x.dtype,
+        device=torch.cuda.current_device(),
+    )
+    out = torch.empty((ntokens_per_rank, N), dtype=x.dtype, device=torch.cuda.current_device())
+    M_pad_approx = (triton.cdiv(M, block_size_m) + num_experts) * block_size_m
+    grid = lambda META: (triton.cdiv(M_pad_approx, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+    moe_grouped_gemm_kernel[grid](x, weights, grouped_gemm_out, expert_weight, gather_index, expert_index, M_pad_gpu,
+                                  N, x.shape[1], num_experts, x.stride(0), x.stride(1), weights.stride(0),
+                                  weights.stride(1), weights.stride(2), grouped_gemm_out.stride(0),
+                                  grouped_gemm_out.stride(1), topk, **config.all_kwargs())
+    out_reduce_topk = torch.sum(grouped_gemm_out.reshape(ntokens, topk, N), dim=1, keepdim=False)
+    torch.distributed.reduce_scatter_tensor(out, out_reduce_topk)
+    return out
 
 
 def run_moe_reduce_rs(
