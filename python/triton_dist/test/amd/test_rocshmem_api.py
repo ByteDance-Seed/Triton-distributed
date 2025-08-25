@@ -48,9 +48,6 @@ import random
 
 from triton_dist.utils import (get_torch_prof_ctx)
 
-from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
-
-
 def hip_check(call_result):
     err = call_result[0]
     result = call_result[1:]
@@ -128,7 +125,6 @@ def test_rocshmem_device():
     else:
         print(f"✅ _rocshmem_device #{mype} pass")
 
-    comm_buf.zero_()
     put_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
     torch.cuda.synchronize()
     _rocshmem_put[(1, )](put_buf, ctx)
