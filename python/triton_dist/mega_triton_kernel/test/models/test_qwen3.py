@@ -45,10 +45,13 @@ def parse_args():
     parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
     parser.add_argument("--backend", default="mega_kernel", type=str,
                         choices=["mega_kernel", "triton_dist_AR", "torch"], help="backend")
-    parser.add_argument("--max_length", type=int, default=4096)
-    parser.add_argument("--profile", default=False, action="store_true", help="enable profiling")
-    parser.add_argument("--temperature", default=0.6, type=float)
+    parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--profile", default=False, action="store_true", help="enable kernel level profiling")
+    parser.add_argument("--temperature", default=0.0, type=float)
     parser.add_argument("--top_p", default=0.95, type=float)
+    parser.add_argument("--intra_kernel_profile", default=False, action="store_true",
+                        help="enable intra kernel profiling")
 
     return parser.parse_args()
 
@@ -70,8 +73,9 @@ if __name__ == "__main__":
     model_config = ModelConfig(model_name=args.model, max_length=args.max_length, dtype=dtype, rank=RANK,
                                world_size=WORLD_SIZE)
 
-    builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE)
-    batch_size = 1
+    builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE,
+                           enable_profiling=args.intra_kernel_profile)
+    batch_size = args.batch_size
     history = []
     ctx = get_torch_prof_ctx(args.profile)
     history = []
@@ -119,10 +123,12 @@ if __name__ == "__main__":
             if RANK == 0:
                 print(f"output = {tokenizer.batch_decode(output_ids, skip_special_tokens=True)}")
             torch.cuda.synchronize()
+            if args.intra_kernel_profile:
+                builder.dump_trace()
             builder.finalize()
     if args.profile:
         import os
-        prof_dir = f"prof/qwen3_model_{args.model.split('-')[-1]}__tp{WORLD_SIZE}_backend{args.backend}/"
+        prof_dir = f"prof/qwen3_model_{args.model.split('-')[-1]}_bs_{batch_size}_tp{WORLD_SIZE}_backend{args.backend}/"
         os.makedirs(prof_dir, exist_ok=True)
         ctx.export_chrome_trace(f"{prof_dir}/rank_{RANK}.json.gz")
     torch.distributed.barrier()

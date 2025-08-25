@@ -28,7 +28,17 @@ from .registry import registry
 from .task_base import TaskBase, CodeGenKey
 
 
-def make_mega_kernel_src(tasks_dispatch_code: str) -> str:
+def make_mega_kernel_src(tasks_dispatch_code: str, enalbe_profiling: bool, task_types_and_str: Dict[int, str]) -> str:
+    """
+        max_task_type: profiling use only
+    """
+    max_task_type = 0
+    for k, v in task_types_and_str.items():
+        max_task_type = max(max_task_type, k)
+    scoreboard_wait_deps_task_type = max_task_type + 1
+    task_decoding_task_type = scoreboard_wait_deps_task_type + 1
+    task_types_and_str[scoreboard_wait_deps_task_type] = "scoreboard_wait_deps"
+    task_types_and_str[task_decoding_task_type] = "task_decoding"
 
     src = f"""
 import triton
@@ -36,10 +46,11 @@ import triton.language as tl
 from triton_dist.mega_triton_kernel.kernels import *
 
 from triton_dist.mega_triton_kernel.kernels.task_context import Scoreboard
-
-
+from triton_dist.tools.profiler import Profiler
+from triton.language.extra.cuda.language_extra import tid
 @triton.jit
 def MEGA_TRITON_KERNEL(
+    {"profiler_buf, # ensor<uint64>" if enalbe_profiling else ""}
     work_queues, # [MAX_INS, NUM_SMS, INS], int32
     num_tasks_per_wq, #[num_sms,]
     scoreboard_ptr,
@@ -51,6 +62,8 @@ def MEGA_TRITON_KERNEL(
     NUM_SMS: tl.constexpr,
     num_warps: tl.constexpr
 ):
+    {f"profiler = Profiler.create(profiler_buf, 0, is_leader=(tid(0) == 0), ENABLE_PROFILING={enalbe_profiling})" if enalbe_profiling else ""}
+
     WARP_SIZE: tl.constexpr = 32
     NUM_THREADS: tl.constexpr = num_warps * WARP_SIZE
     scoreboard = Scoreboard(scoreboard_ptr, MAX_TASK_ID, MAX_NUM_TILES_PER_OP, tl.constexpr(1), NUM_THREADS)
@@ -81,12 +94,16 @@ def MEGA_TRITON_KERNEL(
                                     num_depend_tile_start, num_depend_tile_end, MAX_NUM_TENSOR_DIMS)
 
         # task kernel need to set signal for each tile
+        {f"profiler = profiler.record(is_start=True, task_type={scoreboard_wait_deps_task_type})" if enalbe_profiling else ""}
         scoreboard.wait_deps(task_base_info)
-        #### run task ####
-{textwrap.indent(tasks_dispatch_code.strip(), '        ')}
+        {f"profiler = profiler.record(is_start=False, task_type={scoreboard_wait_deps_task_type})" if enalbe_profiling else ""}
 
+        #### run task ####
+        {"profiler = profiler.record(is_start=True, task_type=task_type)" if enalbe_profiling else ""}
+{textwrap.indent(tasks_dispatch_code.strip(), '        ')}
+        {"profiler = profiler.record(is_start=False, task_type=task_type)" if enalbe_profiling else ""}
 """
-    return src
+    return src, task_types_and_str
 
 
 class CodeGenerator:
@@ -150,8 +167,9 @@ class CodeGenerator:
 {textwrap.indent(all_codes.strip(), '    ')}
 """
 
-    def generate_code(self, tasks: List['TaskBase']) -> str:
+    def generate_code(self, tasks: List['TaskBase'], enable_profiling=False) -> str:
         self._condition_and_codes.clear()
+        self._task_types_and_str.clear()
 
         for task in tasks:
             key = task.get_codegen_key(task.layer_id, task.task_id)
@@ -171,5 +189,6 @@ class CodeGenerator:
             tasks_dispatch_code += self.generate_for_each_task_type(key_and_tasks_list, is_first_branch)
             is_first_branch = False
 
-        mege_kernel_src = make_mega_kernel_src(tasks_dispatch_code)
-        return mege_kernel_src
+        mege_kernel_src, self._task_types_and_str = make_mega_kernel_src(tasks_dispatch_code, enable_profiling,
+                                                                         self._task_types_and_str)
+        return mege_kernel_src, self._task_types_and_str

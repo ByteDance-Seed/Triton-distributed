@@ -37,6 +37,7 @@ from typing import List, Dict, Any
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync
 from ..core.scheduler import enque_tasks
 from triton_dist.models.utils import logger
+from triton_dist.tools.profiler import alloc_profiler_buffer, export_to_perfetto_trace, reset_profiler_buffer, parse_to_tracks
 
 
 def is_multicast_ptr(tensor):
@@ -82,7 +83,7 @@ def check_alignment(tensors):
 
 class ModelBuilder:
 
-    def __init__(self, rank=0, world_size=1, local_world_size=1):
+    def __init__(self, rank=0, world_size=1, local_world_size=1, enable_profiling=False):
         self.reset()
         self._registry = registry
         self._code_generator = CodeGenerator()
@@ -115,6 +116,8 @@ class ModelBuilder:
         else:
             self.barrier_all_intra_node_buf = None
         self.logger = logger
+        self._enable_profiling = enable_profiling
+        self.task_types_to_str = None
 
     def create_symm_tensor(self, shape, dtype) -> torch.Tensor:
         tensor = nvshmem_create_tensor(shape, dtype)
@@ -149,6 +152,31 @@ class ModelBuilder:
             self.MAX_NUM_TILES_PER_OP = max(self.MAX_NUM_TILES_PER_OP, task.num_tiles)
             self.max_layer_id = max(task.layer_id, self.max_layer_id)
             self.max_task_id = max(task.task_id, self.max_task_id)
+
+    def get_sm_activity(self):
+        assert self._enable_profiling
+        block_idx_to_tracks = parse_to_tracks(self.profile_buf)
+        sb_wait_deps_task_type = None
+        for k, v in self.task_types_to_str.items():
+            if v == "scoreboard_wait_deps":
+                sb_wait_deps_task_type = k
+        assert sb_wait_deps_task_type is not None
+        wait_deps_time = 0
+        e2e_time = 0
+        NUM_SMS = self.device_prop.NUM_SMS
+        for i in range(NUM_SMS):
+            assert i in block_idx_to_tracks.keys()
+            tracks_list = block_idx_to_tracks[i]
+            block_time = 0
+            for track in tracks_list:
+                if track.task_type == sb_wait_deps_task_type:
+                    wait_deps_time += track.duration
+                block_time += track.duration
+            e2e_time = max(e2e_time, block_time)
+        self.logger.log(
+            f"e2e_time = {e2e_time * 1.0 / 1e6} ms, avg_wait_deps_per_block_time = {wait_deps_time * 1.0 / NUM_SMS  / 1e6} ms",
+            level="debug")
+        return 1.0 - wait_deps_time * 1.0 / (e2e_time * NUM_SMS)
 
     def get_task_builder(self, op_type: str) -> 'TaskBuilderBase':
         task_type = self._registry.get_op_mapping(op_type)
@@ -376,7 +404,7 @@ class ModelBuilder:
         self.scoreboard = torch.zeros((self.max_layer_id + 1, self.max_task_id + 1, self.MAX_NUM_TILES_PER_OP),
                                       dtype=torch.int32, device=torch.cuda.current_device())
 
-        src = self._code_generator.generate_code(self.megakernel_tasks)
+        src, task_types_to_str = self._code_generator.generate_code(self.megakernel_tasks, self._enable_profiling)
         self.logger.log(src, level="debug")
         with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as tmp:
             tmp.write(src.encode('utf-8'))
@@ -387,20 +415,52 @@ class ModelBuilder:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self._gen_kernel = module.MEGA_TRITON_KERNEL
+        self.task_types_to_str = task_types_to_str
+        max_num_profile_slots = (self.wq_tensor.shape[0] + 4) * self.wq_tensor.shape[1] * 4
+        self.logger.log(f"max_num_profile_slots = {max_num_profile_slots}", level="debug")
+        if self._enable_profiling:
+            self.profile_buf = alloc_profiler_buffer(max_num_profile_slots)
+        else:
+            self.profile_buf = None
+
+    def dump_trace(self, trace_file_prefix="MEGA_KERNEL_TRACE"):
+        if self._enable_profiling:
+            profiler_dir = os.environ.get("MEGA_KERNEL_PRODILER_DIR", "./prof")
+            os.makedirs(profiler_dir, exist_ok=True)
+            trace_file = os.path.join(profiler_dir, f"{trace_file_prefix}_RANK_{self.rank}")
+            export_to_perfetto_trace(self.profile_buf, self.task_types_to_str, trace_file)
+        else:
+            self.logger.log("profiler not enabled, please set enable_profiling=True", level="warning")
 
     def run(self):
         grid = lambda META: (self.device_prop.NUM_SMS, )
-        self._gen_kernel[grid](
-            self.wq_tensor,
-            self.num_tasks_tensor,
-            self.scoreboard,
-            INT_PER_TASK=self.wq_tensor.shape[2],
-            MAX_TASK_ID=self.scoreboard.shape[1],
-            MAX_NUM_TILES_PER_OP=self.MAX_NUM_TILES_PER_OP,
-            MAX_NUM_TENSOR_DIMS=self._max_tensor_dim,
-            NUM_SMS=self.device_prop.NUM_SMS,
-            num_warps=self.num_warps,
-        )
+        if self._enable_profiling:
+            assert self.profile_buf is not None
+            reset_profiler_buffer(self.profile_buf)
+            self._gen_kernel[grid](
+                self.profile_buf,
+                self.wq_tensor,
+                self.num_tasks_tensor,
+                self.scoreboard,
+                INT_PER_TASK=self.wq_tensor.shape[2],
+                MAX_TASK_ID=self.scoreboard.shape[1],
+                MAX_NUM_TILES_PER_OP=self.MAX_NUM_TILES_PER_OP,
+                MAX_NUM_TENSOR_DIMS=self._max_tensor_dim,
+                NUM_SMS=self.device_prop.NUM_SMS,
+                num_warps=self.num_warps,
+            )
+        else:
+            self._gen_kernel[grid](
+                self.wq_tensor,
+                self.num_tasks_tensor,
+                self.scoreboard,
+                INT_PER_TASK=self.wq_tensor.shape[2],
+                MAX_TASK_ID=self.scoreboard.shape[1],
+                MAX_NUM_TILES_PER_OP=self.MAX_NUM_TILES_PER_OP,
+                MAX_NUM_TENSOR_DIMS=self._max_tensor_dim,
+                NUM_SMS=self.device_prop.NUM_SMS,
+                num_warps=self.num_warps,
+            )
         self.scoreboard.zero_()
 
     def finalize(self):

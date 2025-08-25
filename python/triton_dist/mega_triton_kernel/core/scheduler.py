@@ -25,6 +25,7 @@
 import torch
 
 from enum import Enum
+import copy
 
 
 class SchedulingStrategy(Enum):
@@ -42,6 +43,11 @@ def work_queue_list_to_device_tensor(sm_wq_list):
     max_num_tasks = max(num_tasks_per_sm)
     padding = -1
     max_tuple_len = 0
+    # task encoding
+    for i in range(len(sm_wq_list)):
+        for j in range(len(sm_wq_list[i])):
+            sm_wq_list[i][j] = sm_wq_list[i][j].encoding()
+
     for que in sm_wq_list:
         for task in que:
             max_tuple_len = max(max_tuple_len, len(task))
@@ -65,8 +71,7 @@ def work_queue_list_to_device_tensor(sm_wq_list):
 def round_robin_scheduler(num_sms, megakernel_tasks):
     sm_wq_list = [[] for i in range(num_sms)]
     for idx, task in enumerate(megakernel_tasks):
-        task_tuple = task.encoding()
-        sm_wq_list[idx % num_sms].append(task_tuple)
+        sm_wq_list[idx % num_sms].append(task)
     return sm_wq_list
 
 
@@ -74,16 +79,32 @@ def zig_zag_scheduler(num_sms, megakernel_tasks):
     sm_wq_list = [[] for i in range(num_sms)]
     iter = 0
     for idx, task in enumerate(megakernel_tasks):
-        task_tuple = task.encoding()
         if iter == 0:
-            sm_wq_list[idx % num_sms].append(task_tuple)
+            sm_wq_list[idx % num_sms].append(task)
         else:
-            sm_wq_list[num_sms - 1 - idx % num_sms].append(task_tuple)
+            sm_wq_list[num_sms - 1 - idx % num_sms].append(task)
         iter = iter ^ 1
     return sm_wq_list
 
 
-def enque_tasks(num_sms, megakernel_tasks, strategy: SchedulingStrategy = SchedulingStrategy.ROUND_ROBIN):
+def task_dependency_opt(sm_wq_list):
+    for sm_id in range(len(sm_wq_list)):
+        wq = sm_wq_list[sm_id]
+        num_tasks = len(wq)
+        if num_tasks > 0:
+            pre_dependency = wq[0].dependency
+            for idx in range(1, num_tasks):
+                if pre_dependency.cover(wq[idx].dependency):
+                    wq[idx].dependency = copy.deepcopy(wq[idx].dependency)
+                    wq[idx].dependency.to_empty()
+                else:
+                    pre_dependency = wq[idx].dependency
+        sm_wq_list[sm_id] = wq
+    return sm_wq_list
+
+
+def enque_tasks(num_sms, megakernel_tasks, strategy: SchedulingStrategy = SchedulingStrategy.ROUND_ROBIN,
+                enable_dependency_opt=True):
 
     if strategy == SchedulingStrategy.ROUND_ROBIN:
         sm_wq_list = round_robin_scheduler(num_sms, megakernel_tasks)
@@ -91,5 +112,7 @@ def enque_tasks(num_sms, megakernel_tasks, strategy: SchedulingStrategy = Schedu
         sm_wq_list = zig_zag_scheduler(num_sms, megakernel_tasks)
     else:
         raise NotImplementedError(f"Unsupport strategy {strategy}")
+    if enable_dependency_opt:
+        sm_wq_list = task_dependency_opt(sm_wq_list)
     wq_tensor, num_tasks_tensor = work_queue_list_to_device_tensor(sm_wq_list)
     return wq_tensor, num_tasks_tensor

@@ -121,6 +121,13 @@ class TaskDependency:
         self.start_tiles = start_tiles
         self.end_tiles = end_tiles
 
+    def cover(self, other):
+        return other.layer_id == self.layer_id and other.task_id == self.task_id and other.start_tiles >= self.start_tiles and other.end_tiles <= self.end_tiles
+
+    def to_empty(self):
+        self.start_tiles = 0
+        self.end_tiles = 0
+
 
 @dataclass
 class OutputTilingDesc:
