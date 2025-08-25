@@ -340,3 +340,8 @@ NVSHMEM_TEAMS_MIN = 6
 NVSHMEM_TEAM_INDEX_MAX = sys.maxsize
 
 ## TODO: add rocshmem
+def set_rocshmem_ctx(ctx):
+    ...
+
+def test_func(ptr):
+    ...
