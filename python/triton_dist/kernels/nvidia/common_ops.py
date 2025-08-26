@@ -223,7 +223,7 @@ class BarrierAllContext:
             self.rank = pynvshmem.my_pe()
             self.local_rank = pynvshmem.team_my_pe(nvshmem.core.Teams.TEAM_NODE)
             self.num_local_ranks = pynvshmem.team_n_pes(nvshmem.core.Teams.TEAM_NODE)
-            self.symm_barrier = nvshmem_create_tensor((1, ), torch.int32)
+            self.symm_barrier = nvshmem_create_tensor((self.num_local_ranks, ), torch.int32)
             self.symm_barrier.fill_(0)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 

@@ -899,6 +899,47 @@ def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True):
         print("✅ all close!")
 
 
+def bitwise_equal(x: torch.Tensor, y: torch.Tensor):
+    return (torch.bitwise_xor(x.view(torch.int8), y.view(torch.int8)) == 0).all().item()
+
+
+def assert_bitwise_equal(x: torch.Tensor, y: torch.Tensor, verbose=True):
+    if not bitwise_equal(x, y):
+        print(f"shape of x: {x.shape}")
+        print(f"shape of y: {y.shape}")
+
+        with redirect_stdout(sys.stderr):
+            print("x:")
+            print(x)
+            print("y:")
+            print(y)
+            print("x-y", x - y)
+
+            x = x.view(torch.int8)
+            y = y.view(torch.int8)
+            print("x as bytes:")
+            print(x)
+            print("y as bytes:")
+            print(y)
+            print("x as bytes - y as bytes", x - y)
+
+            diff_loc = torch.bitwise_xor(x.view(torch.int8), y.view(torch.int8)) != 0  # noqa: E712
+            print("x as bytes@diff:")
+            print(x[diff_loc])
+            print("y as bytes@diff:")
+            print(y[diff_loc])
+            num_diff = torch.sum(diff_loc)
+            diff_rate = num_diff / y.shape.numel()
+            print(f"diff count: {num_diff} ({diff_rate*100:.3f}%), {list(y.shape)}")
+            diff_indices = (diff_loc == True).nonzero(as_tuple=False)  # noqa: E712
+            print(f"diff locations:\n{diff_indices}")
+            print("--------------------------------------------------------------\n")
+        raise RuntimeError
+
+    if verbose:
+        print("✅ bitwise equal!")
+
+
 @functools.lru_cache()
 def supports_p2p_native_atomic():
     assert torch.cuda.is_available()
@@ -1046,3 +1087,9 @@ def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps
                                                                compiled.metadata.shared)
     CUDA_CHECK(ret[0])
     return ret[1]
+
+
+def cuda_stream_max_priority():
+    ret = cudart.cudaDeviceGetStreamPriorityRange()
+    CUDA_CHECK(ret[0])
+    return ret[2]  # (leastPriority, greatestPriority) -> greatestPriority is max priority
