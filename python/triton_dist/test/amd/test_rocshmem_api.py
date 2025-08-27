@@ -22,7 +22,6 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-# from triton.language.extra import libshmem_device
 
 import argparse
 import os
@@ -58,6 +57,104 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
+def test_rocshmem_device():
+    @triton.jit
+    def _rocshmem_device(comm_buf, ctx, ptr):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = dl.rank()
+        npes = dl.num_ranks()
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        tl.store(comm_buf, mype)
+        comm_buf+=1
+        tl.store(comm_buf, npes)
+    
+    @triton.jit
+    def _rocshmem_put(ptr,ctx):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+
+        libshmem_device.int_p(ptr, mype, peer)
+
+    @triton.jit
+    def _rocshmem_get_put_symm_at(local_ptr, ctx):
+        libshmem_device.set_rocshmem_ctx(ctx)
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        pid = tl.program_id(axis=0)
+        boffset = pid + tl.arange(0, 4)
+
+        for i in range (1, npes):
+            src_rank = (mype + i) % npes
+            remote_ptr = dl.symm_at(local_ptr, src_rank)
+            rank_offset = src_rank * 4
+            val = tl.load(remote_ptr + rank_offset + boffset)
+            tl.store(local_ptr + rank_offset + boffset, val)
+    
+    print("**test_rocshmem_device start!")
+
+    mype = pyrocshmem.rocshmem_my_pe()
+
+    npes =  pyrocshmem.rocshmem_n_pes()
+    peer = (mype + 1) % npes
+
+    ctx = pyrocshmem.rocshmem_get_device_ctx()
+    comm_buf = pyrocshmem.rocshmem_create_tensor((2,), torch.int32)
+    torch.cuda.synchronize()
+    _rocshmem_device[(1, )](comm_buf, ctx, comm_buf.data_ptr())
+
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    
+    print(f"mype#: {mype} comm_buffs: {comm_buf}")
+
+    try:
+        torch.testing.assert_close(
+            comm_buf,
+            torch.tensor([mype, npes], dtype=torch.int32,
+                         device="cuda")), comm_buf
+    except Exception as e:
+        print(f" _rocshmem_device #{mype} failed")
+        raise (e)
+    else:
+        print(f"✅ _rocshmem_device #{mype} pass")
+
+    put_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
+    torch.cuda.synchronize()
+    _rocshmem_put[(1, )](put_buf, ctx)
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+    
+    print(f"put_buf from pe#{mype}: {put_buf}")
+    
+    nelems_per_rank = 4
+    n_elements = npes*nelems_per_rank
+    dtype = torch.int32
+
+    put_bufs = pyrocshmem.rocshmem_create_tensor((n_elements,), torch.int32)
+    ref_tensor = torch.arange(n_elements, dtype=dtype).cuda()
+    put_bufs[nelems_per_rank * mype : nelems_per_rank *(mype+1)].copy_(ref_tensor[nelems_per_rank * mype : nelems_per_rank *(mype+1)])
+    torch.cuda.synchronize()
+    torch.distributed.barrier()    
+    _rocshmem_get_put_symm_at[(1, )](put_bufs, ctx)
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+
+    print(f"put_buf remote_ptr from pe#{mype}: {put_bufs}")
+
+    try:
+        torch.testing.assert_close(put_bufs, ref_tensor, atol=0, rtol=0)
+    except Exception as e:
+        print(f"❌ RANK[{mype}] check failed")
+        raise e
+    else:
+        print(f"✅ RANK[{mype}] check passed")
 
 def test_rocshmem_basic():
     @triton.jit
@@ -145,22 +242,6 @@ def test_rocshmem_memcpy():
     else:
         print(f"✅ _rocshmem_basic #{mype} - Check tensor_list pass")
 
-
-def perf_func(func, iters, warmup_iters):
-    start_event = torch.cuda.Event(enable_timing=True)
-    stop_event = torch.cuda.Event(enable_timing=True)
-    for n in range(iters + warmup_iters):
-        if n == warmup_iters:
-            start_event.record()
-        func()
-    stop_event.record()
-    start_event.wait()
-    stop_event.wait()
-    torch.cuda.current_stream().synchronize()
-    duration_ms = start_event.elapsed_time(stop_event)
-    return duration_ms / iters
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
@@ -222,6 +303,9 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     test_rocshmem_basic()
+    
+    test_rocshmem_device()
+
     ctx = get_torch_prof_ctx(args.profile)
     
     with ctx:
