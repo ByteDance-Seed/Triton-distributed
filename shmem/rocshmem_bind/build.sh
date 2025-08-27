@@ -10,13 +10,6 @@ function apt_install_deps() {
     apt-get install -y miopen-hip
 }
 
-function build_rocshmem_hsaco() {
-  pushd ${PROJECT_ROOT}/runtime
-  hipcc -c -fgpu-rdc -x hip rocshmem_wrapper.cc -I${ROCM_INSTALL_DIR}/include -I${ROCSHMEM_HEADER}  -I${OPENMPI_UCX_INSTALL_DIR}/include -o rocshmem_wrapper.o
-  #hipcc -fgpu-rdc --hip-link rocshmem_wrapper.o -o rocshmem_wrapper $ROCSHMEM_INSTALL_DIR/lib/librocshmem.a $OPENMPI_UCX_INSTALL_DIR/lib/libmpi.so -L${ROCM_INSTALL_DIR}/lib -lamdhip64 -lhsa-runtime64
-  popd
-}
-
 function build_pyrocshmem_cmake() {
   pushd ${PROJECT_ROOT}/pyrocshmem
   mkdir -p build
@@ -67,12 +60,9 @@ bash -x ${PROJECT_ROOT}/build_rocshmem.sh
 
 bash -x ${PROJECT_ROOT}/scripts/build_rocshmem_device_bc.sh
 
-bash -x ${PROJECT_ROOT}/scripts/build_rocshmem_wrapper.sh
-
 download_and_copy
 
 # build pyrocshmem
 build_pyrocshmem_setup
-# build_rocshmem_hsaco
 
 echo "done"
