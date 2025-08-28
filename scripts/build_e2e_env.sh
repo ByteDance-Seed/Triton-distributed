@@ -82,10 +82,21 @@ if command -v nvcc &> /dev/null; then
     fi
 
     echo "Installing CUDA-specific libraries..."
-    flashinfer_whl_url="https://flashinfer.ai/whl/${parsed_cuda_slug}/${parsed_pytorch_slug}/"
-    pip install flashinfer-python -i "$flashinfer_whl_url"
+    
+    # Check for local flashinfer whl files first
+    local_flashinfer_whl=$(find . -name "*flashinfer*.whl" | head -1)
+    if [[ -n "$local_flashinfer_whl" ]]; then
+        echo "Found local flashinfer whl: $local_flashinfer_whl"
+        echo "Installing local flashinfer whl..."
+        pip install "$local_flashinfer_whl"
+    else
+        echo "No local flashinfer whl found, installing from remote..."
+        flashinfer_whl_url="https://flashinfer.ai/whl/${parsed_cuda_slug}/${parsed_pytorch_slug}/"
+        pip install flashinfer-python -i "$flashinfer_whl_url"
+    fi
     pip install flash-attn --no-build-isolation
     echo "Finished installing CUDA-specific libraries."
+
 # --- AMD ROCm ---
 elif command -v hipcc &> /dev/null; then
     echo "AMD ROCm compiler (hipcc) found. Proceeding with ROCm-specific installations."
@@ -107,29 +118,46 @@ MODELS=(
   "Qwen/Qwen3-30B-A3B"
 )
 
-# --- Loop through each model and download it ---
-for MODEL_NAME in "${MODELS[@]}"; do
-  while true; do
-    echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
-    # Use timeout to prevent the script from hanging indefinitely.
-    timeout 120s huggingface-cli download "$MODEL_NAME"
+download_model=false
 
-    EXIT_CODE=$?
-
-    if [ $EXIT_CODE -eq 0 ]; then
-      echo "Model '$MODEL_NAME' downloaded successfully! 🎉"
-      break # Exit the while loop and move to the next model
-    elif [ $EXIT_CODE -eq 124 ]; then
-      echo "Download timed out for '$MODEL_NAME'. Retrying in 5 seconds... ⏳"
-    else
-      echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE. Retrying in 5 seconds... 🔁"
-    fi
-
-    sleep 5
-  done
+for arg in "$@"; do
+    case $arg in
+        --download_model)
+            download_model=true
+            shift
+            ;;
+        *)
+            ;;
+    esac
 done
 
-echo "All specified models have been downloaded."
+if [ "$download_model" = true ]; then
+    # --- Loop through each model and download it ---
+    for MODEL_NAME in "${MODELS[@]}"; do
+    while true; do
+        echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
+        # Use timeout to prevent the script from hanging indefinitely.
+        timeout 120s huggingface-cli download "$MODEL_NAME"
+
+        EXIT_CODE=$?
+
+        if [ $EXIT_CODE -eq 0 ]; then
+        echo "Model '$MODEL_NAME' downloaded successfully! 🎉"
+        break # Exit the while loop and move to the next model
+        elif [ $EXIT_CODE -eq 124 ]; then
+        echo "Download timed out for '$MODEL_NAME'. Retrying in 5 seconds... ⏳"
+        else
+        echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE. Retrying in 5 seconds... 🔁"
+        fi
+
+        sleep 5
+    done
+    done
+
+    echo "All specified models have been downloaded."
+else
+    echo "No Model download required. If you want to download model, add '--download_model' option."
+fi
 
 # --- Final check ---
 if [[ $? -eq 0 ]]; then

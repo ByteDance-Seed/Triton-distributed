@@ -44,10 +44,16 @@ class AutoLLM:
 
     @staticmethod
     def from_pretrained(config: ModelConfig, group=None):
-        if config.model_name in AutoLLM.model_mapping:
-            return AutoLLM.model_mapping[config.model_name](config, group)
+        model_name = config.model_name
+
+        for standard_name in AutoLLM.model_mapping.keys():
+            if model_name.endswith(standard_name):
+                return AutoLLM.model_mapping[standard_name](config, group)
+
+        if model_name in AutoLLM.model_mapping:
+            return AutoLLM.model_mapping[model_name](config, group)
         else:
-            print(f"Model {config.model_name} not found in model mapping, "
+            print(f"Model {model_name} not found in model mapping, "
                   f"Available models: {list(AutoLLM.model_mapping.keys())} "
                   f"Falling back to DenseLLM with default configuration.")
             return DenseLLM(config, group)
