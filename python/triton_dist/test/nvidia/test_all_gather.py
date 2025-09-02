@@ -27,7 +27,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as dl
 import nvshmem.core
-from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, perf_func, nvshmem_create_tensor, sleep_async
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, perf_func, nvshmem_create_tensor, sleep_async, assert_allclose
 
 import os
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     try:
-        torch.testing.assert_close(ag_buffer, ref_tensor, atol=0, rtol=0)
+        assert_allclose(ag_buffer, ref_tensor, atol=0, rtol=0)
     except Exception as e:
         print(f"❌ RANK[{RANK}] check failed")
         raise e

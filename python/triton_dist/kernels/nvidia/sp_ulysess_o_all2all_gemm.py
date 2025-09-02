@@ -350,68 +350,46 @@ def kernel_all2all_push_intra_node_nvl(
         NUM_SM_PER_SP: tl.constexpr = 1
         NUM_SP_PER_SM: tl.constexpr = sp_size // NUM_COMM_SM
 
-    remote_sp_rank = pid * NUM_SP_PER_SM // NUM_SM_PER_SP
-    remote_rank = remote_sp_rank + rank_offset
-    remote_a2a_out_ptr = dl.symm_at(a2a_out_ptr, remote_rank)
-    remote_barrier_ptr = dl.symm_at(barrier_ptr, remote_rank)
-    pid_in_sp = pid % NUM_SM_PER_SP
-    seq_beg = tl.load(cum_seqlen_gpu_ptr + remote_sp_rank)
-    seq_end = tl.load(cum_seqlen_gpu_ptr + remote_sp_rank + 1)
-    remote_seq_len = seq_end - seq_beg
-    num_tile_m = tl.cdiv(remote_seq_len, BLOCK_M)
-    tl.static_assert(local_head * head_dim % BLOCK_N == 0,
-                     f"local_head * head_dim {local_head * head_dim} must be divisible by BLOCK_N {BLOCK_N}")
-    num_tile_n = local_head * head_dim // BLOCK_N
+    for tile in range(NUM_SP_PER_SM):
+        remote_sp_rank = pid * NUM_SP_PER_SM // NUM_SM_PER_SP + tile
+        remote_rank = remote_sp_rank + rank_offset
+        remote_a2a_out_ptr = dl.symm_at(a2a_out_ptr, remote_rank)
+        remote_barrier_ptr = dl.symm_at(barrier_ptr, remote_rank)
+        pid_in_sp = pid % NUM_SM_PER_SP
+        seq_beg = tl.load(cum_seqlen_gpu_ptr + remote_sp_rank)
+        seq_end = tl.load(cum_seqlen_gpu_ptr + remote_sp_rank + 1)
+        remote_seq_len = seq_end - seq_beg
+        num_tile_m = tl.cdiv(remote_seq_len, BLOCK_M)
+        tl.static_assert(local_head * head_dim % BLOCK_N == 0,
+                         f"local_head * head_dim {local_head * head_dim} must be divisible by BLOCK_N {BLOCK_N}")
+        num_tile_n = local_head * head_dim // BLOCK_N
 
-    for tile_id_m_outer_n in range(0, (num_tile_m // GROUP_SIZE_M) * num_tile_n):
-        tile_id_m_outer = tile_id_m_outer_n // num_tile_n
-        tile_id_n = tile_id_m_outer_n % num_tile_n
-        for tile_id_m_inner in range(pid_in_sp, GROUP_SIZE_M, NUM_SM_PER_SP):
-            tile_id_m = tile_id_m_outer * GROUP_SIZE_M + tile_id_m_inner
-            attn_offs_m = seq_beg + tile_id_m * BLOCK_M + offs_m
-            attn_offs_n = tile_id_n * BLOCK_N + offs_n * VEC
-            data0, data1, data2, data3 = load_v4_b32(attn_out_ptr + attn_offs_m[:, None] * local_head * head_dim +
-                                                     attn_offs_n[None, :])
+        for tile_id_m_outer_n_tail in range(0, tl.cdiv(num_tile_m, GROUP_SIZE_M) * num_tile_n):
+            tile_id_m_outer_tail = tile_id_m_outer_n_tail // num_tile_n
+            tile_id_n_tail = tile_id_m_outer_n_tail % num_tile_n
+            for tile_id_m_inner_tail in range(pid_in_sp, GROUP_SIZE_M, NUM_SM_PER_SP):
+                tile_id_m_tail = tile_id_m_outer_tail * GROUP_SIZE_M + tile_id_m_inner_tail
+                if tile_id_m_tail < num_tile_m:
+                    attn_offs_m = seq_beg + tile_id_m_tail * BLOCK_M + offs_m
+                    attn_mask_m = attn_offs_m < seq_end
+                    attn_offs_n = tile_id_n_tail * BLOCK_N + offs_n * VEC
+                    data0, data1, data2, data3 = load_v4_b32_cond(
+                        attn_out_ptr + attn_offs_m[:, None] * local_head * head_dim + attn_offs_n[None, :],
+                        mask=attn_mask_m[:, None])
 
-            out_offs_m = tile_id_m * BLOCK_M + offs_m
-            out_offs_n = sp_rank * local_head * head_dim + tile_id_n * BLOCK_N + offs_n * VEC
-            store_v4_b32(remote_a2a_out_ptr + out_offs_m[:, None] * global_head * head_dim + out_offs_n[None, :], data0,
-                         data1, data2, data3)
+                    out_offs_m = tile_id_m_tail * BLOCK_M + offs_m
+                    out_mask_m = out_offs_m < remote_seq_len
+                    out_offs_n = sp_rank * local_head * head_dim + tile_id_n_tail * BLOCK_N + offs_n * VEC
+                    store_v4_b32_cond(
+                        remote_a2a_out_ptr + out_offs_m[:, None] * global_head * head_dim + out_offs_n[None, :], data0,
+                        data1, data2, data3, mask=out_mask_m[:, None])
 
-            if not SKIP_BARRIER:
-                __syncthreads()
-                notify_barrier_ptr = remote_barrier_ptr + tile_id_m * num_tile_n * sp_size + sp_rank * num_tile_n + tile_id_n
-                thread_idx = tid(0)
-                if thread_idx == 0:
-                    st(notify_barrier_ptr, 1, scope="sys", semantic="release")
-
-    for tile_id_m_outer_n_tail in range((num_tile_m // GROUP_SIZE_M) * num_tile_n,
-                                        tl.cdiv(num_tile_m, GROUP_SIZE_M) * num_tile_n):
-        tile_id_m_outer_tail = tile_id_m_outer_n_tail // num_tile_n
-        tile_id_n_tail = tile_id_m_outer_n_tail % num_tile_n
-        for tile_id_m_inner_tail in range(pid_in_sp, GROUP_SIZE_M, NUM_SM_PER_SP):
-            tile_id_m_tail = tile_id_m_outer_tail * GROUP_SIZE_M + tile_id_m_inner_tail
-            if tile_id_m_tail < num_tile_m:
-                attn_offs_m = seq_beg + tile_id_m_tail * BLOCK_M + offs_m
-                attn_mask_m = attn_offs_m < seq_end
-                attn_offs_n = tile_id_n_tail * BLOCK_N + offs_n * VEC
-                data0, data1, data2, data3 = load_v4_b32_cond(
-                    attn_out_ptr + attn_offs_m[:, None] * local_head * head_dim + attn_offs_n[None, :],
-                    mask=attn_mask_m[:, None])
-
-                out_offs_m = tile_id_m_tail * BLOCK_M + offs_m
-                out_mask_m = out_offs_m < remote_seq_len
-                out_offs_n = sp_rank * local_head * head_dim + tile_id_n_tail * BLOCK_N + offs_n * VEC
-                store_v4_b32_cond(
-                    remote_a2a_out_ptr + out_offs_m[:, None] * global_head * head_dim + out_offs_n[None, :], data0,
-                    data1, data2, data3, mask=out_mask_m[:, None])
-
-                if not SKIP_BARRIER:
-                    __syncthreads()
-                    notify_barrier_ptr = remote_barrier_ptr + tile_id_m_tail * num_tile_n * sp_size + sp_rank * num_tile_n + tile_id_n_tail
-                    thread_idx = tid(0)
-                    if thread_idx == 0:
-                        st(notify_barrier_ptr, 1, scope="sys", semantic="release")
+                    if not SKIP_BARRIER:
+                        __syncthreads()
+                        notify_barrier_ptr = remote_barrier_ptr + tile_id_m_tail * num_tile_n * sp_size + sp_rank * num_tile_n + tile_id_n_tail
+                        thread_idx = tid(0)
+                        if thread_idx == 0:
+                            st(notify_barrier_ptr, 1, scope="sys", semantic="release")
 
 
 class SpUlysessOAll2AllGemmKernel:
