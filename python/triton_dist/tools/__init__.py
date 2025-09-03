@@ -23,5 +23,6 @@
 #
 ################################################################################
 from .compile_aot import aot_compile_spaces
+from .monkey_inductor import apply_triton340_inductor_patch
 
-__all__ = ["aot_compile_spaces"]
+__all__ = ["aot_compile_spaces", "apply_triton340_inductor_patch"]

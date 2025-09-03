@@ -3,6 +3,9 @@ ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/flash_decode.py:kernel_gqa_fw
 ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/flash_decode.py:kernel_gqa_fwd_batch_decode_combine_kv
 ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/flash_decode.py:kernel_intra_rank_gqa_fwd_batch_decode_combine_kv
 ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/flash_decode.py:kernel_inter_rank_gqa_fwd_batch_decode_combine_kv
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_kkt_inv_ut_fused_kernel
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_fwd_kernel_o
 
 # this is for test
 ${SCRIPT_DIR}/../python/triton_dist/test/nvidia/test_compile_aot.py:test_aot_kernel
