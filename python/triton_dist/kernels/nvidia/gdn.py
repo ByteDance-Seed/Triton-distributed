@@ -43,8 +43,6 @@ if "USE_TRITON_DISTRIBUTED_AOT" in os.environ and os.environ["USE_TRITON_DISTRIB
 else:
     USE_AOT = False
 
-print(f"USE_AOT: {USE_AOT}")
-
 if USE_AOT:
     from triton._C.libtriton_distributed import distributed
 
@@ -672,7 +670,7 @@ def chunk_gated_delta_rule_fwd_h(
 
     if USE_AOT:
         assert g is not None
-        assert save_new_value and chunk_size == 64 and not output_final_state
+        assert save_new_value and chunk_size == 64
         algo_info = distributed.chunk_gated_delta_rule_fwd_kernel_h_blockdim64__triton_algo_info_t()
         for _k, _v in get_chunk_gated_delta_rule_fwd_kernel_h_blockdim64_info(
                 H=H,
