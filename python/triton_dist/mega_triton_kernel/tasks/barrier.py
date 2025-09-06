@@ -22,11 +22,10 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-from typing import Tuple, Any, Dict, List
+from typing import Tuple, List
 import dataclasses
 from dataclasses import dataclass
-from ..core.task_base import TaskBase, TaskDependency
+from ..core.task_base import TaskBase, TaskDependency, MAX_NUM_TENSOR_DIMS
 from ..core.builder import TaskBuilderBase
 from ..core.registry import registry
 from ..core.config import ConfigBase
@@ -44,6 +43,26 @@ class BarrierAllIntraNodeTask(TaskBase):
     def extra_params_to_tuple(self) -> Tuple[int]:
         return (self.extra_params["local_rank"], self.extra_params["local_world_size"])
 
+    def io_to_tuple(self):
+        io_tuple = tuple()
+        assert len(self.io_tensors) == 2
+        assert len(self.io_tensors[0]) - len(self.io_tensors[1]) == 1
+        # inputs/outputs except barrier are only used to build dependency in graph level and are useless for the kernel.
+        barrier_tensor = self.io_tensors[0][0]
+
+        data_ptr = barrier_tensor.data_ptr()
+        ptr_high = (data_ptr >> 32) & 0xFFFFFFFF
+        ptr_low = data_ptr & 0xFFFFFFFF
+
+        shape = list(barrier_tensor.shape)
+        assert MAX_NUM_TENSOR_DIMS >= len(shape)
+        padded_shape = shape + [1] * (MAX_NUM_TENSOR_DIMS - len(shape))
+
+        tensor_tuple = (ptr_low, ptr_high) + tuple(padded_shape)
+        assert len(tensor_tuple) % 2 == 0, "tensor data_ptr alignemnt"
+        io_tuple += tensor_tuple
+        return io_tuple
+
 
 def barrier_all_intra_node_config_factory(**kwargs) -> BarrierAllIntraNodeConfig:
     return dataclasses.replace(BarrierAllIntraNodeConfig(), **kwargs)
@@ -60,13 +79,6 @@ barrier_all_intra_node_task_compute(task_base_info, scoreboard)
                         config_factory=barrier_all_intra_node_config_factory,
                         codegen_func=codegen_barrier_all_intra_node)
 class BarrierAllIntraNodeTaskBuilder(TaskBuilderBase):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int,
-                     config: BarrierAllIntraNodeConfig, dependency: TaskDependency,
-                     io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
-        return BarrierAllIntraNodeTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                                       extra_params)
 
     @classmethod
     def _build_tasks_impl(cls, device_prop, layer_id: int, dependency: TaskDependency, io_tensors, extra_params,

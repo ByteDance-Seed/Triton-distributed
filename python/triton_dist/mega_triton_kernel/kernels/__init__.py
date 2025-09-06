@@ -25,8 +25,9 @@
 from .mlp_fc1 import fc1_task_compute
 from .task_context import TaskBaseInfo
 from .activation import silu_mul_up_task_compute
-from .flash_attn import attn_gqa_fwd_batch_decode_combine_task_compute, attn_gqa_fwd_batch_decode_split_kv_task_compute
-from .norm import rmsnorm_rope_update_kv_cache_task_compute, rmsnorm_task_compute
+from .flash_decode import attn_gqa_fwd_batch_decode_combine_task_compute, attn_gqa_fwd_batch_decode_split_kv_task_compute
+from .flash_attn import qkv_pack_flash_attn_task_compute, flash_attn_task_compute
+from .norm import rmsnorm_rope_update_kv_cache_task_compute, rmsnorm_task_compute, qkv_pack_qk_norm_rope_split_v_task_compute
 from .elementwise import add_task_compute
 from .allreduce import allreduce_task_compute
 from .barrier import barrier_all_intra_node_task_compute
@@ -46,4 +47,7 @@ __all__ = [
     "barrier_all_intra_node_task_compute",
     "linear_task_compute",
     "prefetch_task_compute",
+    "qkv_pack_flash_attn_task_compute",
+    "flash_attn_task_compute",
+    "qkv_pack_qk_norm_rope_split_v_task_compute",
 ]

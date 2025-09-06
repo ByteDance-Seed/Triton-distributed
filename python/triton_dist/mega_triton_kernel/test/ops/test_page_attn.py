@@ -49,8 +49,8 @@ if __name__ == "__main__":
     seq_len = 1
     PAGE_SIZE = 1
     MAX_SEQ_LEN = 32 * 1024  # 32k
-    MAX_NUM_KV_BLOCKS = 128 * 1024
     MAX_NUM_BLOCKS_PER_SEQ = (MAX_SEQ_LEN + PAGE_SIZE - 1) // PAGE_SIZE
+    MAX_NUM_KV_BLOCKS = MAX_NUM_BLOCKS_PER_SEQ * batch
     dtype = torch.bfloat16
     tp_size = 8
     num_q_heads = 64 // tp_size
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     soft_cap = 0.0
 
     num_layers = 1
-    builder.make_attn(query, key_cache, value_cache, block_tables, kv_lens, attn_out, sm_scale, soft_cap)
+    builder.make_flash_decode(query, key_cache, value_cache, block_tables, kv_lens, attn_out, sm_scale, soft_cap)
     builder.compile()
 
     ctx = get_torch_prof_ctx(args.profile)

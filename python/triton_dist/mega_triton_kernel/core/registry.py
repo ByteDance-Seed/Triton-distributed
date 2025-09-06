@@ -30,6 +30,7 @@ from .builder import TaskBuilderBase
 class Registry:
 
     def __init__(self):
+        self._builder_to_task_cls: Dict[Type['TaskBuilderBase'], Type['TaskBase']] = {}
         self._builders: Dict[Type['TaskBase'], Type['TaskBuilderBase']] = {}  # build task
         self._config_factories: Dict[Type['TaskBase'], Callable] = {}  # kernel config
         self._codegens: Dict[Type['TaskBase'], Callable] = {}  # code generator corresponding to each task
@@ -45,6 +46,7 @@ class Registry:
             self._op_mapping[op_type] = task_cls
 
             builder_cls._create_config = config_factory
+            builder_cls.TASK_CLS = task_cls
 
             return builder_cls
 
@@ -59,6 +61,11 @@ class Registry:
         if task_cls not in self._builders:
             raise ValueError(f"No builder registered for task class {task_cls.__name__}")
         return self._builders[task_cls]
+
+    def get_task_cls(self, builder_cls: Type['TaskBuilderBase']) -> Type['TaskBase']:
+        if builder_cls not in self._builder_to_task_cls:
+            raise ValueError(f"No task_cls registered for builder class {builder_cls.__name__}")
+        return self._builder_to_task_cls[builder_cls]
 
     def get_config_factory(self, task_cls: Type['TaskBase']) -> Callable:
         if task_cls not in self._config_factories:

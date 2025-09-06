@@ -65,15 +65,6 @@ silu_mul_up_task_compute(task_base_info, scoreboard, BLOCK_SIZE_M={config.BLOCK_
 class SiLUMulUpTaskBuilder(TaskBuilderBase):
 
     @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: SiLUMulUpConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return SiLUMulUpTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                             extra_params, inputs_dep, outs_tile_mapping)
-
-    @classmethod
     def get_problem_size(cls, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
         output = io_tensors[1][0]
         M, N = output.shape
@@ -102,7 +93,8 @@ class SiLUMulUpTaskBuilder(TaskBuilderBase):
                 bn = min(BLOCK_SIZE_N, N - tn * BLOCK_SIZE_N) + N
                 x_desc = InputDependencyDesc(x, require_full=False,
                                              start_indices=(tm * BLOCK_SIZE_M, tn * BLOCK_SIZE_N), data_sizes=(bm, bn))
-                y_desc = OutputTilingDesc(tile_sizes=(BLOCK_SIZE_M, BLOCK_SIZE_N))
+                y_desc = OutputTilingDesc(tile_sizes=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                                          start_indices=(tm * BLOCK_SIZE_M, tn * BLOCK_SIZE_N))
                 inputs_dep = {
                     x: x_desc,
                 }

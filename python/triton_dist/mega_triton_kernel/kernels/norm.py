@@ -225,3 +225,152 @@ def rmsnorm_task_compute(
         tl.store(Y + cols, y, mask=mask)
 
     scoreboard.release_tile(task_base_info, tile_id)
+
+
+@triton.jit
+def _qkv_pack_qk_norm_rope_split_v_kernel(tile_id, qkv_ptr, kv_lens_ptr, q_rms_weight_ptr, k_rms_weight_ptr,  #
+                                          q_rms_eps, k_rms_eps, sin_ptr, cos_ptr,  #
+                                          q_norm_rope_ptr, k_norm_rope_ptr, v_ptr,  #
+                                          seq_len, num_q_heads, num_kv_heads,  #
+                                          head_dim, BLOCK_SEQ: tl.constexpr, BLOCK_HD: tl.constexpr):
+    """
+        qkv: (bs, seq_len, num_total_heads, head_dim)
+        BLOCK_HD equal to next_power_of_2(head_dim)
+    """
+    pid = tile_id
+    num_total_heads = num_q_heads + 2 * num_kv_heads
+    group_size = num_q_heads // num_kv_heads
+    head_type = pid % (group_size + 2)
+    num_tiles_seq = tl.cdiv(seq_len, BLOCK_SEQ)
+    tile_id_bs_seq = pid // num_total_heads
+    tile_id_bs = tile_id_bs_seq // num_tiles_seq
+    tild_id_seq = tile_id_bs_seq % num_tiles_seq
+
+    head_group_id = (pid % num_total_heads) // (group_size + 2)
+    offs_seq = tl.arange(0, BLOCK_SEQ) + tild_id_seq * BLOCK_SEQ
+    offs_hd = tl.arange(0, BLOCK_HD)
+    stride_qkv_seq = num_total_heads * head_dim
+    stride_nh = head_dim
+    bs_idx = tile_id_bs.to(tl.int64)
+    history_kv = tl.load(kv_lens_ptr + bs_idx)
+    mask = (offs_seq[:, None] < seq_len) & (offs_hd[None, :] < head_dim)
+
+    # split v
+    if head_type == group_size + 1:
+        head_id_no_pack = head_group_id
+        head_id_pack = head_id_no_pack + num_q_heads + num_kv_heads
+        v_input_ptrs = qkv_ptr + bs_idx * seq_len * stride_qkv_seq + offs_seq[:,
+                                                                              None] * stride_qkv_seq + head_id_pack * stride_nh + offs_hd[
+                                                                                  None:]
+        v_val = tl.load(v_input_ptrs, mask=mask)
+        v_out_ptrs = v_ptr + bs_idx * seq_len * num_kv_heads * head_dim + offs_seq[:,
+                                                                                   None] * num_kv_heads * head_dim + head_id_no_pack * stride_nh + offs_hd[
+                                                                                       None:]
+        tl.store(v_out_ptrs, v_val, mask=mask)
+    else:
+        # q/k norm & rope
+        if head_type < group_size:
+            head_id_no_pack = head_group_id * group_size + head_type
+            head_id_pack = head_id_no_pack
+            RMS_EPS = q_rms_eps
+            rms_weight_ptr = q_rms_weight_ptr
+            stride_seq = num_q_heads * head_dim
+            out_ptr = q_norm_rope_ptr + bs_idx * seq_len * stride_seq + head_id_no_pack * head_dim
+        else:
+            head_id_no_pack = head_group_id
+            head_id_pack = head_id_no_pack + num_q_heads
+            RMS_EPS = k_rms_eps
+            rms_weight_ptr = k_rms_weight_ptr
+            stride_seq = num_kv_heads * head_dim
+            out_ptr = k_norm_rope_ptr + bs_idx * seq_len * stride_seq + head_id_no_pack * head_dim
+
+        # apply rmsnorm in qk head_dim
+        _rms = tl.zeros([BLOCK_SEQ, BLOCK_HD], dtype=tl.float32)
+        input_ptrs = qkv_ptr + bs_idx * seq_len * stride_qkv_seq + offs_seq[:,
+                                                                            None] * stride_qkv_seq + head_id_pack * stride_nh + offs_hd[
+                                                                                None:]
+        a = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+        _rms += a * a  # [BLOCK_SEQ, BLOCK_HD]
+        rms = tl.rsqrt(tl.sum(_rms, axis=1, keep_dims=True) / head_dim + RMS_EPS)  # [BLOCK_SEQ, 1]
+
+        mask_hd = (offs_hd < head_dim)
+        w = tl.load(rms_weight_ptr + offs_hd, mask=mask_hd).to(tl.float32)  # [BLOCK_HD]
+        x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)  # [BLOCK_SEQ, BLOCK_HD]
+        y = w[None, :] * (x * rms)  # [BLOCK_SEQ, BLOCK_HD]
+
+        cos_offsets = tl.arange(0, BLOCK_HD // 2)
+        cos_ptrs = cos_ptr + (offs_seq[:, None] + history_kv) * head_dim + cos_offsets[None, :]
+        sin_ptrs = sin_ptr + (offs_seq[:, None] + history_kv) * head_dim + cos_offsets[None, :]
+
+        cos_mask = (offs_seq[:, None] < seq_len) & (cos_offsets[None, :] < head_dim // 2)
+        cos_row = tl.load(cos_ptrs, mask=cos_mask, other=0)  # [BLOCK_SEQ, BLOCK_HD // 2]
+        sin_row = tl.load(sin_ptrs, mask=cos_mask, other=0)  # [BLOCK_SEQ, BLOCK_HD // 2]
+
+        y = tl.reshape(y, (BLOCK_SEQ, 2, BLOCK_HD // 2))
+        y = tl.permute(y, (0, 2, 1))
+        y0, y1 = tl.split(y)  # [BLOCK_SEQ, BLOCK_HD // 2]
+        first_half_qk_offsets = offs_seq[:, None] * stride_seq + cos_offsets
+        first_qk_mask = cos_mask
+
+        # # right half of the head
+        second_half_qk_offsets = first_half_qk_offsets + (head_dim // 2)
+        second_qk_mask = first_qk_mask
+        # qkv_tile_2 = tl.load(X + second_half_qk_offsets, mask=second_qk_mask, other=0).to(sin_row.dtype)
+
+        # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+        # cast to bf16 to keep same behavior
+        y0 = y0.to(tl.bfloat16)
+        y1 = y1.to(tl.bfloat16)
+        new_qkv_tile_0 = y0 * cos_row - y1 * sin_row
+        new_qkv_tile_1 = y1 * cos_row + y0 * sin_row
+
+        tl.store(out_ptr + first_half_qk_offsets, new_qkv_tile_0, mask=first_qk_mask)
+        tl.store(out_ptr + second_half_qk_offsets, new_qkv_tile_1, mask=second_qk_mask)
+
+
+@triton.jit
+def qkv_pack_qk_norm_rope_split_v_task_compute(
+    task_base_info: TaskBaseInfo,
+    scoreboard: Scoreboard,
+    DTYPE: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    Q_RMS_EPS: tl.constexpr,
+    K_RMS_EPS: tl.constexpr,
+    BLOCK_SEQ: tl.constexpr,
+    BLOCK_HD: tl.constexpr,
+):
+
+    tile_id = task_base_info.tile_id_or_start
+    qkv_tensor: TensorDesc = task_base_info.get_tensor(0)
+    kv_lens_tensor: TensorDesc = task_base_info.get_tensor(1)
+    q_rms_weight_tensor: TensorDesc = task_base_info.get_tensor(2)
+    k_rms_weight_tensor: TensorDesc = task_base_info.get_tensor(3)
+    cos_tensor: TensorDesc = task_base_info.get_tensor(4)
+    sin_tensor: TensorDesc = task_base_info.get_tensor(5)
+    q_norm_rope_tensor: TensorDesc = task_base_info.get_tensor(6)
+    k_norm_rope_tensor: TensorDesc = task_base_info.get_tensor(7)
+    v_tensor: TensorDesc = task_base_info.get_tensor(8)
+    qkv_ptr = qkv_tensor.data_ptr(DTYPE)
+    kv_lens_ptr = kv_lens_tensor.data_ptr(tl.int32)
+    q_rms_weight_ptr = q_rms_weight_tensor.data_ptr(DTYPE)
+    k_rms_weight_ptr = k_rms_weight_tensor.data_ptr(DTYPE)
+    sin_ptr = sin_tensor.data_ptr(tl.float32)
+    cos_ptr = cos_tensor.data_ptr(tl.float32)
+    q_norm_rope_ptr = q_norm_rope_tensor.data_ptr(DTYPE)
+    k_norm_rope_ptr = k_norm_rope_tensor.data_ptr(DTYPE)
+    v_ptr = v_tensor.data_ptr(DTYPE)
+
+    # [bs, seq_len, num_total_heads, head_dim]
+    seq_len = qkv_tensor.size(1)
+
+    _qkv_pack_qk_norm_rope_split_v_kernel(tile_id, qkv_ptr, kv_lens_ptr, q_rms_weight_ptr, k_rms_weight_ptr,  #
+                                          Q_RMS_EPS, K_RMS_EPS, sin_ptr, cos_ptr,  #
+                                          q_norm_rope_ptr, k_norm_rope_ptr, v_ptr,  #
+                                          seq_len, NUM_Q_HEADS, NUM_KV_HEADS,  #
+                                          HEAD_DIM,  #
+                                          BLOCK_SEQ=BLOCK_SEQ,  #
+                                          BLOCK_HD=BLOCK_HD)
+
+    scoreboard.release_tile(task_base_info, tile_id)

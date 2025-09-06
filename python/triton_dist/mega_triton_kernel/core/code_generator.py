@@ -54,7 +54,9 @@ def MEGA_TRITON_KERNEL(
     work_queues, # [MAX_INS, NUM_SMS, INS], int32
     num_tasks_per_wq, #[num_sms,]
     scoreboard_ptr,
+    task_deps_ptr,  # [num_deps_entry_of_all_tasks, INT_PER_DEPS]
 
+    INT_PER_DEPS: tl.constexpr,
     INT_PER_TASK: tl.constexpr,
     MAX_TASK_ID: tl.constexpr,
     MAX_NUM_TILES_PER_OP: tl.constexpr,
@@ -66,32 +68,29 @@ def MEGA_TRITON_KERNEL(
 
     WARP_SIZE: tl.constexpr = 32
     NUM_THREADS: tl.constexpr = num_warps * WARP_SIZE
-    scoreboard = Scoreboard(scoreboard_ptr, MAX_TASK_ID, MAX_NUM_TILES_PER_OP, tl.constexpr(1), NUM_THREADS)
+    scoreboard = Scoreboard(task_deps_ptr, INT_PER_DEPS, scoreboard_ptr, MAX_TASK_ID, MAX_NUM_TILES_PER_OP, tl.constexpr(1), NUM_THREADS)
     sm_id = tl.program_id(axis=0)
     num_tasks = tl.load(num_tasks_per_wq + sm_id)
     offset = INT_PER_TASK * NUM_SMS
+
     TASK_TYPE_OFFSET = 0
     LAYER_ID_OFFSET = 1
     TASK_ID_OFFSET = 2
     TILE_ID_OR_START_OFFSET = 3
-    DEPEND_LAYER_ID_OFFSET = 4
-    DEPEND_TASK_ID_OFFSET = 5
-    NUM_DEPEND_TILE_START_OFFSET = 6
-    NUM_DEPEND_TILE_END_OFFSET = 7
-    IO_TENSORS_OFFSET = 8
+    DEPEND_ENTRY_START_OFFSET = 4
+    DEPEND_ENTRY_END_OFFSET = 5
+    IO_TENSORS_OFFSET = 6
 
     for i in range(num_tasks):
         task_type = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TASK_TYPE_OFFSET).to(tl.int32)
         layer_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + LAYER_ID_OFFSET).to(tl.int32)
         task_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TASK_ID_OFFSET).to(tl.int32)
         tile_id_or_start = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TILE_ID_OR_START_OFFSET).to(tl.int32)
-        depend_layer_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_LAYER_ID_OFFSET).to(tl.int32)
-        depend_task_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_TASK_ID_OFFSET).to(tl.int32)
-        num_depend_tile_start = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + NUM_DEPEND_TILE_START_OFFSET).to(tl.int32)
-        num_depend_tile_end = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + NUM_DEPEND_TILE_END_OFFSET).to(tl.int32)
+        depend_entry_start = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_START_OFFSET).to(tl.int32)
+        depend_entry_end = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_END_OFFSET).to(tl.int32)
+        
         io_tensors_ptr = work_queues + i * offset + sm_id * INT_PER_TASK + IO_TENSORS_OFFSET
-        task_base_info = TaskBaseInfo(io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_layer_id, depend_task_id,
-                                    num_depend_tile_start, num_depend_tile_end, MAX_NUM_TENSOR_DIMS)
+        task_base_info = TaskBaseInfo(io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_entry_start, depend_entry_end, MAX_NUM_TENSOR_DIMS)
 
         # task kernel need to set signal for each tile
         {f"profiler = profiler.record(is_start=True, task_type={scoreboard_wait_deps_task_type})" if enalbe_profiling else ""}

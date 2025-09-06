@@ -33,6 +33,7 @@ from ..core.code_generator import CodeGenerator
 from ..core.registry import registry
 from ..core.task_base import TaskBase, DeviceProp, TaskDependency, TaskIDManager, MAX_NUM_TENSOR_DIMS
 from ..core.builder import TaskBuilderBase
+from ..core.graph import Graph
 from typing import List, Dict, Any
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync
 from ..core.scheduler import enque_tasks
@@ -50,8 +51,7 @@ def is_multicast_ptr(tensor):
 def check_tensor_shape(tensor, shape):
     assert isinstance(tensor, torch.Tensor)
     assert isinstance(shape, (list, tuple))
-    assert list(tensor.shape()) == shape, f"tensor shape mismatch, tensor shape = {tensor.shape}, shape = {shape}"
-    tensor_shape = list(tensor.shape())
+    tensor_shape = list(tensor.shape)
     assert len(tensor_shape) == len(shape), f"tensor shape mismatch, tensor shape = {tensor.shape}, shape = {shape}"
     for (x, y) in zip(tensor_shape, shape):
         assert x == y, f"tensor shape mismatch, tensor shape = {tensor.shape}, shape = {shape}"
@@ -59,7 +59,9 @@ def check_tensor_shape(tensor, shape):
 
 def check_tensor_dim(tensor, ndim):
     assert isinstance(tensor, torch.Tensor)
-    assert len(tensor.shape) == ndim, f"tensor dim mismatch, tensor dim = {len(tensor.shape)}, ndim = {ndim}"
+    assert len(
+        tensor.shape
+    ) == ndim, f"tensor dim mismatch, tensor dim = {len(tensor.shape)}, ndim = {ndim}, shape = {tensor.shape}"
 
 
 def check_tensor_dtype(tensor, dtype):
@@ -83,7 +85,8 @@ def check_alignment(tensors):
 
 class ModelBuilder:
 
-    def __init__(self, rank=0, world_size=1, local_world_size=1, enable_profiling=False):
+    def __init__(self, rank=0, world_size=1, local_world_size=1, num_warps=4, enable_profiling=False,
+                 enable_dep_opt=True):
         self.reset()
         self._registry = registry
         self._code_generator = CodeGenerator()
@@ -98,7 +101,7 @@ class ModelBuilder:
         self.last_dependency = TaskDependency()
         self.max_layer_id = 0
         self.max_task_id = 0
-        self.num_warps = 4
+        self.num_warps = num_warps
         self._metrics = {"memory": 0}
         self.world_size = world_size
         self.local_world_size = local_world_size
@@ -117,7 +120,9 @@ class ModelBuilder:
             self.barrier_all_intra_node_buf = None
         self.logger = logger
         self._enable_profiling = enable_profiling
+        self._enable_dep_opt = enable_dep_opt
         self.task_types_to_str = None
+        self._graph = Graph()
 
     def create_symm_tensor(self, shape, dtype) -> torch.Tensor:
         tensor = nvshmem_create_tensor(shape, dtype)
@@ -164,6 +169,7 @@ class ModelBuilder:
         wait_deps_time = 0
         e2e_time = 0
         NUM_SMS = self.device_prop.NUM_SMS
+        act_time = 0
         for i in range(NUM_SMS):
             assert i in block_idx_to_tracks.keys()
             tracks_list = block_idx_to_tracks[i]
@@ -171,12 +177,14 @@ class ModelBuilder:
             for track in tracks_list:
                 if track.task_type == sb_wait_deps_task_type:
                     wait_deps_time += track.duration
+                else:
+                    act_time += track.duration
                 block_time += track.duration
             e2e_time = max(e2e_time, block_time)
         self.logger.log(
-            f"e2e_time = {e2e_time * 1.0 / 1e6} ms, avg_wait_deps_per_block_time = {wait_deps_time * 1.0 / NUM_SMS  / 1e6} ms",
+            f"e2e_time = {e2e_time * 1.0 / 1e6} ms, avg_time = {act_time * 1.0 / NUM_SMS  / 1e6} ms, avg_wait_deps_per_block_time = {wait_deps_time * 1.0 / NUM_SMS  / 1e6} ms",
             level="debug")
-        return 1.0 - wait_deps_time * 1.0 / (e2e_time * NUM_SMS)
+        return act_time * 1.0 / (e2e_time * NUM_SMS)
 
     def get_task_builder(self, op_type: str) -> 'TaskBuilderBase':
         task_type = self._registry.get_op_mapping(op_type)
@@ -199,6 +207,7 @@ class ModelBuilder:
                                         extra_params=extra_params)
         self._update_tasks(tasks)
         self._update_metrics(op_type, io_tensors, extra_params)
+        self._graph.new_node(tasks=tasks, op_type=op_type, io_tensors=io_tensors, extra_params=extra_params)
         return tasks
 
     def _make_fc(self, op_type: str, input: torch.Tensor, weight: torch.Tensor, output: torch.Tensor,
@@ -236,8 +245,8 @@ class ModelBuilder:
         assert oM == M and oN == N
         self._convert_op("linear", layer_id, [[input, weight], [output]])
 
-    def make_attn(self, query, key_cache: torch.Tensor, value_cache: torch.Tensor, block_tables: torch.Tensor,
-                  kv_lens: torch.Tensor, output: torch.Tensor, sm_scale=None, soft_cap=0.0, layer_id: int = 0):
+    def make_flash_decode(self, query, key_cache: torch.Tensor, value_cache: torch.Tensor, block_tables: torch.Tensor,
+                          kv_lens: torch.Tensor, output: torch.Tensor, sm_scale=None, soft_cap=0.0, layer_id: int = 0):
         """
             query: (batch, seq_len, num_q_heads, q_head_dim)
             key_cache: (MAX_NUM_KV_BLOCKS, PAGE_SIZE, num_kv_heads, q_head_dim)
@@ -275,6 +284,51 @@ class ModelBuilder:
         self._convert_op("attn_split", layer_id,
                          [[query, key_cache, value_cache, block_tables, kv_lens], [partial_out, lse]], extra_params)
         self._convert_op("attn_combine", layer_id, [[kv_lens, partial_out, lse], [output]], extra_params)
+
+    def make_qkv_pack_flash_attn(self, qkv: torch.Tensor, output: torch.Tensor, sm_scale=None, soft_cap=0.0,
+                                 is_causal=True, layer_id: int = 0):
+        """
+            Args:
+                qkv: (bs, seq, nheads_q + 2 * nheads_kv, head_dim)
+                out: (bs, seq, nheads_q, head_dim)
+        """
+        check_tensor_dim(qkv, 4)
+        check_tensor_dim(output, 4)
+        check_tensor_dtype(qkv, torch.bfloat16)
+        check_tensor_dtype(output, torch.bfloat16)
+        assert qkv.shape[0] == output.shape[0] and qkv.shape[1] == output.shape[1] and qkv.shape[3] == output.shape[3]
+        q_head_dim = qkv.shape[-1]
+
+        if sm_scale is None:
+            sm_scale = q_head_dim**-0.5
+        extra_params = {"sm_scale": sm_scale, "soft_cap": soft_cap, "is_causal": is_causal}
+        self._convert_op("qkv_pack_flash_attn", layer_id, [[qkv], [output]], extra_params)
+
+    def make_flash_attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, output: torch.Tensor, sm_scale=None,
+                        soft_cap=0.0, is_causal=True, layer_id: int = 0):
+        """
+            Args:
+                q: (bs, seq, nheads_q, head_dim)
+                k: (bs, seq, nheads_kv, head_dim)
+                v: (bs, seq, nheads_kv, head_dim)
+                out: (bs, seq, nheads_q, head_dim)
+        """
+        check_tensor_dim(q, 4)
+        check_tensor_dim(k, 4)
+        check_tensor_dim(v, 4)
+
+        check_tensor_dim(output, 4)
+        check_tensor_dtype(q, torch.bfloat16)
+        check_tensor_dtype(k, torch.bfloat16)
+        check_tensor_dtype(v, torch.bfloat16)
+        check_tensor_dtype(output, torch.bfloat16)
+        assert q.shape[0] == output.shape[0] and q.shape[1] == output.shape[1] and q.shape[3] == output.shape[3]
+        q_head_dim = q.shape[-1]
+
+        if sm_scale is None:
+            sm_scale = q_head_dim**-0.5
+        extra_params = {"sm_scale": sm_scale, "soft_cap": soft_cap, "is_causal": is_causal}
+        self._convert_op("flash_attn", layer_id, [[q, k, v], [output]], extra_params)
 
     def make_silu_mul_up(self, fc1_out, act_out, layer_id=0):
         check_tensor_dim(fc1_out, 2)
@@ -324,6 +378,55 @@ class ModelBuilder:
                          [[qkv, block_tables, kv_lens, q_rms_weight, k_rms_weight, cos_cache, sin_cache],
                           [key_cache, value_cache, q_norm_rope]], extra_params)
 
+    def make_qkv_pack_qk_norm_rope_split_v(self, qkv: torch.Tensor, kv_lens: torch.Tensor, q_rms_weight: torch.Tensor,
+                                           k_rms_weight: torch.Tensor, cos_cache: torch.Tensor, sin_cache: torch.Tensor,
+                                           q_norm_rope: torch.Tensor, k_norm_rope: torch.Tensor, v: torch.Tensor,
+                                           q_rms_eps: float, k_rms_eps: float, layer_id=0):
+        """
+            Inputs:
+                qkv: [bs, seq_len, num_q_heads + 2 * num_kv_heads, head_dim]
+                kv_lens: [bs]
+                q/k_rms_weight: [head_dim]
+                cos_cache/sin_cache: [MAX_SEQ_LEN, head_dim] or [1, MAX_SEQ_LEN, head_dim]
+
+            Outputs:
+                q_norm_rope: [bs, seq_len, num_q_heads, head_dim]
+                k_norm_rope: [bs, seq_len, num_kv_heads, head_dim]
+                v: [bs, seq_len, num_kv_heads, head_dim]
+            
+            Formula:
+                q, k, v = qkv.split([num_q_heads, num_kv_heads, num_kv_heads], dim=-2)
+                q_norm_rope = rope(rms_norm(q, q_rms_weight, q_rms_eps), cos_cache, sin_cache)
+                k_norm_rope = rope(rms_norm(k, k_rms_weight, k_rms_eps), cos_cache, sin_cache)
+        """
+        check_tensor_dim(qkv, 4)
+        check_tensor_dim(q_norm_rope, 4)
+        check_tensor_dim(k_norm_rope, 4)
+        bs, seq_len, num_total_heads, head_dim = qkv.shape
+        num_q_heads = q_norm_rope.shape[-2]
+        num_kv_heads = k_norm_rope.shape[-2]
+        assert num_total_heads == num_q_heads + 2 * num_kv_heads
+        check_tensor_shape(q_norm_rope, (bs, seq_len, num_q_heads, head_dim))
+        check_tensor_shape(k_norm_rope, (bs, seq_len, num_kv_heads, head_dim))
+        check_tensor_shape(v, (bs, seq_len, num_kv_heads, head_dim))
+        check_tensor_shape(kv_lens, (bs, ))
+        assert len(sin_cache.shape) == len(cos_cache.shape)
+        assert sin_cache.shape == cos_cache.shape
+        assert sin_cache.shape[-1] == head_dim
+
+        check_tensor_dtype(q_norm_rope, torch.bfloat16)
+        check_tensor_dtype(k_norm_rope, torch.bfloat16)
+        check_tensor_dtype(cos_cache, torch.float32)
+        check_tensor_dtype(sin_cache, torch.float32)
+        check_tensor_dtype(q_rms_weight, torch.bfloat16)
+        check_tensor_dtype(k_rms_weight, torch.bfloat16)
+
+        extra_params = {"q_rms_eps": q_rms_eps, "k_rms_eps": k_rms_eps}
+        self._convert_op(
+            "qkv_pack_qk_norm_rope_split_v", layer_id,
+            [[qkv, kv_lens, q_rms_weight, k_rms_weight, cos_cache, sin_cache], [q_norm_rope, k_norm_rope, v]],
+            extra_params)
+
     def make_rms_norm(self, input: torch.Tensor, rms_weight: torch.Tensor, output: torch.Tensor, rms_eps: float = 1e-6,
                       layer_id=0):
         check_tensor_dtype(input, torch.bfloat16)
@@ -351,10 +454,15 @@ class ModelBuilder:
 
         self._convert_op("add", layer_id, [[lhs, rhs], [output]])
 
-    def make_barrier_all_intra_node(self, layer_id=0):
+    def make_barrier_all_intra_node(self, wait_inputs=None, layer_id=0):
+        """
+            `wait_inputs` is used to build data dependency.
+        """
         assert self.world_size > 1
+        wait_inputs = [] if wait_inputs is None else wait_inputs
         extra_params = {"local_rank": self.local_rank, "local_world_size": self.local_world_size}
-        self._convert_op("barrier_all_intra_node", layer_id, [[self.barrier_all_intra_node_buf], []], extra_params)
+        self._convert_op("barrier_all_intra_node", layer_id,
+                         [[self.barrier_all_intra_node_buf] + wait_inputs, wait_inputs], extra_params)
 
     def make_allreduce(self, input: torch.Tensor, output: torch.Tensor, double_input_buffer=False, layer_id=0):
         """
@@ -372,10 +480,10 @@ class ModelBuilder:
         nbytes = input.numel() * input.element_size()
         assert nbytes % 128 == 0
         assert input.shape == output.shape and input.dtype == output.dtype
-        self.make_barrier_all_intra_node(layer_id)
+        self.make_barrier_all_intra_node(wait_inputs=[input], layer_id=layer_id)
         self._convert_op("allreduce", layer_id, [[input], [output]])
         if not double_input_buffer:
-            self.make_barrier_all_intra_node(layer_id)
+            self.make_barrier_all_intra_node(wait_inputs=[output], layer_id=layer_id)
 
     def make_prefetch(self, weight: torch.tensor, layer_id=0):
         io_tensors = [[weight], []]
@@ -399,8 +507,12 @@ class ModelBuilder:
 
     def compile(self):
         self.logger.log(f"num_total_tasks = {len(self.megakernel_tasks)}", level="debug")
-        self.wq_tensor, self.num_tasks_tensor = enque_tasks(self.device_prop.NUM_SMS, self.megakernel_tasks,
-                                                            "round_robin")
+        if self._enable_dep_opt:
+            megakernel_tasks = self._graph.to_tasks()
+        else:
+            megakernel_tasks = self.megakernel_tasks
+        self.wq_tensor, self.num_tasks_tensor, self.scoreboard, self.task_deps_tensor = enque_tasks(
+            self.device_prop.NUM_SMS, megakernel_tasks, "round_robin")
         self.scoreboard = torch.zeros((self.max_layer_id + 1, self.max_task_id + 1, self.MAX_NUM_TILES_PER_OP),
                                       dtype=torch.int32, device=torch.cuda.current_device())
 
@@ -442,9 +554,11 @@ class ModelBuilder:
                 self.wq_tensor,
                 self.num_tasks_tensor,
                 self.scoreboard,
+                self.task_deps_tensor,
+                INT_PER_DEPS=self.task_deps_tensor.shape[1],
                 INT_PER_TASK=self.wq_tensor.shape[2],
                 MAX_TASK_ID=self.scoreboard.shape[1],
-                MAX_NUM_TILES_PER_OP=self.MAX_NUM_TILES_PER_OP,
+                MAX_NUM_TILES_PER_OP=self.scoreboard.shape[2],
                 MAX_NUM_TENSOR_DIMS=self._max_tensor_dim,
                 NUM_SMS=self.device_prop.NUM_SMS,
                 num_warps=self.num_warps,
@@ -454,9 +568,11 @@ class ModelBuilder:
                 self.wq_tensor,
                 self.num_tasks_tensor,
                 self.scoreboard,
+                self.task_deps_tensor,
+                INT_PER_DEPS=self.task_deps_tensor.shape[1],
                 INT_PER_TASK=self.wq_tensor.shape[2],
                 MAX_TASK_ID=self.scoreboard.shape[1],
-                MAX_NUM_TILES_PER_OP=self.MAX_NUM_TILES_PER_OP,
+                MAX_NUM_TILES_PER_OP=self.scoreboard.shape[2],
                 MAX_NUM_TENSOR_DIMS=self._max_tensor_dim,
                 NUM_SMS=self.device_prop.NUM_SMS,
                 num_warps=self.num_warps,

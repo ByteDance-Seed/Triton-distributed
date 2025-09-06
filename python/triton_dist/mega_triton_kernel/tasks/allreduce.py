@@ -22,8 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-from typing import Any, Dict, List
+from typing import List
 from .utils import cdiv
 import dataclasses
 from dataclasses import dataclass
@@ -59,12 +58,6 @@ allreduce_task_compute(task_base_info, scoreboard, BLOCK_SIZE={config.BLOCK_SIZE
 @registry.register_task(op_type="allreduce", task_cls=AllReduceTask, config_factory=allreduce_config_factory,
                         codegen_func=codegen_allreduce)
 class AllReduceTaskBuilder(TaskBuilderBase):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: AllReduceConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
-        return AllReduceTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                             extra_params)
 
     @classmethod
     def _build_tasks_impl(cls, device_prop, layer_id: int, dependency: TaskDependency, io_tensors, extra_params,

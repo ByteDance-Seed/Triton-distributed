@@ -22,8 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import torch
-from typing import Tuple, Any, Dict, List
+from typing import Tuple, List
 import dataclasses
 from dataclasses import dataclass
 from ..core.task_base import TaskBase, TaskDependency
@@ -59,12 +58,6 @@ prefetch_task_compute(task_base_info, scoreboard)
 @registry.register_task(op_type="prefetch", task_cls=PrefetchTask, config_factory=prefetch_config_factory,
                         codegen_func=codegen_prefetch)
 class PrefetchTaskBuilder(TaskBuilderBase):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: PrefetchConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
-        return PrefetchTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                            extra_params)
 
     @classmethod
     def _build_tasks_impl(cls, device_prop, layer_id: int, dependency: TaskDependency, io_tensors, extra_params,

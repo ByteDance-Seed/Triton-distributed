@@ -157,15 +157,6 @@ fc1_task_compute(task_base_info, scoreboard, BLOCK_SIZE_M={config.BLOCK_SIZE_M},
 class LinearTaskBuilder(TaskBuilderBase):
 
     @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: LinearConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return LinearTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors, extra_params,
-                          inputs_dep, outs_tile_mapping)
-
-    @classmethod
     def get_problem_size(cls, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
         a, b = io_tensors[0]
         M, K = a.shape
@@ -190,7 +181,7 @@ class LinearTaskBuilder(TaskBuilderBase):
         num_sm = device_prop.NUM_SMS
         tasks = []
         cls.log(
-            f"Linear Task: M = {M}, N = {N}, K = {K}, num_tiles = {num_tiles}, num_sm = {num_sm}, tile_wise = {tile_wise}, dependency = {dependency}"
+            f"Linear Task: M = {M}, N = {N}, K = {K}, num_tiles = {num_tiles}, num_sm = {num_sm}, tile_wise = {tile_wise}, dependency = {dependency}, BLOCK_SIZE_M ={BLOCK_SIZE_M}, BLOCK_SIZE_N = {BLOCK_SIZE_N}"
         )
         for tm in range(num_tiles_m):
             for tn in range(num_tiles_n):
@@ -201,7 +192,8 @@ class LinearTaskBuilder(TaskBuilderBase):
                                              data_sizes=(bm, K))
                 w_desc = InputDependencyDesc(w, require_full=False, start_indices=(tn * BLOCK_SIZE_N, 0),
                                              data_sizes=(bn, K))
-                y_desc = OutputTilingDesc(tile_sizes=(BLOCK_SIZE_M, BLOCK_SIZE_N))
+                y_desc = OutputTilingDesc(tile_sizes=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                                          start_indices=(tm * BLOCK_SIZE_M, tn * BLOCK_SIZE_N))
                 inputs_dep = {x: x_desc, w: w_desc}
                 outs_tile_mapping = {y: y_desc}
                 tasks.append(
@@ -220,15 +212,6 @@ class LinearTaskBuilder(TaskBuilderBase):
 class MLPFC1TaskBuilder(LinearTaskBuilder):
 
     @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: LinearConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return MLPFC1Task(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors, extra_params,
-                          inputs_dep, outs_tile_mapping)
-
-    @classmethod
     def build_tasks(cls, device_prop: 'DeviceProp', layer_id: int, dependency: TaskDependency,
                     io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]) -> List[TaskBase]:
         return cls._build_tasks_impl(device_prop, layer_id, dependency, io_tensors, extra_params, tile_wise=True)
@@ -240,15 +223,6 @@ class MLPFC1TaskBuilder(LinearTaskBuilder):
 class MLPFC2TaskBuilder(LinearTaskBuilder):
 
     @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: LinearConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return MLPFC2Task(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors, extra_params,
-                          inputs_dep, outs_tile_mapping)
-
-    @classmethod
     def build_tasks(cls, device_prop: 'DeviceProp', layer_id: int, dependency: TaskDependency,
                     io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]) -> List[TaskBase]:
         return cls._build_tasks_impl(device_prop, layer_id, dependency, io_tensors, extra_params, tile_wise=True)
@@ -257,15 +231,6 @@ class MLPFC2TaskBuilder(LinearTaskBuilder):
 @registry.register_task(op_type="qkv_proj", task_cls=QKVProjTask, config_factory=linear_config_factory,
                         codegen_func=codegen_qkv_proj)
 class QKVProjTaskBuilder(LinearTaskBuilder):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: LinearConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return QKVProjTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors, extra_params,
-                           inputs_dep, outs_tile_mapping)
 
     @classmethod
     def build_tasks(cls, device_prop: 'DeviceProp', layer_id: int, dependency: TaskDependency,
@@ -283,15 +248,6 @@ class QKVProjTaskBuilder(LinearTaskBuilder):
 @registry.register_task(op_type="o_proj", task_cls=OProjTask, config_factory=linear_config_factory,
                         codegen_func=codegen_o_proj)
 class OProjTaskBuilder(LinearTaskBuilder):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: LinearConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any],
-                     inputs_dep: Dict['torch.Tensor',
-                                      'InputDependencyDesc'], outs_tile_mapping: Dict['torch.Tensor',
-                                                                                      'OutputTilingDesc']):
-        return OProjTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors, extra_params,
-                         inputs_dep, outs_tile_mapping)
 
     @classmethod
     def build_tasks(cls, device_prop: 'DeviceProp', layer_id: int, dependency: TaskDependency,

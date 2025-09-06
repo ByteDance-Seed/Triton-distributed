@@ -23,7 +23,7 @@
 #
 ################################################################################
 import math
-from typing import Tuple, Any, Dict, List
+from typing import Tuple, List
 from .utils import cdiv
 import triton
 import dataclasses
@@ -32,7 +32,6 @@ from ..core.task_base import TaskBase, TaskDependency
 from ..core.builder import TaskBuilderBase
 from ..core.registry import registry
 from ..core.config import ConfigBase
-import torch
 
 
 @dataclass
@@ -104,12 +103,6 @@ attn_gqa_fwd_batch_decode_combine_task_compute(
 class AttnSplitTaskBuilder(TaskBuilderBase):
 
     @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: AttnConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
-        return AttnSplitTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                             extra_params)
-
-    @classmethod
     def _build_tasks_impl(cls, device_prop, layer_id: int, dependency: TaskDependency, io_tensors, extra_params,
                           tile_wise=True) -> List[TaskBase]:
         query, key_cache, v_cache, block_tables, kv_lens = io_tensors[0]
@@ -147,12 +140,6 @@ class AttnSplitTaskBuilder(TaskBuilderBase):
 @registry.register_task(op_type="attn_combine", task_cls=AttnCombineTask, config_factory=attn_config_factory,
                         codegen_func=codegen_attn_combine)
 class AttnCombineTaskBuilder(TaskBuilderBase):
-
-    @classmethod
-    def _create_task(cls, layer_id: int, task_id: int, tile_id_or_start: int, num_tiles: int, config: AttnConfig,
-                     dependency: TaskDependency, io_tensors: List[List['torch.Tensor']], extra_params: Dict[str, Any]):
-        return AttnCombineTask(layer_id, task_id, tile_id_or_start, num_tiles, config, dependency, io_tensors,
-                               extra_params)
 
     @classmethod
     def _build_tasks_impl(cls, device_prop, layer_id: int, dependency: TaskDependency, io_tensors, extra_params,

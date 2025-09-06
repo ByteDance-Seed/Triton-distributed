@@ -25,11 +25,12 @@
 from .linear import LinearTaskBuilder, MLPFC1TaskBuilder, QKVProjTaskBuilder, OProjTaskBuilder
 from .activation import SiLUMulUpTaskBuilder
 from .allreduce import AllReduceTaskBuilder
-from .attn import AttnSplitTaskBuilder, AttnCombineTaskBuilder
-from .norm import RMSNormTask, QKNormRopeUpdateKVCacheTaskBuilder
+from .flash_decode import AttnSplitTaskBuilder, AttnCombineTaskBuilder
+from .norm import RMSNormTask, QKNormRopeUpdateKVCacheTaskBuilder, QKVPackQKNormRopeSplitVTaskBuilder
 from .elementwise import AddTaskBuilder
 from .barrier import BarrierAllIntraNodeTaskBuilder
 from .prefetch import PrefetchTaskBuilder
+from .flash_attn import QKVPackFlashAttnTaskBuilder
 
 __all__ = [
     "LinearTaskBuilder",
@@ -45,4 +46,6 @@ __all__ = [
     "AddTaskBuilder",
     "BarrierAllIntraNodeTaskBuilder",
     "PrefetchTaskBuilder",
+    "QKVPackFlashAttnTaskBuilder",
+    "QKVPackQKNormRopeSplitVTaskBuilder",
 ]

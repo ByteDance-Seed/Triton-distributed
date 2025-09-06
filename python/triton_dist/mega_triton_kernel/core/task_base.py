@@ -26,6 +26,7 @@ from typing import Dict, Type, List, Any, Tuple, Union
 from dataclasses import dataclass, field
 from .config import ConfigBase
 import torch
+from .utils import has_slice_intersection
 
 # To satisfy the alignment requirement of tensor data_ptr, MAX_NUM_TENSOR_DIMS must be an even number.
 MAX_NUM_TENSOR_DIMS = 4
@@ -128,9 +129,13 @@ class TaskDependency:
         self.start_tiles = 0
         self.end_tiles = 0
 
+    def key(self):
+        return (self.layer_id, self.task_id)
+
 
 @dataclass
 class OutputTilingDesc:
+    start_indices: Tuple[int]
     tile_sizes: Union[Tuple[int], None]
 
 
@@ -160,13 +165,17 @@ class TaskBase:
     tile_id_or_start: int
     num_tiles: int
     config: ConfigBase  # kernel config (e.g. BLOCK_SIZE/NUM_STAGE)
-    dependency: TaskDependency
+    dependency: List[TaskDependency]
     io_tensors: List[List['torch.Tensor']]  # inputs and outputs
     extra_params: Dict[str, Any]
     inputs_dep: Dict['torch.Tensor', InputDependencyDesc] = field(default_factory=dict)
-    outs_tile_mapping: Dict['torch.Tensor', OutputTilingDesc] = field(
-        default_factory=dict
-    )  # tasks belong to same op has the same `outs_tile_mapping`, only used for build dependency
+    outs_tile_mapping: Dict['torch.Tensor', OutputTilingDesc] = field(default_factory=dict)
+
+    def __str__(self):
+        return f"{self.__class__.__name__}(layer_id={self.layer_id}, task_id={self.task_id}, tile_id_or_start={self.tile_id_or_start}, dependency = {self.dependency}, num_tiles = {self.num_tiles}, config = {self.config})"
+
+    def __repr__(self):
+        return self.__str__()
 
     @classmethod
     def get_task_type_id(cls) -> int:
@@ -175,6 +184,18 @@ class TaskBase:
     @classmethod
     def get_codegen_key(cls, layer_id: int, task_id: int) -> CodeGenKey:
         return CodeGenKey(task_type=cls.get_task_type_id(), layer_id=layer_id, task_id=task_id)
+
+    def get_out_tiling_desc(self, out_idx):
+        out_tensor_list = self.io_tensors[1]
+        assert len(out_tensor_list) > out_idx
+        out_tensor = out_tensor_list[out_idx]
+        return self.outs_tile_mapping.get(out_tensor, None)
+
+    def get_input_dep_desc(self, input_idx):
+        input_tensor_list = self.io_tensors[0]
+        assert len(input_tensor_list) > input_idx
+        input_tensor = input_tensor_list[input_idx]
+        return self.inputs_dep.get(input_tensor, None)
 
     def io_to_tuple(self):
         io_tuple = tuple()
@@ -194,24 +215,20 @@ class TaskBase:
             io_tuple += tensor_tuple
         return io_tuple
 
-    def dependency_to_tuple(self):
-        return (self.dependency.layer_id, self.dependency.task_id, self.dependency.start_tiles,
-                self.dependency.end_tiles)
-
     def extra_params_to_tuple(self) -> Tuple[int]:
         assert len(self.extra_params) == 0
         return ()
 
-    def encoding(self) -> Tuple[int]:
+    def encoding_with_deps(self, l, r) -> Tuple[int]:
         """
-        task_type | layer_id | task_id | tile_id_or_start | dependency | io_tensors | extra_params
+        task_type | layer_id | task_id | tile_id_or_start | dependency(l, r) | io_tensors | extra_params
         """
         entrys = []
         entrys.append(self.get_task_type_id())
         entrys.append(self.layer_id)
         entrys.append(self.task_id)
         entrys.append(self.tile_id_or_start)
-        entrys += self.dependency_to_tuple()
+        entrys += (l, r)
         assert len(entrys) % 2 == 0, "tensor data_ptr alignemnt"
         entrys += self.io_to_tuple()
         entrys += self.extra_params_to_tuple()
@@ -220,6 +237,22 @@ class TaskBase:
                 raise ValueError(f"got unexpected value {x}")
 
         return tuple(entrys)
+
+    def has_data_dependency(self, producer_task, producer_out_idx, consumer_input_idx):
+        input_dep_desc = self.get_input_dep_desc(consumer_input_idx)
+        out_tiling_desc = producer_task.get_out_tiling_desc(producer_out_idx)
+        if input_dep_desc is None or out_tiling_desc is None:
+            return True
+        if input_dep_desc.require_full:
+            return True
+        return has_slice_intersection(
+            start_indices1=input_dep_desc.start_indices,
+            data_sizes1=input_dep_desc.data_sizes,
+            shape1=input_dep_desc.input.shape,
+            start_indices2=out_tiling_desc.start_indices,
+            data_sizes2=out_tiling_desc.tile_sizes,
+            shape2=producer_task.io_tensors[1][producer_out_idx].shape,
+        )
 
 
 @dataclass

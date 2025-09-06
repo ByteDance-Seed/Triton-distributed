@@ -24,7 +24,8 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import tid, st, ld_acquire, __syncthreads
+from triton.language.extra.cuda.language_extra import tid, st, ld_acquire, __syncthreads, ld
+from triton.language.extra.cuda.utils import num_warps
 
 
 @tl.core._aggregate
@@ -56,25 +57,20 @@ class TaskBaseInfo:
     layer_id: tl.tensor
     task_id: tl.tensor
     tile_id_or_start: tl.tensor
-    depend_layer_id: tl.tensor
-    depend_task_id: tl.tensor
-    num_depend_task_tile_start: tl.tensor
-    num_depend_task_tile_end: tl.tensor
+    depend_entry_start: tl.tensor
+    depend_entry_end: tl.tensor
     MAX_NUM_TENSOR_DIMS: tl.constexpr
     INT_PER_TENSOR: tl.constexpr
     is_tile_wise: tl.constexpr
 
-    def __init__(self, io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_layer_id, depend_task_id,
-                 num_depend_task_tile_start, num_depend_task_tile_end, MAX_NUM_TENSOR_DIMS,
-                 is_tile_wise=tl.constexpr(True)):
+    def __init__(self, io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_entry_start, depend_entry_end,
+                 MAX_NUM_TENSOR_DIMS, is_tile_wise=tl.constexpr(True)):
         self.io_tensors_ptr = io_tensors_ptr
         self.layer_id = layer_id
         self.task_id = task_id
         self.tile_id_or_start = tile_id_or_start
-        self.depend_layer_id = depend_layer_id
-        self.depend_task_id = depend_task_id
-        self.num_depend_task_tile_start = num_depend_task_tile_start
-        self.num_depend_task_tile_end = num_depend_task_tile_end
+        self.depend_entry_start = depend_entry_start
+        self.depend_entry_end = depend_entry_end
         self.MAX_NUM_TENSOR_DIMS = MAX_NUM_TENSOR_DIMS
         self.is_tile_wise = is_tile_wise
         self.INT_PER_TENSOR = self.MAX_NUM_TENSOR_DIMS + 2  # (data_ptr, shape[0], shape[1], ..., shape[MAX_NUM_TENSOR_DIMS - 1])
@@ -91,35 +87,52 @@ class TaskBaseInfo:
 @tl.core._aggregate
 class Scoreboard:
     scoreboard_table: tl.tensor
+    task_deps_ptr: tl.tensor
+    INT_PER_DEPS: tl.constexpr
     MAX_TASK_ID: tl.constexpr
     MAX_NUM_TASK_PER_OP: tl.constexpr
     TILE_READY_SIGNAL: tl.constexpr
     NUM_THREADS: tl.constexpr
+    WARP_SIZE: tl.constexpr
 
-    def __init__(self, scoreboard_table, MAX_TASK_ID, MAX_NUM_TASK_PER_OP, TILE_READY_SIGNAL, NUM_THREADS):
+    def __init__(self, task_deps_ptr, INT_PER_DEPS, scoreboard_table, MAX_TASK_ID, MAX_NUM_TASK_PER_OP,
+                 TILE_READY_SIGNAL, NUM_THREADS):
+        self.task_deps_ptr = task_deps_ptr
+        self.INT_PER_DEPS = INT_PER_DEPS
         self.scoreboard_table = scoreboard_table
         self.MAX_TASK_ID = MAX_TASK_ID
         self.MAX_NUM_TASK_PER_OP = MAX_NUM_TASK_PER_OP
         self.TILE_READY_SIGNAL = TILE_READY_SIGNAL
         self.NUM_THREADS = NUM_THREADS
+        self.WARP_SIZE = tl.constexpr(32)
 
     @triton.jit
     def wait_deps(self, task_base_info: TaskBaseInfo):
         # Don't exit early, otherwise it will cause function inlining to fail.
-        # If the task has no dependencies, we guarantees that num_depend_task_tile_start >= num_depend_task_tile_end.
-        # if task_base_info.depend_layer_id == -1 or task_base_info.depend_task_id == -1 or task_base_info.num_depend_task_tile_start >= task_base_info.num_depend_task_tile_end:
-        #     return
 
         thread_idx = tid(0)
-        start = task_base_info.num_depend_task_tile_start
-        end = task_base_info.num_depend_task_tile_end
-        num_signals = end - start
-        sb_layer_offset = task_base_info.depend_layer_id * self.MAX_TASK_ID * self.MAX_NUM_TASK_PER_OP
-        sb_wait_base_ptr = self.scoreboard_table + sb_layer_offset + task_base_info.depend_task_id * self.MAX_NUM_TASK_PER_OP + start
+        entry_start = task_base_info.depend_entry_start
+        entry_end = task_base_info.depend_entry_end
 
-        for i in range(thread_idx, num_signals, self.NUM_THREADS):
-            while ld_acquire(sb_wait_base_ptr + i, "gpu") != self.TILE_READY_SIGNAL:
-                pass
+        # for t in range(entry_start, entry_end):
+        #     l = ld(self.task_deps_ptr + t * self.INT_PER_DEPS + 0)
+        #     r = ld(self.task_deps_ptr + t * self.INT_PER_DEPS + 1)
+        #     num_signals = r - l
+        #     sb_wait_base_ptr = self.scoreboard_table + l
+        #     for i in range(thread_idx, num_signals, self.NUM_THREADS):
+        #         while ld_acquire(sb_wait_base_ptr + i, "gpu") != self.TILE_READY_SIGNAL:
+        #             pass
+        lane_id = thread_idx % self.WARP_SIZE
+        warp_id = thread_idx // self.WARP_SIZE
+        for t in range(entry_start + warp_id, entry_end, num_warps()):
+            l = ld(self.task_deps_ptr + t * self.INT_PER_DEPS + 0)
+            r = ld(self.task_deps_ptr + t * self.INT_PER_DEPS + 1)
+            num_signals = r - l
+            sb_wait_base_ptr = self.scoreboard_table + l
+            for i in range(lane_id, num_signals, self.WARP_SIZE):
+                while ld_acquire(sb_wait_base_ptr + i, "gpu") != self.TILE_READY_SIGNAL:
+                    pass
+
         __syncthreads()
 
     @triton.jit

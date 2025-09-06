@@ -111,8 +111,8 @@ class TPAttnBuilder:
         self._builder.make_qk_norm_rope_update_kvcache(qkv_proj_out_bsnh, key_cache, value_cache, block_tables, kv_lens,
                                                        self.q_norm_w, self.k_norm_w, cos_cache, sin_cache, q_norm_rope,
                                                        self.q_norm_eps, self.k_norm_eps)
-        self._builder.make_attn(q_norm_rope, key_cache, value_cache, block_tables, kv_lens, attn_out, self.sm_scale,
-                                self.soft_cap)
+        self._builder.make_flash_decode(q_norm_rope, key_cache, value_cache, block_tables, kv_lens, attn_out,
+                                        self.sm_scale, self.soft_cap)
         attn_out_2d = attn_out.reshape(num_tokens, self.q_size)
         self._builder.make_o_proj(attn_out_2d, self.wo, o_proj_out)
         if self.world_size > 1:
