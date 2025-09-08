@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  amd-build-and-test:
+  amd-unit-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 45
@@ -45,6 +45,36 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
           # gemm rs
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
+  amd-e2e-test:
+    name: Build and Test on AMD GPUs
+    runs-on: "amd-gfx942-mi325"
+    timeout-minutes: 45
+    container:
+        image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.triton
+    env:
+      TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -y && apt install -y libopenmpi-dev
+          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          pip3 install pybind11
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+      - name: Build rocmshmem bind
+        run: |
+          bash ./shmem/rocshmem_bind/build.sh
+      - name: Build triton-distributed
+        run: |
+          pip3 install -e python --verbose --no-build-isolation --use-pep517
       - name: E2E tests
         run: |
           bash ./scripts/build_e2e_env.sh --download_model
