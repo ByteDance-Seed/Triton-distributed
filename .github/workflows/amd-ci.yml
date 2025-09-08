@@ -47,7 +47,7 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
       - name: E2E tests
         run: |
-          bash ./scripts/build_e2e_env.sh
+          bash ./scripts/build_e2e_env.sh --download_model
           CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B
           CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B --per_op
           # TODO: uncomment below tests until CI image has a working flash-attention installed

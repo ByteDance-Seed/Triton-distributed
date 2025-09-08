@@ -101,6 +101,7 @@ if command -v nvcc &> /dev/null; then
 elif command -v hipcc &> /dev/null; then
     echo "AMD ROCm compiler (hipcc) found. Proceeding with ROCm-specific installations."
     echo "Note: flashinfer does not currently support ROCm and will be skipped."
+    pip install flash-attn --no-build-isolation
     echo "Finished installing ROCm-specific libraries."
 else
     echo "NVIDIA CUDA compiler (nvcc) and AMD ROCm compiler (hipcc) not found."
