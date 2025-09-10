@@ -113,7 +113,13 @@ def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
 
 def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
     torch.cuda.synchronize()
-    tensor = nvshmem.core.tensor(shape, dtype=dtype)
+    # NVSHMEM doesn't support fp8 dtypes, use int8 as storage
+    if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        tensor = nvshmem.core.tensor(shape, dtype=torch.int8)
+        # View as fp8 type
+        tensor = tensor.view(dtype)
+    else:
+        tensor = nvshmem.core.tensor(shape, dtype=dtype)
     torch.cuda.synchronize()
     return tensor
 
