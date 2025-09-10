@@ -7,9 +7,18 @@ The profiler provides separate interfaces for **Device Side** and **Host Side** 
 ## 1. Device Side Interfaces
 Used to initialize the profiler and record start/end times of target tasks within the kernel.
 
+### 1.0 Dependencies
+The intra-kernel profiler relies on `tg4perfetto` to generate trace for now.
+Install `tg4perfetto` first:
+```bash
+pip install tg4perfetto
+```
+
 ### 1.1 Profiler Initialization
 Create a profiler instance with configuration parameters:
 ```python
+from triton_dist.tools.profiler import Profiler
+
 profiler = Profiler.create(
     profiler_buffer=profiler_buf,
     group_id=0,
@@ -48,6 +57,8 @@ Used to manage profiler buffers and export trace files, with two usage modes: Wr
 A context-manager-based interface simplifying buffer management and trace export:
 
 ```python
+from triton_dist.tools.profiler import ProfilerBuffer
+
 with ProfilerBuffer(
     max_num_profile_slots=1000000,
     trace_file="copy",
@@ -95,9 +106,9 @@ copy_1d_tilewise_kernel[grid](
 
 # Export trace data
 export_to_perfetto_trace(
-    profile_buf=profile_buf,
+    profiler_buffer=profile_buf,
     task_names=["perfect", "non-perfect"],
-    trace_file="copy"
+    file_name="copy"
 )
 ```
 
