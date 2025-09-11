@@ -54,6 +54,7 @@ class TensorDesc:
 @tl.core._aggregate
 class TaskBaseInfo:
     io_tensors_ptr: tl.tensor
+    task_type: tl.tensor
     layer_id: tl.tensor
     task_id: tl.tensor
     tile_id_or_start: tl.tensor
@@ -63,9 +64,10 @@ class TaskBaseInfo:
     INT_PER_TENSOR: tl.constexpr
     is_tile_wise: tl.constexpr
 
-    def __init__(self, io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_entry_start, depend_entry_end,
-                 MAX_NUM_TENSOR_DIMS, is_tile_wise=tl.constexpr(True)):
+    def __init__(self, io_tensors_ptr, task_type, layer_id, task_id, tile_id_or_start, depend_entry_start,
+                 depend_entry_end, MAX_NUM_TENSOR_DIMS, is_tile_wise=tl.constexpr(True)):
         self.io_tensors_ptr = io_tensors_ptr
+        self.task_type = task_type
         self.layer_id = layer_id
         self.task_id = task_id
         self.tile_id_or_start = tile_id_or_start

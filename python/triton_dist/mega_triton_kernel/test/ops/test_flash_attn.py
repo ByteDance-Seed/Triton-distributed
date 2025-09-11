@@ -122,6 +122,8 @@ def parse_args():
     parser.add_argument("--profile", default=False, action="store_true", help="enable kernel level profiling")
     parser.add_argument("--intra_kernel_profile", default=False, action="store_true",
                         help="enable intra kernel profiling")
+    parser.add_argument("--enable_runtime_scheduler", default=False, action="store_true",
+                        help="enable runtime scheduler")
 
     return parser.parse_args()
 
@@ -132,7 +134,8 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     profile = args.profile
 
-    builder = ModelBuilder(num_warps=8, enable_profiling=args.intra_kernel_profile)
+    builder = ModelBuilder(num_warps=8, enable_profiling=args.intra_kernel_profile,
+                           enable_runtime_scheduler=args.enable_runtime_scheduler)
 
     triton.set_allocator(default_alloc_fn)
     ctx = get_torch_prof_ctx(profile)

@@ -67,11 +67,12 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+
     assert args.dtype == "bfloat16"
 
     dtype = DTYPE_MAP[args.dtype]
     model_config = ModelConfig(model_name=args.model, max_length=args.max_length, dtype=dtype, rank=RANK,
-                               world_size=WORLD_SIZE)
+                               world_size=WORLD_SIZE, local_only=True)
 
     builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE,
                            enable_profiling=args.intra_kernel_profile)
@@ -125,6 +126,7 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             if args.intra_kernel_profile:
                 builder.dump_trace()
+                print(f"sm act = {builder.get_sm_activity()}")
             builder.finalize()
     if args.profile:
         import os
