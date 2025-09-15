@@ -28,7 +28,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld
+from triton.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
 from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid)
 
@@ -93,31 +93,26 @@ def kernel_dispatch_token(
                         target_rank,
                     )
 
+            membar(scope="gl")
             __syncthreads()
-
-            count = tl.atomic_add(counter_ptr + target_node, 1, scope="gpu", sem="release")  # noqa: F841
             libshmem_device.fence()
 
-            while ld_acquire(counter_ptr + target_node, "gpu") != num_pid:
-                pass
-
-
-#            __syncthreads()
-            if pid == 0:
-                if thread_idx == 0:
-                    libshmem_device.signal_op(
-                        signals_for_nodes + node_id,
-                        1,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        target_rank,
-                    )
+            if thread_idx == 0:
+                libshmem_device.signal_op(
+                    signals_for_nodes + node_id,
+                    1,
+                    libshmem_device.NVSHMEM_SIGNAL_ADD,
+                    target_rank,
+                )
 
         __syncthreads()
         src_send_node = (node_id - node_offset + nnodes) % nnodes
         if node_offset > 0:
             if thread_idx == 0:
-                libshmem_device.signal_wait_until(signals_for_nodes + src_send_node, libshmem_device.NVSHMEM_CMP_EQ, 1)
+                libshmem_device.signal_wait_until(signals_for_nodes + src_send_node, libshmem_device.NVSHMEM_CMP_EQ,
+                                                  num_pid)
             __syncthreads()
+        membar(scope="gl")
         src_rank = local_rank + src_send_node * local_world_size
         token_num = tl.load(num_input_tokens_per_rank + src_rank)
         for token_offset in range(global_warp_id, token_num, total_warps):
