@@ -39,6 +39,8 @@ jobs:
           pip3 install -e python --verbose --no-build-isolation --use-pep517
       - name: Unit tests
         run: |
+          # rocshmem api tests
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_rocshmem_api.py
           # distributed ops
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_distributed-notify-wait.py
           # ag gemm
