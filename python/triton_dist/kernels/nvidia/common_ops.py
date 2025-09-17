@@ -305,10 +305,8 @@ def bisect_right_kernel(sorted_values_ptr,  # Pointer to sorted input array (1D)
                         target_values,  # Pointer to search values (1D)
                         N: tl.constexpr,  # Length of sorted array
                         ):
-    # Binary search initialization
     index = tl.full((target_values.numel, ), -1, dtype=tl.int32)
 
-    # Binary search loop
     for i in tl.range(N):
         x = tl.load(sorted_values_ptr + i)
         # if index > 0 => index
@@ -326,22 +324,22 @@ def bisect_right_kernel_aligned(
     N: tl.constexpr,
 ):
     # Binary search initialization
-    low = tl.full((target_values.numel, ), 0, dtype=tl.int32)
-    high = tl.full((target_values.numel, ), N, dtype=tl.int32)  # Length of the sorted array
+    low = tl.full((target_values.numel, ), -1, dtype=tl.int32)
+    high = tl.full((target_values.numel, ), N, dtype=tl.int32)
 
-    N_LOG2 = log2(N)
+    ITERS: tl.constexpr = N.bit_length()
     # Binary search loop
-    for _ in tl.range(N_LOG2):
+    for _ in tl.range(ITERS):
+        active_mask = high - low > 1
         mid = (low + high) // 2
-        mid_val = tl.load(sorted_values_ptr + mid)
+        val = tl.load(sorted_values_ptr + mid, mask=active_mask, other=0)
+        go_right = val <= target_values
 
         # Update search bounds
-        low = tl.where(mid_val <= target_values, mid + 1, low)
-        high = tl.where(mid_val > target_values, mid, high)
+        low = tl.where(active_mask & go_right, mid, low)
+        high = tl.where(active_mask & ~go_right, mid, high)
 
-    low = tl.where(low != high and tl.load(sorted_values_ptr + low) <= target_values, low + 1, low)
-    # Store result
-    return low
+    return low + 1
 
 
 def _wait_eq_cuda(signal_tensor: torch.Tensor, signal: int, stream: Optional[torch.cuda.Stream] = None,

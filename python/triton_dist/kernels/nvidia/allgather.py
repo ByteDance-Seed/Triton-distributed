@@ -32,7 +32,7 @@ from typing import List
 import nvshmem.bindings.nvshmem as pynvshmem
 import nvshmem.core
 import torch
-from cuda import cuda, cudart
+from cuda import cudart
 
 import triton
 import triton.language as tl
@@ -93,14 +93,7 @@ def cp_engine_producer_all_gather_full_mesh_push(
         for dst_rank in push_order:
             dst = remote_tensor_buffers[dst_rank][rank * M_per_rank:(rank + 1) * M_per_rank, :]
             dst.copy_(src)
-
-            (err, ) = cuda.cuStreamWriteValue32(
-                stream.cuda_stream,
-                barrier_buffers[dst_rank][rank].data_ptr(),
-                1,
-                cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-            )
-            CUDA_CHECK(err)
+            _set_signal_cuda(barrier_buffers[dst_rank][rank], 1, stream)
 
 
 def cp_engine_producer_all_gather_full_mesh_pull(
@@ -127,14 +120,7 @@ def cp_engine_producer_all_gather_full_mesh_pull(
             dst = remote_tensor_buffers[rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
             src = remote_tensor_buffers[src_rank][src_rank * M_per_rank:(src_rank + 1) * M_per_rank, :]
             dst.copy_(src)
-
-            (err, ) = cuda.cuStreamWriteValue32(
-                stream.cuda_stream,
-                barrier_buffers[rank][src_rank].data_ptr(),
-                1,
-                cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-            )
-            CUDA_CHECK(err)
+            _set_signal_cuda(barrier_buffers[rank][src_rank], 1, stream)
 
 
 def cp_engine_producer_all_gather_ring_push_1d(
@@ -148,30 +134,6 @@ def cp_engine_producer_all_gather_ring_push_1d(
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
-    if flag_dtype == torch.int32:
-        wait_value_fn = cuda.cuStreamWaitValue32
-        write_value_fn = cuda.cuStreamWriteValue32
-    else:
-        wait_value_fn = cuda.cuStreamWaitValue64
-        write_value_fn = cuda.cuStreamWriteValue64
-
-    def wait_ready(rank: int, segment: int, stream: torch.cuda.Stream):
-        (err, ) = wait_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-        CUDA_CHECK(err)
-
-    def set_ready(rank, segment, stream: torch.cuda.Stream):
-        (err, ) = write_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
-        CUDA_CHECK(err)
 
     M_per_rank, N = local_tensor.shape
     to_rank = (rank - 1 + num_ranks) % num_ranks
@@ -186,11 +148,11 @@ def cp_engine_producer_all_gather_ring_push_1d(
             M_start = send_segment * M_per_rank
             M_end = M_start + M_per_rank
             if stage != 0:
-                wait_ready(rank, send_segment, stream)
+                _wait_eq_cuda(barrier_buffers[rank][send_segment], 1, stream)
             dst = remote_tensor_buffers[to_rank][M_start:M_end, :]
             src = remote_tensor_buffers[rank][M_start:M_end, :]
             dst.copy_(src)
-            set_ready(to_rank, send_segment, stream)
+            _set_signal_cuda(barrier_buffers[to_rank][send_segment], 1, stream)
 
 
 def cp_engine_producer_all_gather_ring_push_numa_2d(
@@ -204,30 +166,6 @@ def cp_engine_producer_all_gather_ring_push_numa_2d(
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
-    if flag_dtype == torch.int32:
-        wait_value_fn = cuda.cuStreamWaitValue32
-        write_value_fn = cuda.cuStreamWriteValue32
-    else:
-        wait_value_fn = cuda.cuStreamWaitValue64
-        write_value_fn = cuda.cuStreamWriteValue64
-
-    def wait_ready(rank: int, segment: int, stream: torch.cuda.Stream):
-        (err, ) = wait_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-        CUDA_CHECK(err)
-
-    def set_ready(rank, segment, stream: torch.cuda.Stream):
-        (err, ) = write_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
-        CUDA_CHECK(err)
 
     NUMA_WORLD_SIZE = get_numa_world_size()
     assert (num_ranks % NUMA_WORLD_SIZE == 0), f"num_ranks {num_ranks} should be divisible by NUMA {NUMA_WORLD_SIZE}"
@@ -253,11 +191,11 @@ def cp_engine_producer_all_gather_ring_push_numa_2d(
             M_start = send_segment * M_per_rank
             M_end = M_start + M_per_rank
             if stage != 0:
-                wait_ready(rank, send_segment, stream)
+                _wait_eq_cuda(barrier_buffers[rank][send_segment], 1, stream)
             dst = remote_tensor_buffers[to_rank][M_start:M_end, :]
             src = remote_tensor_buffers[rank][M_start:M_end, :]
             dst.copy_(src)
-            set_ready(to_rank, send_segment, stream)
+            _set_signal_cuda(barrier_buffers[to_rank][send_segment], 1, stream)
 
 
 def cp_engine_producer_all_gather_intra_node(
@@ -303,30 +241,6 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
-    if flag_dtype == torch.int32:
-        wait_value_fn = cuda.cuStreamWaitValue32
-        write_value_fn = cuda.cuStreamWriteValue32
-    else:
-        wait_value_fn = cuda.cuStreamWaitValue64
-        write_value_fn = cuda.cuStreamWriteValue64
-
-    def wait_ready(rank: int, segment: int, stream: torch.cuda.Stream):
-        (err, ) = wait_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-        CUDA_CHECK(err)
-
-    def set_ready(rank, segment, stream: torch.cuda.Stream):
-        (err, ) = write_value_fn(
-            stream.cuda_stream,
-            barrier_buffers[rank][segment].data_ptr(),
-            1,
-            cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-        )
-        CUDA_CHECK(err)
 
     nnodes = num_ranks // num_local_ranks
     M_per_rank, N = local_tensor.shape
@@ -369,11 +283,11 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
                 M_start = segment * M_per_rank
                 M_end = M_start + M_per_rank
                 if stage != 0 or n != 0:
-                    wait_ready(local_rank, segment, intranode_stream)
+                    _wait_eq_cuda(barrier_buffers[local_rank][segment], 1, intranode_stream)
                 dst = remote_tensor_buffers[to_rank][M_start:M_end, :]
                 src = remote_tensor_buffers[local_rank][M_start:M_end, :]
                 dst.copy_(src)
-                set_ready(to_rank, segment, intranode_stream)
+                _set_signal_cuda(barrier_buffers[to_rank][segment], 1, intranode_stream)
 
 
 @triton.jit(do_not_specialize=["rank", "local_world_size", "world_size"])

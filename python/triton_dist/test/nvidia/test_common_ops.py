@@ -174,6 +174,7 @@ def test_bisect_cases():
         sorted_tensor = torch.tensor(range(1, 33, 1), device="cuda", dtype=torch.int32)
 
         values = torch.randint(0, 36, (32, ), device="cuda", dtype=torch.int32)
+        values = torch.arange(0, 64, dtype=torch.int32, device="cuda")
 
         # Triton implementation
         triton_result = bisect_triton(sorted_tensor, values, side=side, aligned=aligned)
@@ -187,9 +188,9 @@ def test_bisect_cases():
         print(f"bisect_{side} {'aligned' if aligned else ''} passed!")
 
     _test_bisect(side="right", aligned=False)
-    _test_bisect(side="right", aligned=False)
-    _test_bisect(side="left", aligned=True)
+    _test_bisect(side="right", aligned=True)
     _test_bisect(side="left", aligned=False)
+    _test_bisect(side="left", aligned=True)
 
 
 if __name__ == "__main__":
@@ -202,3 +203,5 @@ if __name__ == "__main__":
     # this test corrupt the CUDA context. leave it in last
     test_barrier_on_this_grid()
     finalize_distributed()
+
+    test_bisect_cases()

@@ -40,7 +40,7 @@ from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid, Barrier
 from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, has_fullmesh_nvlink, has_tma,
                                launch_cooperative_grid_options, nvshmem_barrier_all_on_stream, nvshmem_create_tensors,
                                nvshmem_free_tensor_sync)
-from triton.language.extra.cuda.language_extra import tid, __syncthreads, ld, st
+from triton.language.extra.cuda.language_extra import tid, __syncthreads, ld, st, atomic_add
 
 
 @dataclasses.dataclass
@@ -180,89 +180,28 @@ def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dt
 
 
 @triton.jit
-def add_continuous_kernel(
-    lhs,
-    rhs,
-    out,
-    N,
-    BLOCK_SIZE: tl.constexpr,
-):
+def add_continuous_kernel(lhs_ptr, rhs_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
     n_blocks = tl.cdiv(N, BLOCK_SIZE)
     num_pid = tl.num_programs(axis=0)
-
-    lhs_block_ptr = tl.make_block_ptr(
-        base=lhs,
-        shape=(N, ),
-        strides=(1, ),
-        offsets=(block_start, ),
-        block_shape=(BLOCK_SIZE, ),
-        order=(0, ),
-    )
-    rhs_block_ptr = tl.make_block_ptr(
-        base=rhs,
-        shape=(N, ),
-        strides=(1, ),
-        offsets=(block_start, ),
-        block_shape=(BLOCK_SIZE, ),
-        order=(0, ),
-    )
-    out_block_ptr = tl.make_block_ptr(
-        base=out,
-        shape=(N, ),
-        strides=(1, ),
-        offsets=(block_start, ),
-        block_shape=(BLOCK_SIZE, ),
-        order=(0, ),
-    )
-    for _ in range(pid, n_blocks, num_pid):
-        tl.store(
-            out_block_ptr,
-            tl.load(lhs_block_ptr, boundary_check=(0, )) + tl.load(rhs_block_ptr, boundary_check=(0, )),
-            boundary_check=(0, ),
-        )
-        lhs_block_ptr = tl.advance(lhs_block_ptr, [BLOCK_SIZE * num_pid])
-        rhs_block_ptr = tl.advance(rhs_block_ptr, [BLOCK_SIZE * num_pid])
-        out_block_ptr = tl.advance(out_block_ptr, [BLOCK_SIZE * num_pid])
+    for n in range(pid, n_blocks, num_pid):
+        offs = n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+        lhs = tl.load(lhs_ptr + offs, mask)
+        rhs = tl.load(rhs_ptr + offs, mask)
+        tl.store(out_ptr + offs, lhs + rhs, mask)
 
 
 @triton.jit
-def copy_continuous_kernel(
-    src_ptr,
-    dst_ptr,
-    N,
-    BLOCK_SIZE: tl.constexpr,
-):
+def copy_continuous_kernel(src_ptr, dst_ptr, N, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
     n_blocks = tl.cdiv(N, BLOCK_SIZE)
     num_pid = tl.num_programs(axis=0)
-
-    src_block_ptr = tl.make_block_ptr(
-        base=src_ptr,
-        shape=(N, ),
-        strides=(1, ),
-        offsets=(block_start, ),
-        block_shape=(BLOCK_SIZE, ),
-        order=(0, ),
-    )
-    dst_block_ptr = tl.make_block_ptr(
-        base=dst_ptr,
-        shape=(N, ),
-        strides=(1, ),
-        offsets=(block_start, ),
-        block_shape=(BLOCK_SIZE, ),
-        order=(0, ),
-    )
-    for _ in range(pid, n_blocks, num_pid):
-        tl.store(
-            dst_block_ptr,
-            tl.load(src_block_ptr, boundary_check=(0, )),
-            boundary_check=(0, ),
-        )
-        src_block_ptr = tl.advance(src_block_ptr, [BLOCK_SIZE * num_pid])
-        dst_block_ptr = tl.advance(dst_block_ptr, [BLOCK_SIZE * num_pid])
+    for n in range(pid, n_blocks, num_pid):
+        offs = n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+        val = tl.load(src_ptr + offs, mask)
+        tl.store(dst_ptr + offs, val, mask)
 
 
 def add_continuous(
@@ -275,11 +214,31 @@ def add_continuous(
     assert lhs.dtype == rhs.dtype and lhs.numel() == rhs.numel()
     if out is None:
         out = torch.empty_like(lhs)
+    block_size = num_warps * 32 * 16 // lhs.itemsize
     add_continuous_kernel[(num_ctas, )](  # local memory bw is very high. use many blocks
-        lhs, rhs, out, out.numel(), num_warps=num_warps,
-        BLOCK_SIZE=num_warps * 32 * 8 * 4,  # per thread has 8*4 elements
+        lhs,
+        rhs,
+        out,
+        out.numel(),
+        block_size,
     )
     return out
+
+
+def copy_continous(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    num_ctas=8,
+    num_warps=32,
+):
+    assert src.dtype == dst.dtype and src.numel() == dst.numel()
+    block_size = num_warps * 32 * 16 // src.itemsize
+    copy_continuous_kernel[(num_ctas, )](  # local memory bw is very high. use many blocks
+        src,
+        dst,
+        src.numel(),
+        block_size,
+    )
 
 
 def reduce_scatter_ring_push_1d_intra_node_ce(
@@ -331,17 +290,18 @@ def reduce_scatter_ring_push_1d_intra_node_kernel(
     symm_input_flag_ptr,
     symm_reduce_ptr,
     symm_reduce_flag_ptr,
-    grid_barrier_ptr,  # use this to sync many grids
+    counter,  # use this to sync many grids
     output_ptr,
     elems_per_rank,
     BLOCK_SIZE: tl.constexpr,
     use_cooperative: tl.constexpr,
 ):
     to_rank = (rank - 1 + num_ranks) % num_ranks
-    peer_reduce_ptr = dl.symm_at(symm_reduce_ptr, to_rank)
+    peer_reduce_ptr = tl.multiple_of(dl.symm_at(symm_reduce_ptr, to_rank), 16)
     peer_symm_reduce_flag_ptr = dl.symm_at(symm_reduce_flag_ptr, to_rank)
     thread_idx = tid(0)
     pid = tl.program_id(0)
+    num_pid = tl.num_programs(0)
 
     for stage in range(num_ranks):
         segment = (rank + stage + 1) % num_ranks
@@ -351,7 +311,7 @@ def reduce_scatter_ring_push_1d_intra_node_kernel(
         # wait by many CTA's is OK
         # wait for data ready
         if thread_idx == 0:
-            while ld(symm_input_flag_ptr + segment, semantic="acquire", scope="gpu") != 1:
+            while ld(symm_input_flag_ptr + segment, semantic="acquire", scope="sys") != 1:
                 pass
         __syncthreads()
 
@@ -368,11 +328,14 @@ def reduce_scatter_ring_push_1d_intra_node_kernel(
             add_continuous_kernel(src_ptr, reduce_buffer_ptr, output_ptr if stage == num_ranks - 1 else dst_ptr,
                                   elems_per_rank, BLOCK_SIZE)  # directly reduce to output
 
-        barrier_on_this_grid(grid_barrier_ptr, use_cooperative)
         # set flag only after all CTAs done memcpy/reduce
-        if pid == 0 and thread_idx == 0:
-            st(peer_symm_reduce_flag_ptr + segment, 1, semantic="release", scope="sys")
+        if thread_idx == 0:
+            val = atomic_add(counter + segment, 1, semantic="release", scope="gpu")
+            if val == num_pid - 1:
+                st(peer_symm_reduce_flag_ptr + segment, 1, semantic="release", scope="sys")
+                st(counter + segment, 0)
         __syncthreads()
+
     if pid == 0:
         libshmem_device.barrier_all_block()
 
@@ -386,13 +349,16 @@ def reduce_scatter_ring_push_1d_intra_node_sm(
     symm_reduce_flag: torch.Tensor,
     grid_barrier: torch.Tensor,
     output: Optional[torch.Tensor] = None,
-    num_sms=1,
+    num_sms=0,
 ):
     M, _ = input_tensor.shape
     M_per_rank = M // num_ranks
     output = output if output is not None else torch.empty(
         (M_per_rank, _), dtype=input_tensor.dtype, device=input_tensor.device)
     num_warps = 32
+    block_size = 32 * num_warps * 16 // input_tensor.dtype.itemsize
+    if num_sms == 0:
+        num_sms = triton.cdiv(input_tensor.numel(), block_size)
     reduce_scatter_ring_push_1d_intra_node_kernel[(num_sms, )](
         rank,
         num_ranks,
@@ -403,7 +369,7 @@ def reduce_scatter_ring_push_1d_intra_node_sm(
         grid_barrier,
         output,
         input_tensor.numel() // num_ranks,
-        BLOCK_SIZE=32 * num_warps * 16 // input_tensor.dtype.itemsize,  # each thread copy a uint4
+        BLOCK_SIZE=block_size,  # each thread copy a uint4
         num_warps=num_warps,
         use_cooperative=True,
         **launch_cooperative_grid_options(),
@@ -473,6 +439,7 @@ def reduce_scatter_ring_push_1d_intra_node_rma_kernel(
             libshmem_device.putmem_signal_nbi_block(dst_ptr, dst_ptr if stage != 0 else src_ptr,
                                                     elems_per_rank * ITEM_SIZE, symm_reduce_flag_ptr, 1,
                                                     libshmem_device.NVSHMEM_SIGNAL_SET, to_rank)
+
     if pid == 0:
         libshmem_device.barrier_all_block()
 

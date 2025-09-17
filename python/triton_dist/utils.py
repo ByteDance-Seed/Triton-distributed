@@ -285,10 +285,29 @@ def perf_func(func, iters, warmup_iters):
             start_event.record()
         output = func()
     stop_event.record()
-    start_event.wait()
     stop_event.wait()
     torch.cuda.current_stream().synchronize()
     duration_ms = start_event.elapsed_time(stop_event)
+    return output, duration_ms / iters
+
+
+def perf_func_with_l2_reset(func, iters, warmup_iters):
+    # total 256MB is enough to clear L2 cache
+    cache = torch.zeros((64 * 1024 * 1024, ), dtype=torch.int, device="cuda")
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    stop_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    for _ in range(warmup_iters):
+        output = func()
+        cache.zero_()
+    for start_event, stop_event in zip(start_events, stop_events):
+        start_event.record()
+        output = func()
+        stop_event.record()
+        cache.zero_()
+
+    torch.cuda.current_stream().synchronize()
+    duration_ms = sum(
+        [start_event.elapsed_time(stop_event) for start_event, stop_event in zip(start_events, stop_events)])
     return output, duration_ms / iters
 
 
@@ -1093,6 +1112,13 @@ def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps
                                                                compiled.metadata.shared)
     CUDA_CHECK(ret[0])
     return ret[1]
+
+
+def check_and_get_clocks():
+    clocks = [torch.cuda.clock_rate(i) for i in range(torch.cuda.device_count())]
+    assert len(set(clocks)) == 1, f"clock rates are not the same: {clocks}"
+    graphic_clock = clocks[0]  # in MHz
+    return graphic_clock
 
 
 def cuda_stream_max_priority():

@@ -654,10 +654,7 @@ def moe_grouped_gemm_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_be = tl.load(expert_ids_ptr + pid_m)
-    __syncthreads()
-
     b_ptrs = (b_ptr + offs_be * stride_be + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    __syncthreads()
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K))
@@ -675,7 +672,233 @@ def moe_grouped_gemm_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def run_moe_ag_triton_non_overlap(x_shard: torch.Tensor, weights: torch.Tensor, chosen_experts: torch.Tensor):
+@triton.jit
+def moe_grouped_gemm_persistent_kernel_slow(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tiled_m_ptr,
+    ntiles_pad_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    TOP_K: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    start_pid = tl.program_id(axis=0)
+
+    num_pid_m = tl.load(ntiles_pad_ptr)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    num_tiles = num_pid_m * num_pid_n
+
+    tiles_per_SM = num_tiles // NUM_SMS
+    if start_pid < num_tiles % NUM_SMS:
+        tiles_per_SM += 1
+
+    tile_id = start_pid - NUM_SMS
+    tile_id_c = start_pid - NUM_SMS
+    ki = -1
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for _ in tl.range(0, k_tiles * tiles_per_SM):
+        ki = tl.where(ki == k_tiles - 1, 0, ki + 1)
+        if ki == 0:
+            tile_id += NUM_SMS
+
+        pid_m, pid_n = swizzle_2d(tile_id, num_pid_m, num_pid_n, GROUP_SIZE_M)
+
+        if pid_m < num_pid_m:
+            tiled_m = tl.load(tiled_m_ptr + pid_m)
+            offs_token_id = tiled_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+            token_mask = (offs_token < M) & (offs_token >= 0)
+
+            offs_be = tl.load(expert_ids_ptr + pid_m)
+            offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+
+            a_ptrs_base = a_ptr + offs_token[:, None] // TOP_K * stride_am
+            b_ptrs_base = b_ptr + offs_be * stride_be + offs_bn[None, :] * stride_bn
+
+            offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            a_ptrs = a_ptrs_base + offs_k[None, :] * stride_ak
+            b_ptrs = b_ptrs_base + offs_k[:, None] * stride_bk
+
+            k_mask = tl.arange(0, BLOCK_SIZE_K) < K - ki * BLOCK_SIZE_K
+            a = tl.load(a_ptrs, mask=token_mask[:, None] & k_mask[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=k_mask[:, None], other=0.0)
+
+            accumulator = tl.dot(a, b, accumulator)
+
+        if ki == k_tiles - 1:
+            tile_id_c += NUM_SMS
+            pid_m_c, pid_n_c = swizzle_2d(tile_id_c, num_pid_m, num_pid_n, GROUP_SIZE_M)
+
+            if pid_m_c < num_pid_m:
+                tiled_m_c = tl.load(tiled_m_ptr + pid_m_c)
+                offs_token_id_c = tiled_m_c * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                offs_token_c = tl.load(sorted_token_ids_ptr + offs_token_id_c)
+                token_mask_c = (offs_token_c < M) & (offs_token_c >= 0)
+
+                offs_cn_c = pid_n_c * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                c_ptrs = c_ptr + offs_token_c[:, None] * stride_cm + offs_cn_c[None, :] * stride_cn
+                c_mask = token_mask_c[:, None] & (offs_cn_c[None, :] < N)
+                tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
+
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+
+@triton.jit
+def moe_grouped_gemm_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tiled_m_ptr,
+    ntiles_pad_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    TOP_K: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    sm_id = tl.program_id(axis=0)
+    num_pid_m = tl.load(ntiles_pad_ptr)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    tiles_m_per_sm = tl.cdiv(num_pid_m, NUM_SMS)
+    m_start = sm_id * tiles_m_per_sm
+    m_end = tl.minimum((sm_id + 1) * tiles_m_per_sm, num_pid_m)
+
+    for pid_m in range(m_start, m_end):
+        offs_be = tl.load(expert_ids_ptr + pid_m)
+
+        b_ptrs_expert_base = b_ptr + offs_be * stride_be
+
+        tiled_m = tl.load(tiled_m_ptr + pid_m)
+        offs_token_id = tiled_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+        token_mask = (offs_token < M) & (offs_token >= 0)
+
+        a_ptrs_base = a_ptr + (offs_token[:, None] // TOP_K * stride_am)
+
+        for pid_n in range(0, num_pid_n):
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+            offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+
+            b_ptrs_base_with_n = b_ptrs_expert_base + offs_bn[None, :] * stride_bn
+
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                offs_k = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                k_mask = offs_k < K
+
+                a_ptrs = a_ptrs_base + offs_k[None, :] * stride_ak
+                b_ptrs = b_ptrs_base_with_n + offs_k[:, None] * stride_bk
+
+                a = tl.load(a_ptrs, mask=token_mask[:, None] & k_mask[None, :], other=0.0)
+                b = tl.load(b_ptrs, mask=k_mask[:, None], other=0.0)
+
+                accumulator = tl.dot(a, b, accumulator)
+
+            offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            c_ptrs = c_ptr + offs_token[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+            c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+            tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
+
+
+@triton.jit
+def moe_grouped_gemm_persistent_tma_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tiled_m_ptr,
+    ntiles_pad_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    TOP_K: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    sm_id = tl.program_id(axis=0)
+    num_pid_m = tl.load(ntiles_pad_ptr)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    tiles_m_per_sm = tl.cdiv(num_pid_m, NUM_SMS)
+    m_start = sm_id * tiles_m_per_sm
+    m_end = tl.minimum((sm_id + 1) * tiles_m_per_sm, num_pid_m)
+
+    for pid_m in range(m_start, m_end):
+        offs_be = tl.load(expert_ids_ptr + pid_m)
+        b_desc = tl.make_tensor_descriptor(
+            b_ptr + offs_be * stride_be,
+            shape=[K, N],
+            strides=[stride_bk, stride_bn],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+        )
+        tiled_m = tl.load(tiled_m_ptr + pid_m)
+        offs_token_id = tiled_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+        token_mask = (offs_token < M) & (offs_token >= 0)
+        a_ptrs_base = a_ptr + (offs_token[:, None] // TOP_K * stride_am)
+
+        for pid_n in range(0, num_pid_n):
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+            offs_bn = pid_n * BLOCK_SIZE_N
+
+            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                offs_k = k * BLOCK_SIZE_K
+                offs_k_range = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                k_mask = offs_k_range < K
+                a_ptrs = a_ptrs_base + offs_k_range[None, :] * stride_ak
+                a = tl.load(a_ptrs, mask=token_mask[:, None] & k_mask[None, :], other=0.0)
+                b = b_desc.load([offs_k, offs_bn])
+                accumulator = tl.dot(a, b, accumulator)
+
+            offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            c_ptrs = c_ptr + offs_token[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+            c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+            tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
+
+
+def run_moe_ag_triton_non_overlap(x_shard: torch.Tensor, weights: torch.Tensor, chosen_experts: torch.Tensor,
+                                  persistent: bool = False):
 
     # gather x
     M_per_rank, K = x_shard.shape
@@ -705,33 +928,68 @@ def run_moe_ag_triton_non_overlap(x_shard: torch.Tensor, weights: torch.Tensor, 
         dtype=x.dtype,
         device=torch.cuda.current_device(),
     )
-    grid = lambda META: ((triton.cdiv(M * topk, META["BLOCK_SIZE_M"]) + num_experts - 1) * triton.cdiv(
-        N_per_rank, META["BLOCK_SIZE_N"]), )
-    moe_grouped_gemm_kernel[grid](
-        x,
-        weights,
-        grouped_gemm_out,
-        sorted_gather_index,
-        expert_idx,
-        tiled_m,
-        ntiles_gpu,
-        M * topk,
-        N_per_rank,
-        K,
-        x.stride(0),
-        x.stride(1),
-        weights.stride(0),
-        weights.stride(1),
-        weights.stride(2),
-        grouped_gemm_out.stride(0),
-        grouped_gemm_out.stride(1),
-        BLOCK_SIZE_M=128,
-        BLOCK_SIZE_N=256,
-        BLOCK_SIZE_K=64,
-        GROUP_SIZE_M=8,
-        TOP_K=topk,
-        num_stages=3,
-        num_warps=8,
-    )
+    if persistent:
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+        device_properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+        NUM_SMS: int = device_properties.multi_processor_count
+        moe_grouped_gemm_persistent_tma_kernel[(NUM_SMS, )](
+            x,
+            weights,
+            grouped_gemm_out,
+            sorted_gather_index,
+            expert_idx,
+            tiled_m,
+            ntiles_gpu,
+            M * topk,
+            N_per_rank,
+            K,
+            x.stride(0),
+            x.stride(1),
+            weights.stride(0),
+            weights.stride(1),
+            weights.stride(2),
+            grouped_gemm_out.stride(0),
+            grouped_gemm_out.stride(1),
+            BLOCK_SIZE_M=128,
+            BLOCK_SIZE_N=256,
+            BLOCK_SIZE_K=64,
+            TOP_K=topk,
+            NUM_SMS=NUM_SMS,
+            num_stages=3,
+            num_warps=8,
+        )
+    else:
+        grid = lambda META: ((triton.cdiv(M * topk, META["BLOCK_SIZE_M"]) + num_experts - 1) * triton.cdiv(
+            N_per_rank, META["BLOCK_SIZE_N"]), )
+        moe_grouped_gemm_kernel[grid](
+            x,
+            weights,
+            grouped_gemm_out,
+            sorted_gather_index,
+            expert_idx,
+            tiled_m,
+            ntiles_gpu,
+            M * topk,
+            N_per_rank,
+            K,
+            x.stride(0),
+            x.stride(1),
+            weights.stride(0),
+            weights.stride(1),
+            weights.stride(2),
+            grouped_gemm_out.stride(0),
+            grouped_gemm_out.stride(1),
+            BLOCK_SIZE_M=128,
+            BLOCK_SIZE_N=256,
+            BLOCK_SIZE_K=64,
+            GROUP_SIZE_M=8,
+            TOP_K=topk,
+            num_stages=3,
+            num_warps=8,
+        )
 
     return grouped_gemm_out
