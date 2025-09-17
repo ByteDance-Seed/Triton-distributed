@@ -34,15 +34,17 @@ from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
 import pyrocshmem
 from triton.language.extra.hip.libdevice import thread_idx
-
+from triton_dist.language.extra import libshmem_device
 
 @triton.jit
 def producer_consumer_kernel(
+    ctx,
     rank: tl.constexpr,
     num_ranks: tl.constexpr,
     input_ptr,
     output_ptr,
     num_inputs: int,
+    queue_bufs_rank,
     queue_buf_ptr,
     signal_buf_ptr,  # *Pointer* to signals.
     queue_size: tl.constexpr,  # The length of queue in unit of BLOCKs
@@ -50,6 +52,8 @@ def producer_consumer_kernel(
     NUM_PRODUCER_SMS: tl.constexpr,
     NUM_CONSUMER_SMS: tl.constexpr,
 ):
+    libshmem_device.set_rocshmem_ctx(ctx)
+
     cur_signal_ptr = tl.load(signal_buf_ptr + rank).to(tl.pointer_type(tl.int32))
     cur_queue_ptr = tl.load(queue_buf_ptr + rank).to(tl.pointer_type(tl.float32))
     pid = tl.program_id(0)
@@ -71,7 +75,8 @@ def producer_consumer_kernel(
             input_ptr = dl.consume_token(input_ptr, token)  # consume the token to make sure the `wait` is needed
             data = tl.load(input_ptr + i * BLOCK_SIZE + offs)
             # TODO(zhengxuegui.0): Once rocshmem is ready, we can use `symm_at` to map the data pointer to remote peer rank
-            remote_queue_ptr = tl.load(queue_buf_ptr + peer_rank).to(tl.pointer_type(tl.float32))
+            remote_queue_ptr = dl.symm_at(queue_bufs_rank, peer_rank)
+            
             tl.store(remote_queue_ptr + queue_offset * BLOCK_SIZE + offs, data)
             # need a syncthreads to make sure all the data has been sent
             __syncthreads()
@@ -143,17 +148,19 @@ def main(TP_GROUP):
     rank = TP_GROUP.rank()
     num_ranks = TP_GROUP.size()
 
+    ctx = pyrocshmem.rocshmem_get_device_ctx()
+
     # The created tensor is by-default on current cuda device
-    queue_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [
+    queue_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
         QUEUE_SIZE * BLOCK_SIZE,
     ],  # Shape on each device
                                                       torch.float32)
     # Currently we use `store.release.u32` to impl notify signal, dl.notify requires 64bit unsigned signal type,
-    signal_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [
+    signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
         QUEUE_SIZE,
     ], torch.int32)
 
-    comm_bufs = pyrocshmem.hipipc_create_tensor_list(TP_GROUP, [num_ranks], torch.int32)
+    comm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
     comm_bufs[rank].fill_(0)
     comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_bufs], device=torch.cuda.current_device(),
                                 requires_grad=False)
@@ -186,11 +193,13 @@ def main(TP_GROUP):
         barrier_all_on_stream(rank, num_ranks, comm_buf_ptr, stream)
 
         producer_consumer_kernel[(20, )](  # use 20 SMs
+            ctx,
             rank,
             num_ranks,
             input_data,
             output_data,
             INPUT_SIZE,
+            queue_bufs[rank],
             queue_buf_ptr,
             signal_buf_ptr,
             QUEUE_SIZE,
@@ -214,7 +223,25 @@ def main(TP_GROUP):
 
 # Initialize the distributed system
 TP_GROUP = initialize_distributed()
+num_ranks = torch.distributed.get_world_size()
+rank_id = torch.distributed.get_rank()
+
+if rank_id==0:
+    uid = pyrocshmem.rocshmem_get_uniqueid()
+    bcast_obj = [uid]
+else:
+    bcast_obj = [None]
+
+torch.distributed.broadcast_object_list(bcast_obj, src=0)
+torch.distributed.barrier()
+
+pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+
+torch.cuda.synchronize()
+torch.distributed.barrier()
 # The main function
 main(TP_GROUP)
 # Finalize
+pyrocshmem.rocshmem_finalize()
+
 torch.distributed.destroy_process_group()
