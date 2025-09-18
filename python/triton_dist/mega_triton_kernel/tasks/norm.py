@@ -43,7 +43,7 @@ class QKVPackQKNormRopeSplitVConfig(ConfigBase):
 class QKNormRopeUpdateKVCacheConfig(ConfigBase):
     pass
 
-
+@dataclass
 class RMSNormConfig(ConfigBase):
     BLOCK_SIZE_N: int = 2048
 
