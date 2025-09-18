@@ -23,6 +23,7 @@
 #
 ################################################################################
 import torch
+from triton_dist.kernels.nvidia.gemm_allreduce import allreduce_op, gemm_op
 import triton
 from typing import Optional
 from triton_dist.utils import nvshmem_barrier_all_on_stream
@@ -45,6 +46,7 @@ class GemmARLayer(torch.nn.Module):
         copy_to_local: bool = True,
         NUM_COMM_SMS: int = 16,
         NUM_SM_MARGIN: int = 0,
+        TILE_MAP_LEVEL: int = 0,
         user_gemm_config: triton.Config = None,
     ):
         super().__init__()
@@ -65,6 +67,7 @@ class GemmARLayer(torch.nn.Module):
         self.NUM_GEMM_SMS = NUM_GEMM_SMS
         self.NUM_COMM_SMS = NUM_COMM_SMS
         self.USE_MULTIMEM_ST = True
+        self.TILE_MAP_LEVEL = TILE_MAP_LEVEL
         self.copy_to_local = copy_to_local
         self.user_gemm_config = user_gemm_config
 
@@ -81,11 +84,12 @@ class GemmARLayer(torch.nn.Module):
                                                  self.output_dtype, NUM_COMM_SMS=self.NUM_COMM_SMS)
         else:
             BM, BN, BK = 128, 256, 64
-            num_stages = 4
+            num_stages = 3
             num_warps = 8
             self.ar_stream = torch.cuda.Stream()
             self.ctx = create_gemm_ar_context(self.ar_stream, self.rank, self.world_size, self.local_world_size,
-                                              self.max_M, self.N, self.output_dtype, NUM_COMM_SMS=self.NUM_COMM_SMS)
+                                              self.max_M, self.N, self.output_dtype, NUM_COMM_SMS=self.NUM_COMM_SMS,
+                                              TILE_MAP_LEVEL=self.TILE_MAP_LEVEL)
         self.gemm_config = triton.Config(
             {
                 'BLOCK_SIZE_M': BM, 'BLOCK_SIZE_N': BN, "BLOCK_SIZE_K": BK, "GROUP_SIZE_M": 1, "NUM_GEMM_SMS":
@@ -104,13 +108,35 @@ class GemmARLayer(torch.nn.Module):
         input: torch.Tensor,  # [M, local_K]
         weight: torch.Tensor,  # [N, local_K]
         bias: Optional[torch.Tensor] = None,
+        scale_a: Optional[torch.Tensor] = None,
+        scale_b: Optional[torch.Tensor] = None,
     ):
         assert input.shape[0] <= self.max_M and weight.shape[0] == self.N
         if self.use_ll_kernel:
             ar_out = low_latency_gemm_allreduce_op(self.ctx, input, weight, self.gemm_config,
                                                    copy_to_local=self.copy_to_local,
-                                                   USE_MULTIMEM_ST=self.USE_MULTIMEM_ST)
+                                                   USE_MULTIMEM_ST=self.USE_MULTIMEM_ST,
+                                                   TILE_MAP_LEVEL=self.TILE_MAP_LEVEL, As=scale_a, Bs=scale_b)
         else:
             ar_out = gemm_allreduce_op(self.ctx, input, weight, self.gemm_config, copy_to_local=self.copy_to_local,
-                                       USE_MULTIMEM_ST=self.USE_MULTIMEM_ST)
+                                       USE_MULTIMEM_ST=self.USE_MULTIMEM_ST, As=scale_a, Bs=scale_b, pg=self.tp_group)
+        return ar_out
+
+    def forward_gemm(self, input: torch.Tensor,  # [M, local_K]
+                     weight: torch.Tensor,  # [N, local_K]
+                     bias: Optional[torch.Tensor] = None, scale_a: Optional[torch.Tensor] = None,
+                     scale_b: Optional[torch.Tensor] = None):
+        ar_out = gemm_op(self.ctx, input, weight, self.gemm_config, copy_to_local=self.copy_to_local,
+                         USE_MULTIMEM_ST=self.USE_MULTIMEM_ST, As=scale_a, Bs=scale_b)
+        return ar_out
+
+    def forward_ar(self, input_tensor: torch.Tensor):
+        ar_out = allreduce_op(
+            self.ctx,
+            input_tensor,
+            self.gemm_config,
+            TILE_MAP_LEVEL=self.TILE_MAP_LEVEL,
+            copy_to_local=self.copy_to_local,
+            USE_MULTIMEM_ST=self.USE_MULTIMEM_ST,
+        )
         return ar_out

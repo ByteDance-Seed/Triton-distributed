@@ -27,25 +27,21 @@ import dataclasses
 from typing import List
 import triton
 import triton.language as tl
+from triton_dist.kernels.allreduce import OverlappingAllReduceMethod, get_auto_all_reduce_method
 import triton_dist.language as dl
 from triton_dist.utils import (nvshmem_barrier_all_on_stream, nvshmem_create_tensor, nvshmem_free_tensor_sync,
                                launch_cooperative_grid_options)
 from triton_dist.language.extra import libshmem_device
 from triton.language.extra.cuda.utils import num_warps
-from triton.language.extra.cuda.language_extra import (
-    __syncthreads,
-    ld,
-    st,
-    tid,
-    multimem_ld_reduce_v4,
-    multimem_st_v4,
-    st_v4_b32,
-)
+from triton.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, multimem_ld_reduce_v4,
+                                                       multimem_st_v4, st_v4_b32, atomic_add)
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid
 
 
 @dataclasses.dataclass
 class GemmARContext:
+    rank: int
+    num_ranks: int
 
     symm_gemm_out_buf: torch.Tensor
     symm_ar_out_buf: torch.Tensor
@@ -53,10 +49,12 @@ class GemmARContext:
     gemm_barrier_buf: torch.Tensor
     multi_st_barrier_buf: torch.Tensor
     grid_barrier_buf: torch.Tensor
+    tile_barrier_buf: torch.Tensor
 
     NUM_COMM_SMS: int
-
     ar_stream: torch.cuda.Stream
+    TILE_MAP_LEVEL: int = 0
+    all_reduce_method: OverlappingAllReduceMethod = OverlappingAllReduceMethod.Auto
 
     def finalize(self):
         nvshmem_free_tensor_sync(self.symm_gemm_out_buf)
@@ -68,6 +66,12 @@ class GemmARContext:
         M, N = input.shape[0], weight.shape[0]
         assert self.symm_gemm_out_buf.numel() >= M * N
         return self.symm_gemm_out_buf.reshape(-1)[:M * N].reshape(M, N)
+
+    def reset_all_barrier_buf(self):
+        self.gemm_barrier_buf.zero_()
+        self.tile_barrier_buf.zero_()
+        self.grid_barrier_buf.zero_()
+        self.multi_st_barrier_buf.zero_()
 
 
 @dataclasses.dataclass
@@ -90,9 +94,12 @@ class LLGemmARContext:
         for ctx in self.ctxs:
             ctx.finalize()
 
+    def reset_all_barrier_buf(self):
+        self.ctxs[self.phase].reset_all_barrier_buf()
+
 
 def create_gemm_ar_context(ar_stream: torch.cuda.Stream, rank, world_size, local_world_size, max_M, N, dtype,
-                           MIN_BLOCK_SIZE_M=16, MIN_BLOCK_SIZE_N=16, NUM_COMM_SMS=132):
+                           MIN_BLOCK_SIZE_M=16, MIN_BLOCK_SIZE_N=16, NUM_COMM_SMS=16, TILE_MAP_LEVEL=0):
     assert local_world_size == world_size
     gemm_out_buf = nvshmem_create_tensor((world_size, max_M, N), dtype)
     symm_ar_out_buf = nvshmem_create_tensor((max_M, N), dtype)
@@ -100,12 +107,19 @@ def create_gemm_ar_context(ar_stream: torch.cuda.Stream, rank, world_size, local
         (world_size, triton.cdiv(max_M, MIN_BLOCK_SIZE_M), triton.cdiv(N, MIN_BLOCK_SIZE_N)), torch.int32)
     multi_st_barrier_buf = nvshmem_create_tensor((world_size * NUM_COMM_SMS, ), torch.int32)
     grid_barrier_buf = torch.zeros((1, ), dtype=torch.int32, device=torch.cuda.current_device())
+    tile_barrier_buf = torch.zeros((world_size, triton.cdiv(max_M, MIN_BLOCK_SIZE_M), triton.cdiv(N, MIN_BLOCK_SIZE_N)),
+                                   dtype=torch.int32, device=torch.cuda.current_device())
+    gemm_out_buf.zero_()
     gemm_barrier_buf.zero_()
     multi_st_barrier_buf.zero_()
+
+    all_reduce_method = get_auto_all_reduce_method(world_size, local_world_size)
     nvshmem_barrier_all_on_stream()
-    return GemmARContext(symm_gemm_out_buf=gemm_out_buf, symm_ar_out_buf=symm_ar_out_buf,
-                         gemm_barrier_buf=gemm_barrier_buf, multi_st_barrier_buf=multi_st_barrier_buf,
-                         grid_barrier_buf=grid_barrier_buf, NUM_COMM_SMS=NUM_COMM_SMS, ar_stream=ar_stream)
+    return GemmARContext(rank=rank, num_ranks=world_size, symm_gemm_out_buf=gemm_out_buf,
+                         symm_ar_out_buf=symm_ar_out_buf, gemm_barrier_buf=gemm_barrier_buf,
+                         multi_st_barrier_buf=multi_st_barrier_buf, grid_barrier_buf=grid_barrier_buf,
+                         tile_barrier_buf=tile_barrier_buf, NUM_COMM_SMS=NUM_COMM_SMS, ar_stream=ar_stream,
+                         TILE_MAP_LEVEL=TILE_MAP_LEVEL, all_reduce_method=all_reduce_method)
 
 
 def create_ll_gemm_ar_context(rank, world_size, local_world_size, max_M, N, dtype, MIN_BLOCK_SIZE_M=16,
@@ -207,6 +221,130 @@ def consumer_all_reduce_kernel(
             st(peer_gemm_barrier_ptr + tile_id, 0, scope="sys", semantic="relaxed")
 
 
+@triton.jit(do_not_specialize=[])
+def consumer_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, ar_out_ptr,  #
+                                          gemm_barrier_ptr, M, N: tl.constexpr,  #
+                                          BLOCK_SIZE_M: tl.constexpr,  #
+                                          BLOCK_SIZE_N: tl.constexpr,  #
+                                          BLOCK_SIZE_COMM: tl.constexpr, NUM_COMM_SMS: tl.constexpr,
+                                          TILE_MAP_LEVEL: tl.constexpr = 0):
+    rank = dl.rank()
+    world_size = dl.num_ranks()
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    thread_idx = tid(0)
+    elem_per_pid_m = BLOCK_SIZE_M * N
+    if TILE_MAP_LEVEL == 0:
+        num_tiles = num_pid_m * num_pid_n
+    elif TILE_MAP_LEVEL == 1:
+        num_tiles = tl.cdiv(M * N, BLOCK_SIZE_COMM)
+
+    for tile_id in range(pid, num_tiles, NUM_COMM_SMS):
+        if thread_idx < world_size:
+            peer_gemm_barrier_ptr = dl.symm_at(gemm_barrier_ptr, thread_idx)
+            if TILE_MAP_LEVEL == 0:
+                barrier_offset = tile_id
+            else:
+                barrier_offset = tile_id * BLOCK_SIZE_COMM // elem_per_pid_m
+            while ld(peer_gemm_barrier_ptr + barrier_offset, scope="gpu", semantic="acquire"
+                     ) != 1:  # WARN(fangjin.018): sys is slow in L20, use gpu scope here, pass the acc test in sglang
+                pass
+        __syncthreads()
+
+        if TILE_MAP_LEVEL == 0:
+            pid_m = tile_id // num_pid_n
+            pid_n = tile_id % num_pid_n
+            column_offset = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            mask = column_offset < N
+            tile_m = min(M - pid_m * BLOCK_SIZE_M, BLOCK_SIZE_M)
+            for row in range(tile_m):
+                row_offset = (pid_m * BLOCK_SIZE_M + row) * N
+                accum = tl.zeros((BLOCK_SIZE_N, ), dtype=tl.float32)
+                for i in range(0, world_size):
+                    segment = (rank + world_size - i) % world_size
+                    peer_ptr = dl.symm_at(symm_input_ptr, segment)
+                    data = tl.load(peer_ptr + row_offset + column_offset, mask=mask, other=0)
+                    accum += data
+                c = accum.to(tl.bfloat16)
+                tl.store(ar_out_ptr + row_offset + column_offset, c, mask=mask)
+        else:
+            pid_m = tile_id * BLOCK_SIZE_COMM // elem_per_pid_m
+            pid_n = tile_id * BLOCK_SIZE_COMM % elem_per_pid_m // BLOCK_SIZE_COMM
+            tile_m = min(M - pid_m * BLOCK_SIZE_M, BLOCK_SIZE_M)
+            row_offset = pid_m * BLOCK_SIZE_M * N
+            column_offset = pid_n * BLOCK_SIZE_COMM + tl.arange(0, BLOCK_SIZE_COMM)
+            mask = column_offset < tile_m * N
+            accum = tl.zeros((BLOCK_SIZE_COMM, ), dtype=tl.float32)
+            for i in range(0, world_size):
+                segment = (rank + world_size - i) % world_size
+                peer_ptr = dl.symm_at(symm_input_ptr, segment)
+                data = tl.load(peer_ptr + row_offset + column_offset, mask=mask, other=0)
+                accum += data
+            c = accum.to(tl.bfloat16)
+            tl.store(ar_out_ptr + row_offset + column_offset, c, mask=mask)
+
+
+@triton.jit(do_not_specialize=[])
+def consumer_ring_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, ar_out_ptr,  #
+                                               gemm_barrier_ptr, M, N: tl.constexpr,  #
+                                               BLOCK_SIZE_M: tl.constexpr,  #
+                                               BLOCK_SIZE_N: tl.constexpr,  #
+                                               BLOCK_SIZE_COMM: tl.constexpr, NUM_COMM_SMS: tl.constexpr,
+                                               TILE_MAP_LEVEL: tl.constexpr = 0):
+    rank = dl.rank()
+    world_size = dl.num_ranks()
+    numel = M * N
+    num_tiles = tl.cdiv(numel, BLOCK_SIZE_COMM)
+    thread_idx = tid(0)
+    segment = rank
+    elem_per_rank = numel // world_size
+    pid = tl.program_id(0)
+
+    if thread_idx == 0:
+        while ld(gemm_barrier_ptr + segment, scope="sys", semantic="acquire") != 1:
+            pass
+    __syncthreads()
+
+    for tile_id in range(pid, num_tiles, NUM_COMM_SMS):
+        offs = tile_id * BLOCK_SIZE_COMM + tl.arange(0, BLOCK_SIZE_COMM)
+        mask = offs < elem_per_rank
+        data = tl.load(symm_input_ptr + segment * elem_per_rank + offs, mask=mask)
+        tl.store(symm_ar_out_ptr + segment * elem_per_rank + offs, data, mask=mask)
+    __syncthreads()
+
+    for i in range(1, world_size):
+        to_rank = (rank + world_size - i) % world_size
+        if thread_idx == 0:
+            peer_gemm_barrier_ptr = dl.symm_at(gemm_barrier_ptr, to_rank)
+            while ld(peer_gemm_barrier_ptr + segment, scope="sys", semantic="acquire") != 1:
+                pass
+
+        for tile_id in range(pid, num_tiles, NUM_COMM_SMS):
+            offs = tile_id * BLOCK_SIZE_COMM + tl.arange(0, BLOCK_SIZE_COMM)
+            mask = offs < elem_per_rank
+            peer_ptr = dl.symm_at(symm_input_ptr, to_rank)
+            src_ptr = peer_ptr + segment * elem_per_rank + offs
+            dst_ptr = symm_ar_out_ptr + segment * elem_per_rank + offs
+            accum = tl.zeros((BLOCK_SIZE_COMM, ), dtype=tl.float32)
+            accum += tl.load(src_ptr, mask=mask)
+            accum += tl.load(dst_ptr, mask=mask)
+            c = accum.to(tl.bfloat16)
+            tl.store(dst_ptr, c, mask=mask)
+        __syncthreads()
+
+    for i in range(1, world_size):
+        to_rank = (rank + world_size - i) % world_size
+        peer_ptr = dl.symm_at(symm_ar_out_ptr, to_rank)
+        for tile_id in range(pid, num_tiles, NUM_COMM_SMS):
+            offs = tile_id * BLOCK_SIZE_COMM + tl.arange(0, BLOCK_SIZE_COMM)
+            mask = offs < elem_per_rank
+            src_ptr = symm_ar_out_ptr + segment * elem_per_rank + offs
+            dst_ptr = peer_ptr + segment * elem_per_rank + offs
+            data = tl.load(src_ptr, mask=mask)
+            tl.store(dst_ptr, data, mask=mask)
+
+
 @triton.jit(do_not_specialize=["nelems"])
 def copy_1d_tilewise_kernel(src_ptr, dst_ptr,  #
                             nelems,  #
@@ -229,92 +367,6 @@ def copy_1d_tilewise_kernel(src_ptr, dst_ptr,  #
             tl.store(dst_ptr + offs, data, mask=mask)
 
 
-@triton.jit(do_not_specialize=[])
-def kernel_fused_gemm_allreduce(
-    a_ptr,
-    b_ptr,
-    c_ptr,  #
-    symm_ar_out_ptr,
-    ar_out_ptr,  #
-    gemm_barrier_ptr,
-    multi_st_barrier_ptr,
-    grid_barrier_ptr,  #
-    M,
-    N,
-    K,  #
-    stride_am,
-    stride_ak,  #
-    stride_bn,
-    stride_bk,  #
-    stride_cm,
-    stride_cn,  #
-    BLOCK_SIZE_M: tl.constexpr,  #
-    BLOCK_SIZE_N: tl.constexpr,  #
-    BLOCK_SIZE_K: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr,  #
-    NUM_GEMM_SMS: tl.constexpr,  #
-    NUM_COMM_SMS: tl.constexpr,  #
-    USE_MULTIMEM_ST: tl.constexpr,  #
-    FUSE_OUTPUT_CP: tl.constexpr,
-    use_cooperative: tl.constexpr,
-):
-    global_pid = tl.program_id(axis=0)
-    if global_pid < NUM_COMM_SMS:
-        consumer_all_reduce_kernel(c_ptr, symm_ar_out_ptr, ar_out_ptr, gemm_barrier_ptr, multi_st_barrier_ptr, M, N,
-                                   BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N, NUM_COMM_SMS=NUM_COMM_SMS,
-                                   USE_MULTIMEM_ST=USE_MULTIMEM_ST)
-    else:
-        gemm_start_pid = global_pid - NUM_COMM_SMS
-        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-        num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-        k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-        num_tiles = num_pid_m * num_pid_n
-        offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
-
-        for tile_id in tl.range(gemm_start_pid, num_tiles, NUM_GEMM_SMS):
-            # pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS)
-            pid_m = tile_id // num_pid_n
-            pid_n = tile_id % num_pid_n
-            start_m = pid_m * BLOCK_SIZE_M
-            start_n = pid_n * BLOCK_SIZE_N
-            offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
-            offs_bn = start_n + tl.arange(0, BLOCK_SIZE_N)
-            offs_am = tl.where(offs_am < M, offs_am, 0)
-            offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-            offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            for ki in range(k_tiles):
-                offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-                a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-                b_ptrs = b_ptr + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
-
-                a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
-                b = tl.load(b_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
-                accumulator = tl.dot(a, b.T, accumulator)
-
-            # tile_id_c += NUM_GEMM_SMS
-            # pid_m, pid_n = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
-            offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-            c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-            c = accumulator.to(c_ptr.dtype.element_ty)
-            tl.store(c_ptrs, c, mask=c_mask)
-            __syncthreads()
-            thread_idx = tid(0)
-            gemm_barrier_idx = pid_m * num_pid_n + pid_n
-            if thread_idx == 0:
-                st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
-
-    barrier_on_this_grid(grid_barrier_ptr, use_cooperative)
-
-    # if USE_MULTIMEM_ST == false, the result
-    if FUSE_OUTPUT_CP and USE_MULTIMEM_ST:
-        copy_1d_tilewise_kernel(symm_ar_out_ptr, ar_out_ptr, M * N, BLOCK_SIZE=2048)
-
-
 @triton.jit
 def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     group_id = tile_id // num_pid_in_group
@@ -326,7 +378,7 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
 
 
 @triton.jit(do_not_specialize=[])
-def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
+def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr, tile_barrier_ptr,  #
                                   M, N, K,  #
                                   stride_am, stride_ak,  #
                                   stride_bn, stride_bk,  #
@@ -336,15 +388,17 @@ def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                                   BLOCK_SIZE_K: tl.constexpr,  #
                                   GROUP_SIZE_M: tl.constexpr,  #
                                   NUM_GEMM_SMS: tl.constexpr,  #
-                                  ):
-    start_pid = tl.program_id(axis=0)
+                                  As_ptr=None, Bs_ptr=None, USE_INT8: tl.constexpr = False,
+                                  TILE_MAP_LEVEL: tl.constexpr = 0, FUSE_START_OFFSET: tl.constexpr = 0):
+    if USE_INT8:
+        tl.device_assert(As_ptr is not None)
+        tl.device_assert(Bs_ptr is not None)
+
+    start_pid = tl.program_id(axis=0) - FUSE_START_OFFSET
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
     num_tiles = num_pid_m * num_pid_n
-
-    tile_id_c = start_pid - NUM_GEMM_SMS
-
     offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
@@ -359,30 +413,65 @@ def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
         offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
         offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        if USE_INT8:
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
+        else:
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
         for ki in range(k_tiles):
             offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
             b_ptrs = b_ptr + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
+            if USE_INT8:
+                a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0).to(tl.int8)
+                b = tl.load(b_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0).to(tl.int8)
+            else:
+                a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
+            accumulator += tl.dot(a, b.T)
 
-            a = tl.load(a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
-            b = tl.load(b_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0)
-            accumulator = tl.dot(a, b.T, accumulator)
+        if USE_INT8:
+            # apply scale
+            offs_scale_am = start_m + tl.arange(0, BLOCK_SIZE_M)
+            offs_scale_bn = start_n + tl.arange(0, BLOCK_SIZE_N)
+            a_scale = tl.load(As_ptr + offs_scale_am, mask=offs_scale_am < M, other=1.0).to(tl.float32)
+            b_scale = tl.load(Bs_ptr + offs_scale_bn, mask=offs_scale_bn < N, other=1.0).to(tl.float32)
+            accumulator_fp = accumulator.to(tl.float32)
+            c = (accumulator_fp * a_scale[:, None] * b_scale[None, :]).to(tl.bfloat16)
+        else:
+            c = accumulator.to(c_ptr.dtype.element_ty)
 
-        tile_id_c += NUM_GEMM_SMS
-        pid_m, pid_n = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
         offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        c = accumulator.to(c_ptr.dtype.element_ty)
         tl.store(c_ptrs, c, mask=c_mask)
-        __syncthreads()
 
         thread_idx = tid(0)
-        gemm_barrier_idx = pid_m * num_pid_n + pid_n
         if thread_idx == 0:
-            st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
+            if TILE_MAP_LEVEL == 0:  # tile_wise_map_to_comm
+                gemm_barrier_idx = pid_m * num_pid_n + pid_n
+                st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
+            elif TILE_MAP_LEVEL == 1:  # row_wise_map_to_comm
+                count = atomic_add(tile_barrier_ptr + pid_m, 1, scope="gpu", semantic="release")
+                if count == num_pid_n - 1:
+                    st(gemm_barrier_ptr + pid_m, 1, scope="gpu", semantic="release")
+            elif TILE_MAP_LEVEL == 2:  # rank_wise_map_to_comm
+                world_size = dl.num_ranks()
+                M_per_rank = M // world_size
+                tile_m = pid_m * BLOCK_SIZE_M
+                barrier_start = tile_m // M_per_rank
+                barrier_end = (tile_m + BLOCK_SIZE_M - 1) // M_per_rank
+                barrier_end = min(barrier_end, world_size - 1)
+                for barrier_id in range(barrier_start, barrier_end + 1):
+                    m_start = M_per_rank * barrier_id
+                    m_end = M_per_rank * (barrier_id + 1) - 1
+                    tiled_m_start = m_start // BLOCK_SIZE_M
+                    tiled_m_end = m_end // BLOCK_SIZE_M
+                    tiled_m_size = tiled_m_end - tiled_m_start + 1
+                    val = atomic_add(tile_barrier_ptr + barrier_id, 1, scope="gpu", semantic="release")
+                    if val == tiled_m_size * num_pid_n - 1:
+                        st(gemm_barrier_ptr + barrier_id, 1, scope="gpu", semantic="release")
 
 
 @triton.jit
@@ -396,7 +485,7 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                                       BLOCK_SIZE_K: tl.constexpr,  #
                                       GROUP_SIZE_M: tl.constexpr,  #
                                       NUM_GEMM_SMS: tl.constexpr,  #
-                                      ):
+                                      FUSE_START_OFFSET: tl.constexpr = 0):
     a_desc = tl.make_tensor_descriptor(
         a_ptr,
         shape=[M, K],
@@ -410,7 +499,7 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
         block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
     )
 
-    start_pid = tl.program_id(axis=0)
+    start_pid = tl.program_id(axis=0) - FUSE_START_OFFSET
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
@@ -461,7 +550,70 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                 st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
 
 
-def persistent_gemm_notify(a, b, out, barrier, gemm_config: triton.Config, use_tma=False):
+@triton.jit(do_not_specialize=[])
+def kernel_fused_gemm_allreduce(a_ptr, b_ptr, c_ptr,  #
+                                symm_ar_out_ptr, ar_out_ptr,  #
+                                gemm_barrier_ptr, multi_st_barrier_ptr, grid_barrier_ptr, tile_barrier_ptr,  #
+                                M, N, K,  #
+                                stride_am, stride_ak,  #
+                                stride_bn, stride_bk,  #
+                                stride_cm, stride_cn,  #
+                                BLOCK_SIZE_M: tl.constexpr,  #
+                                BLOCK_SIZE_N: tl.constexpr,  #
+                                BLOCK_SIZE_K: tl.constexpr,  #
+                                GROUP_SIZE_M: tl.constexpr,  #
+                                NUM_GEMM_SMS: tl.constexpr,  #
+                                NUM_COMM_SMS: tl.constexpr,  #
+                                USE_MULTIMEM_ST: tl.constexpr,  #
+                                FUSE_OUTPUT_CP: tl.constexpr, use_cooperative: tl.constexpr,
+                                USE_LD_REDUCE: tl.constexpr, BLOCK_SIZE_COMM: tl.constexpr = 8192,
+                                TILE_MAP_LEVEL: tl.constexpr = 0, USE_INT8: tl.constexpr = True, As_ptr=None,
+                                Bs_ptr=None):
+    global_pid = tl.program_id(axis=0)
+    if global_pid < NUM_COMM_SMS:
+        if USE_LD_REDUCE:
+            consumer_all_reduce_kernel(c_ptr, symm_ar_out_ptr, ar_out_ptr, gemm_barrier_ptr, multi_st_barrier_ptr, M, N,
+                                       BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N, NUM_COMM_SMS=NUM_COMM_SMS,
+                                       USE_MULTIMEM_ST=USE_MULTIMEM_ST)
+        else:
+            consumer_all_reduce_load_store_kernel(c_ptr, symm_ar_out_ptr, ar_out_ptr, gemm_barrier_ptr, M, N,
+                                                  BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                                  BLOCK_SIZE_COMM=BLOCK_SIZE_COMM, NUM_COMM_SMS=NUM_COMM_SMS,
+                                                  TILE_MAP_LEVEL=TILE_MAP_LEVEL)
+    else:
+        kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr, tile_barrier_ptr, M, N, K, stride_am,
+                                      stride_ak, stride_bn, stride_bk, stride_cm, stride_cn, BLOCK_SIZE_M, BLOCK_SIZE_N,
+                                      BLOCK_SIZE_K, GROUP_SIZE_M, NUM_GEMM_SMS, As_ptr=As_ptr, Bs_ptr=Bs_ptr,
+                                      USE_INT8=USE_INT8, TILE_MAP_LEVEL=TILE_MAP_LEVEL, FUSE_START_OFFSET=NUM_COMM_SMS)
+
+    barrier_on_this_grid(grid_barrier_ptr, use_cooperative)
+
+    # if USE_MULTIMEM_ST == false, the result
+    if USE_LD_REDUCE and FUSE_OUTPUT_CP and USE_MULTIMEM_ST:
+        copy_1d_tilewise_kernel(symm_ar_out_ptr, ar_out_ptr, M * N, BLOCK_SIZE=2048)
+
+
+def consumer_all_reduce(symm_input, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, BLOCK_SIZE_M=16,
+                        BLOCK_SIZE_N=64, NUM_COMM_SMS=16, BLOCK_SIZE_COMM=4096, USE_MULTIMEM_ST=False, TILE_MAP_LEVEL=0,
+                        all_reduce_method=OverlappingAllReduceMethod.Consumer_Load):
+    M, N = symm_input.shape
+    assert N % BLOCK_SIZE_N == 0
+    if all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem:
+        assert TILE_MAP_LEVEL == 0, "Only legal for per-tile allreduce"
+        consumer_all_reduce_kernel[(NUM_COMM_SMS, )](symm_input, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, M,
+                                                     N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                                     NUM_COMM_SMS=NUM_COMM_SMS, USE_MULTIMEM_ST=USE_MULTIMEM_ST,
+                                                     num_warps=32)
+    else:
+        consumer_all_reduce_load_store_kernel[(NUM_COMM_SMS, )](symm_input, symm_ar_out, ar_out, gemm_barrier, M, N,
+                                                                BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                                                BLOCK_SIZE_COMM=BLOCK_SIZE_COMM,
+                                                                NUM_COMM_SMS=NUM_COMM_SMS, num_warps=32,
+                                                                TILE_MAP_LEVEL=TILE_MAP_LEVEL)
+
+
+def persistent_gemm_notify(a, b, out, gemm_barrier, tile_barrier, gemm_config: triton.Config, use_tma=False,
+                           use_int8=False, As=None, Bs=None, TILE_MAP_LEVEL=0):
 
     def alloc_fn(size, alignment, stream):
         return torch.empty(size, device="cuda", dtype=torch.int8)
@@ -471,22 +623,29 @@ def persistent_gemm_notify(a, b, out, barrier, gemm_config: triton.Config, use_t
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
+    if use_int8:
+        assert (As is not None and Bs is not None)
+        assert As.shape[0] == a.shape[
+            0], f"Incompatible scale dimensions, scale shape = {As.shape}, input shape = {a.shape}"
+        assert Bs.shape[0] == b.shape[
+            0], f"Incompatible scale dimensions, scale shape = {Bs.shape}, input shape = {b.shape}"
     M, K = a.shape
     N, K = b.shape
     grid = lambda META: (min(META["NUM_GEMM_SMS"],
                              triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])), )
+
     if not use_tma:
         kernel_persistent_gemm_notify[grid](
-            a, b, out, barrier,  #
+            a, b, out, gemm_barrier, tile_barrier,  #
             M, N, K,  #
             a.stride(0), a.stride(1),  #
             b.stride(0), b.stride(1),  #
             out.stride(0), out.stride(1),  #
             **gemm_config.all_kwargs(),  #
-        )
+            USE_INT8=use_int8, As_ptr=As, Bs_ptr=Bs, TILE_MAP_LEVEL=TILE_MAP_LEVEL)
     else:
         kernel_persistent_tma_gemm_notify[grid](
-            a, b, out, barrier,  #
+            a, b, out, gemm_barrier,  #
             M, N, K,  #
             a.stride(0), a.stride(1),  #
             b.stride(0), b.stride(1),  #
@@ -496,83 +655,164 @@ def persistent_gemm_notify(a, b, out, barrier, gemm_config: triton.Config, use_t
     return out
 
 
-def consumer_all_reduce(symm_input, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, BLOCK_SIZE_M=16,
-                        BLOCK_SIZE_N=64, NUM_COMM_SMS=16, USE_MULTIMEM_ST=False):
-    M, N = symm_input.shape
-    assert N % BLOCK_SIZE_N == 0
-    consumer_all_reduce_kernel[(NUM_COMM_SMS, )](symm_input, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, M, N,
-                                                 BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
-                                                 NUM_COMM_SMS=NUM_COMM_SMS, USE_MULTIMEM_ST=USE_MULTIMEM_ST,
-                                                 num_warps=32)
-
-
 def low_latency_gemm_allreduce_op(ctx: LLGemmARContext, a, b, gemm_config: triton.Config, copy_to_local=True,
-                                  USE_MULTIMEM_ST=True):
+                                  USE_MULTIMEM_ST=True, TILE_MAP_LEVEL=0, As=None, Bs=None):
     ctx.update_phase()
-    M, N = a.shape[0], b.shape[0]
+    M, N, K = a.shape[0], b.shape[0], b.shape[1]
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
-    M, K = a.shape
-    N, K = b.shape
+
     symm_c = ctx.get_gemm_out_buf(a, b)
     symm_ar_out = ctx.symm_ar_out_buf
     gemm_barrier = ctx.gemm_barrier_buf
     multi_st_barrier = ctx.multi_st_barrier_buf
     grid_barrier = ctx.grid_barrier_buf
+    tile_barrier = ctx.tile_barrier_buf
 
     NUM_COMM_SMS = ctx.NUM_COMM_SMS
+    USE_LD_REDUCE = ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem
+    with_scale = (As is not None and Bs is not None)
 
-    ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
-    # print(f"M, N, K = {M, N, K}")
+    if with_scale:
+        assert a.dtype == torch.int8
+        ar_out = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
+    else:
+        ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+
+    current_stream = torch.cuda.current_stream()
+    if not USE_LD_REDUCE:  # Multimem kernel will reset barrier inside the ar kernel
+        nvshmem_barrier_all_on_stream(current_stream)
+        ctx.reset_all_barrier_buf()
+        nvshmem_barrier_all_on_stream(current_stream)
+
     grid = lambda META: (NUM_COMM_SMS + min(META["NUM_GEMM_SMS"],
                                             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])
                                             ), )
     kernel_fused_gemm_allreduce[grid](
         a, b, symm_c, symm_ar_out, ar_out,  #
-        gemm_barrier, multi_st_barrier, grid_barrier,  #
+        gemm_barrier, multi_st_barrier, grid_barrier, tile_barrier,  #
         M, N, K,  #
         a.stride(0), a.stride(1),  #
         b.stride(0), b.stride(1),  #
         symm_c.stride(0), symm_c.stride(1),  #
         **gemm_config.all_kwargs(),  #
-        NUM_COMM_SMS=NUM_COMM_SMS, USE_MULTIMEM_ST=USE_MULTIMEM_ST, FUSE_OUTPUT_CP=copy_to_local, use_cooperative=True,
-        **launch_cooperative_grid_options())
+        NUM_COMM_SMS=NUM_COMM_SMS, BLOCK_SIZE_COMM=8192, TILE_MAP_LEVEL=TILE_MAP_LEVEL, USE_MULTIMEM_ST=USE_MULTIMEM_ST,
+        FUSE_OUTPUT_CP=copy_to_local, use_cooperative=True, USE_LD_REDUCE=USE_LD_REDUCE,
+        **launch_cooperative_grid_options(), USE_INT8=with_scale, As_ptr=As, Bs_ptr=Bs)
+
     if USE_MULTIMEM_ST and not copy_to_local:
         return symm_ar_out.reshape(-1)[:M * N].reshape(M, N)
     return ar_out
 
 
-def gemm_allreduce_op(ctx: GemmARContext, a, b, gemm_config: triton.Config, copy_to_local=True, USE_MULTIMEM_ST=True):
+def gemm_allreduce_op(ctx: GemmARContext, a, b, gemm_config: triton.Config, copy_to_local=True, USE_MULTIMEM_ST=False,
+                      As=None, Bs=None, pg=None):
+    M, N = a.shape[0], b.shape[0]
+    NUM_COMM_SMS = ctx.NUM_COMM_SMS
+    BLOCK_SIZE_M = gemm_config.all_kwargs()["BLOCK_SIZE_M"]
+    BLOCK_SIZE_N = gemm_config.all_kwargs()["BLOCK_SIZE_N"]
+    # add mask in `consumer_all_reduce` can remove this constraint
+    assert N % BLOCK_SIZE_N == 0
+    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
+    assert a.dtype == b.dtype, "Incompatible dtypes"
+
+    symm_c = ctx.get_gemm_out_buf(a, b)
+    symm_ar_out = ctx.symm_ar_out_buf
+    gemm_barrier = ctx.gemm_barrier_buf
+    multi_st_barrier = ctx.multi_st_barrier_buf
+    tile_barrier = ctx.tile_barrier_buf
+
+    with_scale = (As is not None and Bs is not None)
+    USE_LD_REDUCE = (ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem)
+    USE_MULTIMEM_ST = (ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem) and USE_MULTIMEM_ST
+
+    if with_scale:
+        assert a.dtype == torch.int8
+        ar_out = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
+    else:
+        ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
 
     current_stream = torch.cuda.current_stream()
     ar_stream = ctx.ar_stream
     ar_stream.wait_stream(current_stream)
 
+    if not USE_LD_REDUCE:  # Multimem kernel will reset barrier inside the ar kernel
+        nvshmem_barrier_all_on_stream(current_stream)
+        ctx.reset_all_barrier_buf()
+        nvshmem_barrier_all_on_stream(current_stream)
+
+    persistent_gemm_notify(a, b, symm_c, gemm_barrier, tile_barrier, gemm_config, use_int8=with_scale, As=As, Bs=Bs,
+                           TILE_MAP_LEVEL=ctx.TILE_MAP_LEVEL)
+
+    with torch.cuda.stream(ar_stream):
+        consumer_all_reduce(symm_c, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, BLOCK_SIZE_M=BLOCK_SIZE_M,
+                            BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_COMM=8192, NUM_COMM_SMS=NUM_COMM_SMS,
+                            USE_MULTIMEM_ST=USE_MULTIMEM_ST, TILE_MAP_LEVEL=ctx.TILE_MAP_LEVEL,
+                            all_reduce_method=ctx.all_reduce_method)
+    current_stream.wait_stream(ar_stream)
+
+    # out still in comm buffer, copy to user buffer
+    if USE_MULTIMEM_ST and copy_to_local:
+        ar_out.copy_(symm_ar_out.reshape(-1)[:M * N].reshape(M, N))
+    if USE_MULTIMEM_ST and not copy_to_local:
+        return symm_ar_out.reshape(-1)[:M * N].reshape(M, N)
+    return ar_out
+
+
+def gemm_op(ctx: GemmARContext, a, b, gemm_config: triton.Config, copy_to_local=True, USE_MULTIMEM_ST=False, As=None,
+            Bs=None):
     M, N = a.shape[0], b.shape[0]
-    # Check constraints.
+    BLOCK_SIZE_N = gemm_config.all_kwargs()["BLOCK_SIZE_N"]
+    # add mask in `consumer_all_reduce` can remove this constraint
+    assert N % BLOCK_SIZE_N == 0
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
+
     symm_c = ctx.get_gemm_out_buf(a, b)
-    symm_ar_out = ctx.symm_ar_out_buf
     gemm_barrier = ctx.gemm_barrier_buf
-    multi_st_barrier = ctx.multi_st_barrier_buf
+    tile_barrier = ctx.tile_barrier_buf
+
+    with_scale = (As is not None and Bs is not None)
+
+    if with_scale:
+        assert a.dtype == torch.int8
+        ar_out = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
+    else:
+        ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+
+    persistent_gemm_notify(a, b, symm_c, gemm_barrier, tile_barrier, gemm_config, use_int8=with_scale, As=As, Bs=Bs,
+                           TILE_MAP_LEVEL=ctx.TILE_MAP_LEVEL)
+    ar_out.copy_(symm_c.reshape(-1)[:M * N].reshape(M, N))
+    return ar_out
+
+
+def allreduce_op(ctx: GemmARContext, c, gemm_config: triton.Config, TILE_MAP_LEVEL=0, copy_to_local=True,
+                 USE_MULTIMEM_ST=False):
+    M, N = c.shape
     NUM_COMM_SMS = ctx.NUM_COMM_SMS
-    ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
     BLOCK_SIZE_M = gemm_config.all_kwargs()["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = gemm_config.all_kwargs()["BLOCK_SIZE_N"]
     # add mask in `consumer_all_reduce` can remove this constraint
     assert N % BLOCK_SIZE_N == 0
-    persistent_gemm_notify(a, b, symm_c, gemm_barrier, gemm_config)
-    with torch.cuda.stream(ar_stream):
-        consumer_all_reduce(symm_c, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, BLOCK_SIZE_M=BLOCK_SIZE_M,
-                            BLOCK_SIZE_N=BLOCK_SIZE_N, NUM_COMM_SMS=NUM_COMM_SMS, USE_MULTIMEM_ST=USE_MULTIMEM_ST)
-    current_stream.wait_stream(ar_stream)
+
+    symm_c = ctx.symm_gemm_out_buf.reshape(-1)[:M * N].reshape(M, N)
+    symm_c.copy_(c)
+    symm_ar_out = ctx.symm_ar_out_buf
+    gemm_barrier = ctx.gemm_barrier_buf
+    multi_st_barrier = ctx.multi_st_barrier_buf
+    ar_out = torch.empty((M, N), dtype=c.dtype, device=c.device)
+
+    USE_MULTIMEM_ST = (ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem) and USE_MULTIMEM_ST
+
+    gemm_barrier.fill_(1)
+    consumer_all_reduce(symm_c, symm_ar_out, ar_out, gemm_barrier, multi_st_barrier, BLOCK_SIZE_M=BLOCK_SIZE_M,
+                        BLOCK_SIZE_N=BLOCK_SIZE_N, NUM_COMM_SMS=NUM_COMM_SMS, USE_MULTIMEM_ST=USE_MULTIMEM_ST,
+                        BLOCK_SIZE_COMM=8192, TILE_MAP_LEVEL=TILE_MAP_LEVEL, all_reduce_method=ctx.all_reduce_method)
+
     # out still in comm buffer, copy to user buffer
     if USE_MULTIMEM_ST and copy_to_local:
         ar_out.copy_(symm_ar_out.reshape(-1)[:M * N].reshape(M, N))
-    # some ranks may not reset the barrier, other ranks will read dirty data during allreduce in the next iter.
-    nvshmem_barrier_all_on_stream(current_stream)
     if USE_MULTIMEM_ST and not copy_to_local:
         return symm_ar_out.reshape(-1)[:M * N].reshape(M, N)
     return ar_out

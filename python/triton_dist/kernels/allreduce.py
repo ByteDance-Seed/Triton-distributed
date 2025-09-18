@@ -23,6 +23,9 @@
 #
 ################################################################################
 from enum import IntEnum
+import functools
+
+from triton_dist.utils import is_nvshmem_multimem_supported
 
 
 class AllReduceMethod(IntEnum):
@@ -37,6 +40,13 @@ class AllReduceMethod(IntEnum):
     OneShot_LL = 8  # TODO(houqi.1993) not implemented
     OneShot_Multimem_LL = 9  # TODO(houqi.1993) not implemented
     AllReduceEnumMax = 10
+
+
+class OverlappingAllReduceMethod(IntEnum):
+    Auto = 0
+    Consumer_Load = 1
+    Consumer_Multimem = 2
+    Consumer_Ring_Reduce = 3
 
 
 _ALLREDUCE_METHODS = {
@@ -59,3 +69,12 @@ def to_allreduce_method(method: str) -> AllReduceMethod:
 
 def get_allreduce_methods():
     return list(_ALLREDUCE_METHODS.keys())
+
+
+@functools.lru_cache()
+def get_auto_all_reduce_method(num_ranks, num_local_ranks):
+    assert num_ranks == num_local_ranks, "Currently only support intra-node allreduce"
+    if is_nvshmem_multimem_supported():
+        return OverlappingAllReduceMethod.Consumer_Multimem
+    else:
+        return OverlappingAllReduceMethod.Consumer_Load
