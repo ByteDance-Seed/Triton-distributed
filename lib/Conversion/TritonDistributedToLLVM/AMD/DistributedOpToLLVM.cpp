@@ -116,6 +116,9 @@ public:
     StringRef libname = op.getLibname();
     StringRef libpath = op.getLibpath();
 
+    // TODO: refactor below
+    // CreateROCSHMEMOp(rewriter, op, funcName, libname, libpath, newOperands,
+    // retType);
     SmallVector<Value> llvmOpearands;
 
     for (auto val : newOperands) {
@@ -144,21 +147,19 @@ public:
 
     LLVM::LLVMFuncOp funcOp = mlir::triton::gpu::appendOrGetExternFuncOp(
         rewriter, op, funcName, funcType, libname, libpath);
-    auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOpearands);
+    auto externCallOp =
+        LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOpearands);
 
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
     } else {
       if (retType == llvmRetType) {
-        auto newResult = callOp.getResult();
+        auto newResult = externCallOp.getResult();
         rewriter.replaceOp(op, newResult);
       } else {
-
-        auto castOp =
-            rewriter
-                .create<LLVM::AddrSpaceCastOp>(loc, retType, callOp.getResult())
-                ->getResult(0);
-        rewriter.replaceOp(op, castOp);
+        auto castOp = rewriter.create<LLVM::AddrSpaceCastOp>(
+            loc, retType, externCallOp.getResult());
+        rewriter.replaceOp(op, castOp->getResult(0));
       }
     }
 

@@ -25,11 +25,18 @@
 import sys
 
 
+def set_rocshmem_ctx(ctx):
+    """ROCSHMEM only"""
+    ...
+
+
 def my_pe():
+    """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 def n_pes():
+    """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
@@ -42,10 +49,12 @@ def team_n_pes(team):
 
 
 def int_p(dest, value, pe):
+    """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 def remote_ptr(local_ptr, pe):
+    """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
@@ -352,19 +361,11 @@ ROCSHMEM_CMP_LE = 5
 ROCSHMEM_SIGNAL_SET = 0
 ROCSHMEM_SIGNAL_ADD = 1
 
-def set_rocshmem_ctx(ctx):
-    ...
-
-def putmem_signal(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
 
 def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
     ...
 
 def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
-
-def putmem_signal_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe):
     ...
 
 def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
@@ -373,16 +374,10 @@ def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
 def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
     ...
 
-def getmem(dest, source, bytes, pe):
-    ...
-
 def getmem_wave(dest, source, bytes, pe):
     ...
 
 def getmem_wg(dest, source, bytes, pe):
-    ...
-
-def getmem_nbi(dest, source, bytes, pe):
     ...
 
 def getmem_nbi_wave(dest, source, bytes, pe):
@@ -392,17 +387,10 @@ def getmem_nbi_wg(dest, source, bytes, pe):
     ...
 
 
-
-def putmem(dest, source, bytes, pe):
-    ...
-
 def putmem_wave(dest, source, bytes, pe):
     ...
 
 def putmem_wg(dest, source, bytes, pe):
-    ...
-
-def putmem_nbi(dest, source, bytes, pe):
     ...
 
 def putmem_nbi_wave(dest, source, bytes, pe):

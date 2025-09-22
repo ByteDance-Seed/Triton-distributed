@@ -64,7 +64,8 @@ def producer_consumer_kernel(
             queue_offset = i % queue_size
             queue_repeat = i // queue_size
             remote_signal_ptr = tl.load(signal_buf_ptr + peer_rank).to(tl.pointer_type(tl.int32))
-            token = dl.wait(remote_signal_ptr + queue_offset, 1, "sys",  # The scope of the barrier, `gpu` or `sys`
+            token = dl.wait(remote_signal_ptr + queue_offset, 1,  # The number of signals to wait
+                            "sys",  # The scope of the barrier, `gpu` or `sys`
                             "acquire",  # The semantic of the wait
                             waitValue=queue_repeat * 2,  # The value expected, should conform to certain order
                             )  # This wait ensures that the corresponding position is empty
