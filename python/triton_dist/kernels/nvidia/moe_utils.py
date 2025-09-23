@@ -165,7 +165,7 @@ def calc_gather_scatter_index_kernel(
     # if ntokens_by_expert_ptr:
     #     ntokens_by_expert = tl.load(ntokens_by_expert_ptr + offs_by_expert, mask=mask_by_expert, other=0)
     # else:
-    ntokens_by_expert = histogram_block_kernel(choosed_experts_ptr, ntokens * topk, BLOCK_SIZE, NEXPERTS)
+    ntokens_by_expert = histogram_block_kernel(choosed_experts_ptr, ntokens * topk, BLOCK_SIZE, NEXPERTS_NEXT_POW_OF_2)
     tl.store(ntokens_by_expert_ptr + offs_by_expert, ntokens_by_expert, mask=mask_by_expert)
 
     ntiles_by_expert = tl.cdiv(ntokens_by_expert, ALIGNMENT_BY_EXPERT)
@@ -256,7 +256,7 @@ def calc_gather_scatter_index_v2_kernel(
 
     tl.store(ntokens_by_expert_ptr + pid, val)
     cooperative_barrier_on_this_grid()
-    ntokens_by_expert = tl.load(ntokens_by_expert_ptr + offs_by_expert)
+    ntokens_by_expert = tl.load(ntokens_by_expert_ptr + offs_by_expert, mask=mask_by_expert)
 
     ntiles_by_expert = tl.cdiv(ntokens_by_expert, ALIGNMENT_BY_EXPERT)
     ntokens_by_expert_pad = ntiles_by_expert * ALIGNMENT_BY_EXPERT
