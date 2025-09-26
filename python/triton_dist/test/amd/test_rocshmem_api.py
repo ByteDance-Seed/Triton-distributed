@@ -113,10 +113,9 @@ def test_rocshmem_device():
 
     nelems_per_rank = 4
     n_elements = npes * nelems_per_rank
-    dtype = torch.int32
 
     put_bufs = pyrocshmem.rocshmem_create_tensor((n_elements, ), torch.int32)
-    ref_tensor = torch.arange(n_elements, dtype=dtype).cuda()
+    ref_tensor = torch.arange(n_elements, dtype=torch.int32).cuda()
     put_bufs[nelems_per_rank * mype:nelems_per_rank * (mype + 1)].copy_(ref_tensor[nelems_per_rank *
                                                                                    mype:nelems_per_rank * (mype + 1)])
 

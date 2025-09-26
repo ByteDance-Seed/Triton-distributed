@@ -34,24 +34,25 @@ from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
 import pyrocshmem
 from triton.language.extra.hip.libdevice import thread_idx
+from triton_dist.language.extra import libshmem_device
 
 
 @triton.jit
 def producer_consumer_kernel(
+    ctx,
     rank: tl.constexpr,
     num_ranks: tl.constexpr,
     input_ptr,
     output_ptr,
     num_inputs: int,
-    queue_buf_ptr,
-    signal_buf_ptr,  # *Pointer* to signals.
+    queue_ptr,
+    signal_ptr,  # *Pointer* to signals.
     queue_size: tl.constexpr,  # The length of queue in unit of BLOCKs
     BLOCK_SIZE: tl.constexpr,  # The size of each BLOCK
     NUM_PRODUCER_SMS: tl.constexpr,
     NUM_CONSUMER_SMS: tl.constexpr,
 ):
-    cur_signal_ptr = tl.load(signal_buf_ptr + rank).to(tl.pointer_type(tl.int32))
-    cur_queue_ptr = tl.load(queue_buf_ptr + rank).to(tl.pointer_type(tl.float32))
+    libshmem_device.set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     # This kernel issues async-tasks to two group of blocks
     if pid < NUM_PRODUCER_SMS:
@@ -63,7 +64,8 @@ def producer_consumer_kernel(
         for i in range(pid, num_inputs, NUM_PRODUCER_SMS):
             queue_offset = i % queue_size
             queue_repeat = i // queue_size
-            remote_signal_ptr = tl.load(signal_buf_ptr + peer_rank).to(tl.pointer_type(tl.int32))
+
+            remote_signal_ptr = dl.symm_at(signal_ptr, peer_rank)
             token = dl.wait(remote_signal_ptr + queue_offset, 1,  # The number of signals to wait
                             "sys",  # The scope of the barrier, `gpu` or `sys`
                             "acquire",  # The semantic of the wait
@@ -71,8 +73,7 @@ def producer_consumer_kernel(
                             )  # This wait ensures that the corresponding position is empty
             input_ptr = dl.consume_token(input_ptr, token)  # consume the token to make sure the `wait` is needed
             data = tl.load(input_ptr + i * BLOCK_SIZE + offs)
-            # TODO(zhengxuegui.0): Once rocshmem is ready, we can use `symm_at` to map the data pointer to remote peer rank
-            remote_queue_ptr = tl.load(queue_buf_ptr + peer_rank).to(tl.pointer_type(tl.float32))
+            remote_queue_ptr = dl.symm_at(queue_ptr, peer_rank)
             tl.store(remote_queue_ptr + queue_offset * BLOCK_SIZE + offs, data)
             # need a syncthreads to make sure all the data has been sent
             __syncthreads()
@@ -92,20 +93,20 @@ def producer_consumer_kernel(
         for i in range(pid, num_inputs, NUM_CONSUMER_SMS):
             queue_offset = i % queue_size
             queue_repeat = i // queue_size
-            token = dl.wait(cur_signal_ptr + queue_offset,  # The base *Pointer* of signals at the current rank
+            token = dl.wait(signal_ptr + queue_offset,  # The base *Pointer* of signals at the current rank
                             1,  # The number of signals to wait
                             "sys",  # The scope of the barrier
                             "acquire",  # The semantic of the wait
                             waitValue=queue_repeat * 2 + 1,  # The value expected
                             )  # This wait ensures that the corresponding position is full
-            cur_queue_ptr = dl.consume_token(cur_queue_ptr, token)
-            data = tl.load(cur_queue_ptr + queue_offset * BLOCK_SIZE + offs)
+            queue_ptr = dl.consume_token(queue_ptr, token)
+            data = tl.load(queue_ptr + queue_offset * BLOCK_SIZE + offs)
             tl.store(output_ptr + i * BLOCK_SIZE + offs, data)
             __syncthreads()
             set_value = queue_repeat * 2 + 2
             set_value = set_value.to(tl.int32)
             if thread_idx(0) == 0:
-                store_release_system(cur_signal_ptr + queue_offset, set_value)
+                store_release_system(signal_ptr + queue_offset, set_value)
             __syncthreads()
     else:
         pass
@@ -144,26 +145,19 @@ def main(TP_GROUP):
     rank = TP_GROUP.rank()
     num_ranks = TP_GROUP.size()
 
+    ctx = pyrocshmem.rocshmem_get_device_ctx()
     # The created tensor is by-default on current cuda device
-    queue_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
-        QUEUE_SIZE * BLOCK_SIZE,
-    ], torch.float32)
+    queue = pyrocshmem.rocshmem_create_tensor((QUEUE_SIZE * BLOCK_SIZE, ), torch.float32)
+    queue.fill_(-1)
     # Currently we use `store.release.u32` to impl notify signal, dl.notify requires 64bit unsigned signal type,
-    signal_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([
-        QUEUE_SIZE,
-    ], torch.int32)
+    signal = pyrocshmem.rocshmem_create_tensor((QUEUE_SIZE, ), torch.int32)
+    signal.fill_(0)  # The initial value of signal should be 0s
 
     comm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
     comm_bufs[rank].fill_(0)
     comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_bufs], device=torch.cuda.current_device(),
                                 requires_grad=False)
 
-    queue_bufs[rank].fill_(-1)
-    queue_buf_ptr = torch.tensor([t.data_ptr() for t in queue_bufs], device=torch.cuda.current_device(),
-                                 requires_grad=False)
-    signal_bufs[rank].fill_(0)  # The initial value of signal should be 0s
-    signal_buf_ptr = torch.tensor([t.data_ptr() for t in signal_bufs], device=torch.cuda.current_device(),
-                                  requires_grad=False)
     # You need a barrier all to make sure the above initialization
     # is visible to all the other ranks.
     # This is usually used for intra-node.
@@ -174,7 +168,7 @@ def main(TP_GROUP):
     input_data = torch.randn((INPUT_SIZE * BLOCK_SIZE, ), dtype=torch.float32).cuda()
     output_data = torch.empty_like(input_data)
 
-    NUM_REPEAS = 2000
+    NUM_REPEAS = 20
     # For distributed programming, you have to run it multiple times to ensure
     # your program is correct, including reseting signals, avoiding racing, etc.
     for iters in range(NUM_REPEAS):
@@ -182,17 +176,18 @@ def main(TP_GROUP):
         # Need to reset the barrier every time, you may also omit this step for better performance
         # by using flipping barriers. We will cover this optimization in future tutorial.
         # TODO: tutorial for flipping barriers.
-        signal_bufs[rank].fill_(0)
+        signal.fill_(0)
         barrier_all_on_stream(rank, num_ranks, comm_buf_ptr, stream)
 
         producer_consumer_kernel[(20, )](  # use 20 SMs
+            ctx,
             rank,
             num_ranks,
             input_data,
             output_data,
             INPUT_SIZE,
-            queue_buf_ptr,
-            signal_buf_ptr,
+            queue,
+            signal,
             QUEUE_SIZE,
             BLOCK_SIZE,
             16,  # 16 SMs for producer
