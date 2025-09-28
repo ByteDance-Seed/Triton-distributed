@@ -28,6 +28,7 @@ import triton.language as tl
 
 from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import nvshmem_free_tensor_sync, nvshmem_create_tensor, nvshmem_barrier_all_on_stream
+from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block
 
 
 @triton.jit
@@ -70,17 +71,26 @@ def all_to_all_single_2d_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["local_rank", "rank"])
 def cp_from_recv_buf(
+    local_rank,
+    rank,
+    local_world_size: tl.constexpr,
+    intra_node_sync_buf_ptr,
     output_ptr,
     recv_buf_ptr,
     output_split_ptr,
     WORLD_SIZE: tl.constexpr,
     MAX_M: tl.constexpr,
     HIDDEN_DIM: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    IS_INTRA_NODE: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    if IS_INTRA_NODE:
+        barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size,
+                                                intra_node_sync_buf_ptr + pid * local_world_size)
     offset_pos = tl.arange(0, WORLD_SIZE)
     output_splits = tl.load(output_split_ptr + offset_pos)
     output_splits_cumsum = tl.cumsum(output_splits, axis=0)
@@ -89,11 +99,16 @@ def cp_from_recv_buf(
     if pid > 0:
         output_row_offset = get_element_at(output_splits_cumsum, pid - 1)
     mask = tl.arange(0, BLOCK_SIZE) < HIDDEN_DIM
+    offset_m = tl.arange(0, BLOCK_SIZE_M)
     offset = tl.arange(0, BLOCK_SIZE)
 
-    for bid in range(0, n_row):
-        data = tl.load(recv_buf_ptr + pid * MAX_M * HIDDEN_DIM + bid * HIDDEN_DIM + offset, mask=mask)
-        tl.store(output_ptr + (output_row_offset + bid) * HIDDEN_DIM + offset, data, mask=mask)
+    for bid in range(0, tl.cdiv(n_row, BLOCK_SIZE_M)):
+        data = tl.load(
+            recv_buf_ptr + pid * MAX_M * HIDDEN_DIM + bid * BLOCK_SIZE_M * HIDDEN_DIM + offset_m[:, None] * HIDDEN_DIM +
+            offset[None, :], mask=mask[None, :] & (bid * BLOCK_SIZE_M + offset_m[:, None] < n_row))
+        tl.store(
+            output_ptr + (output_row_offset + bid * BLOCK_SIZE_M + offset_m[:, None]) * HIDDEN_DIM + offset[None, :],
+            data, mask=mask[None, :] & (bid * BLOCK_SIZE_M + offset_m[:, None] < n_row))
 
 
 class AllToAllSingle2DContext:
@@ -105,19 +120,25 @@ class AllToAllSingle2DContext:
         rank: int,
         world_size: int,
         dtype=torch.bfloat16,
+        local_world_size: int = 8,
     ):
         self.send_buf = nvshmem_create_tensor((max_m, hidden_dim), dtype)
         self.recv_buf = nvshmem_create_tensor((max_m * world_size, hidden_dim), dtype)
+        self.intra_node_sync_buf = nvshmem_create_tensor((world_size, world_size), torch.int32)
+        self.intra_node_sync_buf.zero_()
         self.max_m = max_m
         self.hidden_dim = hidden_dim
         self.rank = rank
         self.world_size = world_size
+        self.local_world_size = local_world_size
         self.dtype = dtype
         self.element_size = torch.tensor([], dtype=dtype).element_size()
+        nvshmem_barrier_all_on_stream()
 
     def finalize(self):
         nvshmem_free_tensor_sync(self.send_buf)
         nvshmem_free_tensor_sync(self.recv_buf)
+        nvshmem_free_tensor_sync(self.intra_node_sync_buf)
 
 
 def create_all_to_all_single_2d_context(
@@ -155,17 +176,29 @@ def all_to_all_single_2d(
     all_to_all_single_2d_kernel[grid](ctx.send_buf, ctx.recv_buf, input_splits, output_splits, rank=ctx.rank,
                                       WORLD_SIZE=ctx.world_size, MAX_M=ctx.max_m, HIDDEN_DIM=ctx.hidden_dim,
                                       ELEMENT_SIZE=ctx.element_size, num_warps=32)
-    nvshmem_barrier_all_on_stream()
+    if ctx.world_size <= ctx.local_world_size:
+        is_intra_node = True
+    else:
+        is_intra_node = False
+    if not is_intra_node:
+        nvshmem_barrier_all_on_stream()
     block_size = triton.next_power_of_2(ctx.hidden_dim)
+    block_size_m = max(2048 // block_size, 1)
     grid = (ctx.world_size, )
     cp_from_recv_buf[grid](
+        ctx.rank,
+        ctx.rank,
+        ctx.world_size,
+        ctx.intra_node_sync_buf,
         output_ptr=output_tensor,
         recv_buf_ptr=ctx.recv_buf,
         output_split_ptr=output_splits,
         WORLD_SIZE=ctx.world_size,
         MAX_M=ctx.max_m,
         HIDDEN_DIM=ctx.hidden_dim,
+        BLOCK_SIZE_M=block_size_m,
         BLOCK_SIZE=block_size,
+        IS_INTRA_NODE=is_intra_node,
         num_warps=32,
     )
     return output_tensor
