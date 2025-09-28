@@ -30,7 +30,7 @@ from functools import partial
 from triton_dist.kernels.allreduce import to_allreduce_method
 from triton_dist.kernels.allreduce import get_allreduce_methods
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.mega_triton_kernel.models import Qwen3Model
+from triton_dist.mega_triton_kernel.models import DenseModel
 from triton_dist.utils import group_profile
 from triton_dist.models import ModelConfig
 from triton_dist.models import AutoLLM
@@ -99,7 +99,7 @@ if __name__ == "__main__":
                                world_size=WORLD_SIZE, local_only=False)
     # mega kernel
     builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE)
-    mege_kernel_model = Qwen3Model(batch_size, model_config, builder, build_lm_head=True)
+    mege_kernel_model = DenseModel(batch_size, model_config, builder, build_lm_head=True)
     mege_kernel_model.kv_cache.inc_offset(seq_len)
 
     # torch/dist-triton

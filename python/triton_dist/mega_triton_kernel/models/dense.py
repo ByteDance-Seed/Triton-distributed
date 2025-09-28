@@ -23,8 +23,7 @@
 #
 ################################################################################
 import torch
-from transformers import Qwen3Config
-from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
+from transformers import AutoConfig
 from triton_dist.models import ModelConfig
 from triton_dist.models.utils import init_model_cpu
 from .utils import prepare_cos_sin_cache
@@ -47,10 +46,10 @@ def shard_local(tensor: torch.Tensor, world_size: int, dim: int, local_rank: int
     return tensor.split(tensor_slice, dim=dim)[local_rank].contiguous()
 
 
-# adapt from triton_dist/models/qwen.py
-class Qwen3LayerBuilder:
+# adapt from triton_dist/models/dense.py
+class DenseLayerBuilder:
     """
-    A single layer of Qwen3 model, containing self-attention and MLP.
+    A single layer of Dense model, containing self-attention and MLP.
     This layer is designed to be used in a tensor parallel setting.
     It initializes the parameters and sets the forward pass method based on the mode.
     """
@@ -68,7 +67,7 @@ class Qwen3LayerBuilder:
         self.layer_idx = layer_idx
         self.head_dim = head_dim
 
-    def init_parameters(self, hf_layer: Qwen3DecoderLayer):
+    def init_parameters(self, hf_layer):
         self.mlp = TPMLPBuilder(builder=self._builder, rank=self.rank, world_size=self.world_size)
         self.mlp._init_parameters(hf_layer.mlp)
 
@@ -106,9 +105,9 @@ class Qwen3LayerBuilder:
         return mlp_residual_out
 
 
-class Qwen3Model:
+class DenseModel:
     """
-    Qwen3 model implementation for tensor parallel training.
+    Dense model implementation for tensor parallel training.
     This model initializes the parameters, sets the forward pass method, and provides an inference method.
     It supports both torch and triton_dist modes for forward pass.
     """
@@ -116,7 +115,7 @@ class Qwen3Model:
     def __init__(self, batch_size, model_config: ModelConfig, builder: 'ModelBuilder', build_lm_head=True) -> None:
         self._builder = builder
         self.dtype = model_config.dtype
-        self.config = Qwen3Config.from_pretrained(model_config.model_name, local_files_only=model_config.local_only)
+        self.config = AutoConfig.from_pretrained(model_config.model_name, local_files_only=model_config.local_only)
         self.model_name = model_config.model_name
         self.max_length = model_config.max_length
         self.hidden_size = self.config.hidden_size
@@ -154,10 +153,10 @@ class Qwen3Model:
         self.sin_cache = sin_cache.to(torch.float32).unsqueeze(0)
         self.cos_cache = cos_cache.to(torch.float32).unsqueeze(0)
 
-        self.layers: list[Qwen3LayerBuilder] = []
+        self.layers: list[DenseLayerBuilder] = []
 
         for idx, hf_layer in enumerate(hf_model.model.layers):
-            layer = Qwen3LayerBuilder(builder=self._builder, layer_idx=idx, head_dim=self.head_dim, rank=self.rank,
+            layer = DenseLayerBuilder(builder=self._builder, layer_idx=idx, head_dim=self.head_dim, rank=self.rank,
                                       world_size=self.world_size)
             layer.init_parameters(hf_layer=hf_layer)
             self.layers.append(layer)

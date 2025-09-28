@@ -27,7 +27,7 @@ import os
 import torch
 import triton
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.mega_triton_kernel.models import Qwen3Model
+from triton_dist.mega_triton_kernel.models import DenseModel
 
 from triton_dist.utils import get_torch_prof_ctx
 from triton_dist.models import ModelConfig
@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     dtype = DTYPE_MAP[args.dtype]
     model_config = ModelConfig(model_name=args.model, max_length=args.max_length, dtype=dtype, rank=RANK,
-                               world_size=WORLD_SIZE, local_only=True)
+                               world_size=WORLD_SIZE, local_only=False)
 
     builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE,
                            enable_profiling=args.intra_kernel_profile)
@@ -99,7 +99,7 @@ if __name__ == "__main__":
             engine.backend = args.backend
             engine.serve(input_ids=input_ids, gen_len=gen_len)
         else:
-            qwen3 = Qwen3Model(batch_size, model_config, builder, build_lm_head=True)
+            qwen3 = DenseModel(batch_size, model_config, builder, build_lm_head=True)
 
             input_seq_len = input_ids.shape[1]
             output_ids = []

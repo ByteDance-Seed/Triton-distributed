@@ -345,7 +345,7 @@ class ModelBuilder:
                                          block_tables: torch.Tensor, kv_lens: torch.Tensor, q_rms_weight: torch.Tensor,
                                          k_rms_weight: torch.Tensor, cos_cache: torch.Tensor, sin_cache: torch.Tensor,
                                          q_norm_rope: torch.Tensor, q_rms_eps: float = 1e-6, k_rms_eps: float = 1e-6,
-                                         rope_theta: int = 1000000, layer_id=0):
+                                         rope_theta: int = 1000000, skip_q_norm=False, skip_k_norm=False, layer_id=0):
         """
             this op assume that kv_lens has been update (kv_lens = history_kv_len + seq_len(qkv.shape[1]))
             inplace update new kv to key_cache/value_cache
@@ -376,7 +376,10 @@ class ModelBuilder:
         assert qkv.shape[0] == kv_lens.shape[0]
         assert cos_cache.shape[0] == sin_cache.shape[0]
         assert cos_cache.shape[0] == qkv.shape[0] or cos_cache.shape[0] == 1
-        extra_params = {"q_rms_eps": q_rms_eps, "k_rms_eps": k_rms_eps, "rope_theta": rope_theta}
+        extra_params = {
+            "q_rms_eps": q_rms_eps, "k_rms_eps": k_rms_eps, "rope_theta": rope_theta, "skip_q_norm": skip_q_norm,
+            "skip_k_norm": skip_k_norm
+        }
         self._convert_op("qk_norm_rope_update_kvcache", layer_id,
                          [[qkv, block_tables, kv_lens, q_rms_weight, k_rms_weight, cos_cache, sin_cache],
                           [key_cache, value_cache, q_norm_rope]], extra_params)
