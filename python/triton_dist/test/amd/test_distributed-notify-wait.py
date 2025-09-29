@@ -30,7 +30,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.utils import dist_print
-from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
+from triton_dist.kernels.amd.common_ops import barrier_all_with_ctx_on_stream
 from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
 import pyrocshmem
 from triton.language.extra.hip.libdevice import thread_idx
@@ -153,10 +153,8 @@ def main(TP_GROUP):
     signal = pyrocshmem.rocshmem_create_tensor((QUEUE_SIZE, ), torch.int32)
     signal.fill_(0)  # The initial value of signal should be 0s
 
-    comm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
-    comm_bufs[rank].fill_(0)
-    comm_buf_ptr = torch.tensor([t.data_ptr() for t in comm_bufs], device=torch.cuda.current_device(),
-                                requires_grad=False)
+    comm = pyrocshmem.rocshmem_create_tensor((num_ranks, ), torch.int32)
+    comm.fill_(0)
 
     # You need a barrier all to make sure the above initialization
     # is visible to all the other ranks.
@@ -177,7 +175,7 @@ def main(TP_GROUP):
         # by using flipping barriers. We will cover this optimization in future tutorial.
         # TODO: tutorial for flipping barriers.
         signal.fill_(0)
-        barrier_all_on_stream(rank, num_ranks, comm_buf_ptr, stream)
+        barrier_all_with_ctx_on_stream(ctx, rank, num_ranks, comm, stream)
 
         producer_consumer_kernel[(20, )](  # use 20 SMs
             ctx,

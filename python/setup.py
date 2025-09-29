@@ -35,8 +35,6 @@ from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, copy_
 
 from setuptools.command.build_ext import build_ext
 
-# softlink_apply_patches()
-
 try:
     from setuptools.command.editable_wheel import editable_wheel
 except ImportError:
@@ -101,24 +99,8 @@ class BackendInstaller:
         install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
                                    "backends", backend_name)
 
-        # TritonDistributed backends
-        # dist_root_dir = os.path.join(get_base_dir(), "backends")
         dist_backend_path = None
         dist_language_dir = None
-        # if backend_name in os.listdir(dist_root_dir):
-        #     dist_backend_src_dir = os.path.join(dist_root_dir, backend_name)
-
-        #     for dir in os.listdir(dist_backend_src_dir):
-        #         assert dir in ["backend", "language"], "only support backend/language extension"
-
-        #     if os.path.exists(os.path.join(dist_backend_src_dir, "backend")):
-        #         dist_backend_path = os.path.join(dist_backend_src_dir, "backend")
-        #         for file in os.listdir(dist_backend_path):
-        #             assert os.path.exists(os.path.join(backend_path,
-        #                                                file)), f"${file} does not exist in ${backend_path}"
-        #     dist_language_dir = os.path.join(dist_backend_src_dir, "language")
-        #     if not os.path.exists(dist_language_dir):
-        #         dist_language_dir = None
 
         return Backend(name=backend_name, src_dir=backend_src_dir, backend_dir=backend_path, language_dir=language_dir,
                        tools_dir=tools_dir, install_dir=install_dir, is_external=is_external,
@@ -756,23 +738,6 @@ def add_link_to_backends(external_only, materialization=False):
                 src_dir = os.path.join(backend.tools_dir, x)
                 install_dir = os.path.join(extra_dir, x)
                 update_symlink(install_dir, src_dir)
-
-    # use TritonDistributed backend to override the exsiting backend in triton
-    # for backend in backends:
-    #     if external_only and not backend.is_external:
-    #         continue
-    #     if backend.dist_backend_dir is not None:
-    #         _force_update_symlink_recursive(backend.install_dir, backend.dist_backend_dir)
-
-    #     if backend.dist_language_dir:
-    #         # Link the contents of each backend's `language` directory into
-    #         # `triton.language.extra`.
-    #         extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
-    #                                  "language", "extra")
-    #         for x in os.listdir(backend.dist_language_dir):
-    #             src_dir = os.path.join(backend.dist_language_dir, x)
-    #             install_dir = os.path.join(extra_dir, x)
-    #             _force_update_symlink_recursive(install_dir, src_dir)
 
 
 def add_link_to_proton():

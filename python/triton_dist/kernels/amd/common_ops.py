@@ -25,6 +25,8 @@
 import triton
 import torch
 import triton.language as tl
+import triton_dist.language as dl
+from triton_dist.language.extra import libshmem_device
 from typing import Optional
 
 from triton.language.extra.hip.libdevice import (thread_idx, load_acquire_system)
@@ -59,6 +61,22 @@ def barrier_all_ipc(rank, num_ranks, comm_buf_base_ptrs):
     tl.debug_barrier()
 
 
+@triton.jit
+def barrier_all_with_ctx_kernel(ctx, rank, num_ranks, comm_buf_ptr):
+    libshmem_device.set_rocshmem_ctx(ctx)
+    for i in range(num_ranks):
+        remote_base_ptr = dl.symm_at(comm_buf_ptr, i)
+        while tl.atomic_cas(remote_base_ptr + rank, 0, 1, scope="sys", sem="release") != 0:
+            pass
+
+    for i in range(num_ranks):
+        local_base_ptr = dl.symm_at(comm_buf_ptr, rank)
+        while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
+            pass
+
+    tl.debug_barrier()
+
+
 def barrier_all_on_stream(
     rank,
     num_ranks,
@@ -67,6 +85,17 @@ def barrier_all_on_stream(
 ):
     with torch.cuda.stream(stream):
         barrier_all_ipc[(1, )](rank, num_ranks, sync_bufs_ptr)
+
+
+def barrier_all_with_ctx_on_stream(
+    ctx,
+    rank,
+    num_ranks,
+    comm_buf_ptr,
+    stream,
+):
+    with torch.cuda.stream(stream):
+        barrier_all_with_ctx_kernel[(1, )](ctx, rank, num_ranks, comm_buf_ptr)
 
 
 def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):
