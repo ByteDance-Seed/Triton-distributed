@@ -48,6 +48,31 @@ def is_git_repo():
     return (Path(__file__).parent / ".git").is_dir()
 
 
+# --- Hardware Detection Functions (using subprocess) ---
+# These functions check for the presence of NVIDIA (CUDA) or AMD (HIP/ROCm)
+# drivers and command-line tools.
+
+
+def _is_cuda_platform():
+    """Checks if 'nvidia-smi' is available on the system's PATH."""
+    if shutil.which("nvidia-smi"):
+        print("--- CUDA platform detected (nvidia-smi found) ---")
+        return True
+    else:
+        print("--- CUDA platform NOT detected ---")
+        return False
+
+
+def _is_hip_platform():
+    """Checks if 'rocm-smi' is available on the system's PATH."""
+    if shutil.which("rocm-smi"):
+        print("--- HIP/ROCm platform detected (rocm-smi found) ---")
+        return True
+    else:
+        print("--- HIP/ROCm platform NOT detected ---")
+        return False
+
+
 @dataclass
 class Backend:
     name: str
@@ -335,6 +360,8 @@ def get_thirdparty_packages(packages: list):
 
 
 def download_and_copy(name, src_func, dst_path, variable, version, url_func):
+    if _is_hip_platform():
+        return
     if is_offline_build():
         return
     triton_cache_path = get_triton_cache_path()
@@ -395,6 +422,9 @@ class CMakeExtension(Extension):
         self.path = path
 
 
+# ---- SHMEM ----
+
+
 def build_rocshmem():
     rocshmem_bind_dir = os.path.join(get_base_dir(), "shmem", "rocshmem_bind")
     rocshmem_dir = os.path.join(get_base_dir(), "3rdparty", "rocshmem")
@@ -407,31 +437,6 @@ def build_rocshmem():
     ROCM_ARCH = "gfx942"  # hard-code for now
     extra_args = ["--arch", ROCM_ARCH] if ROCM_ARCH != "" else []
     subprocess.check_call(["bash", f"{rocshmem_bind_dir}/build.sh"] + extra_args)
-
-
-# --- Hardware Detection Functions (using subprocess) ---
-# These functions check for the presence of NVIDIA (CUDA) or AMD (HIP/ROCm)
-# drivers and command-line tools.
-
-
-def _is_cuda_platform():
-    """Checks if 'nvidia-smi' is available on the system's PATH."""
-    if shutil.which("nvidia-smi"):
-        print("--- CUDA platform detected (nvidia-smi found) ---")
-        return True
-    else:
-        print("--- CUDA platform NOT detected ---")
-        return False
-
-
-def _is_hip_platform():
-    """Checks if 'rocm-smi' is available on the system's PATH."""
-    if shutil.which("rocm-smi"):
-        print("--- HIP/ROCm platform detected (rocm-smi found) ---")
-        return True
-    else:
-        print("--- HIP/ROCm platform NOT detected ---")
-        return False
 
 
 def build_shmem():
