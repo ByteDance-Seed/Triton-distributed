@@ -170,8 +170,8 @@ class TP_Attn:
         if cos_sin_cache.dtype != torch.float32:
             cos_sin_cache = cos_sin_cache.to(torch.float32)
         bsz, seq, _ = q.shape
-        flashinfer.apply_rope_with_cos_sin_cache_inplace(position_ids, q.view(bsz * seq, -1), k.view(bsz * seq, -1),
-                                                         self.head_dim, cos_sin_cache, True),
+        flashinfer.apply_rope_with_cos_sin_cache_inplace(position_ids.contiguous(), q.view(bsz * seq, -1),
+                                                         k.view(bsz * seq, -1), self.head_dim, cos_sin_cache, True),
         q = q.view(bsz, seq, -1, self.head_dim)
         k = k.view(bsz, seq, -1, self.head_dim)
         return q, k

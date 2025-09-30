@@ -1116,7 +1116,8 @@ def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps
 
 def check_and_get_clocks():
     clocks = [torch.cuda.clock_rate(i) for i in range(torch.cuda.device_count())]
-    assert len(set(clocks)) == 1, f"clock rates are not the same: {clocks}"
+    if len(set(clocks)) == 1:
+        print("Warning:", f"clock rates are not the same: {clocks}")
     graphic_clock = clocks[0]  # in MHz
     return graphic_clock
 

@@ -203,7 +203,7 @@ def moe_grouped_gemm_persistent_kernel(
 def get_auto_triton_config(M, N, K, N_CHUNKS, dtype: torch.dtype) -> triton.Config:
     N_per_chunk = N // N_CHUNKS
     # TODO(houqi.1993) may relax this check
-    assert N_per_chunk == triton.next_power_of_2(N_per_chunk), f"N_per_chunk({N_per_chunk}) must be power of 2"
+    # assert N_per_chunk == triton.next_power_of_2(N_per_chunk), f"N_per_chunk({N_per_chunk}) must be power of 2"
     BLOCK_SIZE_M = 128
     BLOCK_SIZE_N = 128
     BLOCK_SIZE_K = 64
@@ -213,7 +213,7 @@ def get_auto_triton_config(M, N, K, N_CHUNKS, dtype: torch.dtype) -> triton.Conf
     config = triton.Config(
         kwargs={
             "BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_K": BLOCK_SIZE_K, "GROUP_SIZE_N":
-            N_per_chunk // BLOCK_SIZE_N
+            triton.next_power_of_2(N_per_chunk // BLOCK_SIZE_N)
         },
         num_warps=num_warps,
         num_stages=num_stages,
@@ -292,11 +292,11 @@ class MoEReduceARContext:
 
     def __post_init__(self):
         assert self.dtype in [torch.bfloat16, torch.float16]
-        assert self.max_M % self.topk == 0
+        # assert self.max_M % self.topk == 0, f"max_M={self.max_M}, topk={self.topk}"
         self.local_rank = self.rank % self.num_local_ranks
         self.nnodes = self.num_ranks // self.num_local_ranks
 
-        ntokens = self.max_M // self.topk
+        ntokens = triton.cdiv(self.max_M, self.topk)
         self.symm_reduce_buffer = nvshmem_create_tensor((ntokens, self.N), self.dtype)
         self.symm_output_buffer = nvshmem_create_tensor((ntokens, self.N), self.dtype)
         self.gemm_counter = torch.zeros((self.n_chunks_max, ), dtype=torch.int32, device=torch.cuda.current_device())
@@ -358,6 +358,7 @@ def moe_gather_ar_grouped_gemm_kernel(
         return
 
     pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+    tiles_n_this_group = min(GROUP_SIZE_N, num_block_n - group_id * GROUP_SIZE_N)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_gather_a = tl.load(gather_index_ptr + offs_m)
@@ -397,7 +398,7 @@ def moe_gather_ar_grouped_gemm_kernel(
     __syncthreads()
     if thread_idx == 0:
         count = atomic_add(counter_ptr + group_id, 1, semantic="release", scope="gpu")
-        if count == num_block_m * GROUP_SIZE_N - 1:
+        if count == num_block_m * tiles_n_this_group - 1:
             atomic_add(barrier_ptr + group_id, 1, semantic="release", scope="sys")
             tl.store(counter_ptr + group_id, 0)  # reset counter
 
@@ -438,6 +439,7 @@ def moe_gather_ar_grouped_gemm_persistent_kernel(
     total_blocks = num_block_m * num_block_n
     for pid in range(sm_id, total_blocks, NUM_SMS):
         pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+        tiles_n_this_group = min(GROUP_SIZE_N, num_block_n - group_id * GROUP_SIZE_N)
 
         offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_gather_a = tl.load(gather_index_ptr + offs_m, mask=offs_m < M, other=0)
@@ -477,7 +479,7 @@ def moe_gather_ar_grouped_gemm_persistent_kernel(
         __syncthreads()
         if thread_idx == 0:
             count = atomic_add(counter_ptr + group_id, 1, semantic="release", scope="gpu")
-            if count == num_block_m * GROUP_SIZE_N - 1:
+            if count == num_block_m * tiles_n_this_group - 1:
                 atomic_add(barrier_ptr + group_id, 1, semantic="release", scope="sys")
                 tl.store(counter_ptr + group_id, 0)
 
@@ -677,8 +679,8 @@ def run_moe_reduce_ar(x: torch.Tensor, weights: torch.Tensor, chosen_experts: to
                                M_pad_approx, ctx.N, K_per_rank, ctx.num_experts, ctx.topk, ctx.gemm_counter,
                                ctx.gemm_done_flag, persistent, NUM_COMM_SM, config)
     with torch.cuda.stream(ctx.reduce_stream):
-        N_per_chunk = ctx.N // n_chunks
-        block_size_m = max(1, 16 * 1024 // N_per_chunk // x.itemsize)
+        N_per_chunk = triton.next_power_of_2(ctx.N // n_chunks)
+        block_size_m = triton.next_power_of_2(max(1, 16 * 1024 // N_per_chunk // x.itemsize))
         block_size_n = N_per_chunk
         reduce_topk_allreduce_kernel[(NUM_COMM_SM, )](grouped_gemm_out, ctx.symm_reduce_buffer, ctx.symm_output_buffer,
                                                       ntokens, ctx.N, ctx.N, 1, ctx.rank, ctx.num_ranks,

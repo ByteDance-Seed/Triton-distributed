@@ -70,3 +70,10 @@ dev_output/
 # cibuildwheel temp
 wheelhouse/
 setup.cfg
+
+# misc
+hf_configs
+*_results.csv
+tmp*
+*.whl
+*.zip

@@ -399,7 +399,6 @@ def matmul(sp_rank, sp_size, a, b, c, gemm_barrier, gemm_config: triton.Config):
     M, K = a.shape
     N, _ = b.shape
 
-    # c = torch.empty((M, N), device=a.device, dtype=dtype)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
     matmul_kernel[grid](

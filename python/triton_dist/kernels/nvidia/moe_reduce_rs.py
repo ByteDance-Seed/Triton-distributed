@@ -200,6 +200,7 @@ def moe_gather_rs_grouped_gemm_kernel(
         return
 
     pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+    tiles_n_this_group = min(GROUP_SIZE_N, num_block_n - group_id * GROUP_SIZE_N)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_gather_a = tl.load(gather_index_ptr + offs_m)
@@ -239,7 +240,7 @@ def moe_gather_rs_grouped_gemm_kernel(
     __syncthreads()
     if thread_idx == 0:
         count = atomic_add(counter_ptr + group_id, 1, semantic="release", scope="gpu")
-        if count == num_block_m * GROUP_SIZE_N - 1:
+        if count == num_block_m * tiles_n_this_group - 1:
             st(barrier_ptr + group_id, 1, semantic="release", scope="gpu")
             tl.store(counter_ptr + group_id, 0)  # reset counter
 
@@ -281,6 +282,7 @@ def moe_gather_rs_grouped_gemm_persistent_kernel(
     total_blocks = num_block_m * num_block_n
     for pid in range(sm_id, total_blocks, NUM_SMS):
         pid_m, pid_n, group_id = swizzle_2d_by_group_n(pid, num_block_m, num_block_n, GROUP_SIZE_N)
+        tiles_n_this_group = min(GROUP_SIZE_N, num_block_n - group_id * GROUP_SIZE_N)
 
         offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_gather_a = tl.load(gather_index_ptr + offs_m, mask=offs_m < M, other=0)
@@ -319,7 +321,7 @@ def moe_gather_rs_grouped_gemm_persistent_kernel(
         __syncthreads()
         if tid(0) == 0:
             count = atomic_add(counter_ptr + group_id, 1, semantic="release", scope="gpu")
-            if count == num_block_m * GROUP_SIZE_N - 1:
+            if count == num_block_m * tiles_n_this_group - 1:
                 st(barrier_ptr + group_id, 1, semantic="release", scope="sys")
                 tl.store(counter_ptr + group_id, 0)
 
@@ -790,9 +792,10 @@ def reduce_topk_reduce_scatter_intra_node(grouped_gemm_out: torch.Tensor, ctx: M
 
 
 def get_auto_triton_config(M, N, K, topk, nexperts, N_CHUNKS, persistent: bool, dtype: torch.dtype) -> triton.Config:
+    assert N % N_CHUNKS == 0
     N_per_chunk = N // N_CHUNKS
     # TODO(houqi.1993) may relax this check
-    assert N_per_chunk == triton.next_power_of_2(N_per_chunk), f"N_per_chunk({N_per_chunk}) must be power of 2"
+    # assert N_per_chunk == triton.next_power_of_2(N_per_chunk), f"N_per_chunk({N_per_chunk}) must be power of 2"
     M_per_expert = M // nexperts
     if persistent:
         BLOCK_SIZE_M = 128
@@ -810,7 +813,7 @@ def get_auto_triton_config(M, N, K, topk, nexperts, N_CHUNKS, persistent: bool, 
     config = triton.Config(
         kwargs={
             "BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_K": BLOCK_SIZE_K, "GROUP_SIZE_N":
-            N_per_chunk // BLOCK_SIZE_N
+            triton.next_power_of_2(N_per_chunk // BLOCK_SIZE_N)
         },
         num_warps=num_warps,
         num_stages=num_stages,
@@ -945,8 +948,9 @@ def run_moe_reduce_rs(x: torch.Tensor, weights: torch.Tensor, chosen_experts: to
                                ctx.gemm_done_flag, persistent, NUM_COMM_SM, config)
 
     with torch.cuda.stream(ctx.reduce_stream):
-        block_size_m = max(1, 16 * 1024 // N_per_chunk // x.itemsize)  # each thread with a uint4 load
-        block_size_n = N_per_chunk
+        block_size_m = triton.next_power_of_2(max(1, 16 * 1024 // N_per_chunk //
+                                                  x.itemsize))  # each thread with a uint4 load
+        block_size_n = triton.next_power_of_2(N_per_chunk)
         # TODO(houqi.1993) consume no SM until needed: but worse performance.
         # maybe useful for H20 with less SM
         # _wait_eq_cuda(ctx.gemm_done_flag, 1, ctx.reduce_stream)

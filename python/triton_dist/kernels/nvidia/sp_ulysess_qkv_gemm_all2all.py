@@ -300,9 +300,6 @@ def matmul_descriptor_persistent(a, b, bias, c, gemm_barrier, gemm_config: trito
     M, K = a.shape
     N, K = b.shape
 
-    # c = torch.empty((M, N), device=a.device, dtype=dtype)
-    # NUM_GEMM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
         return torch.empty(size, device="cuda", dtype=torch.int8)
@@ -415,7 +412,6 @@ def matmul(a, b, c, gemm_barrier, gemm_config: triton.Config):
     M, K = a.shape
     N, _ = b.shape
 
-    # c = torch.empty((M, N), device=a.device, dtype=dtype)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
     matmul_kernel[grid](
