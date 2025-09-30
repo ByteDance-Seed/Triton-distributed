@@ -92,6 +92,7 @@ def kernel_all_to_all_gemm_consumer(
     # Group size for swizzling
     GROUP_SIZE_M: tl.constexpr = 8,
     INPUT_IS_E5M2: tl.constexpr = True,
+    FP8_FAST_ACCUM: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -105,11 +106,10 @@ def kernel_all_to_all_gemm_consumer(
     m_per_rank = M // world_size
     original_pid_m = first_pid_m + (pid % group_size_m)
 
-    m_blocks_per_rank = m_per_rank // BLOCK_M
-    data_rank = original_pid_m // m_blocks_per_rank
-    m_block_in_chunk = original_pid_m % m_blocks_per_rank
-    target_rank = (rank - data_rank + world_size) % world_size
-    pid_m = target_rank * m_blocks_per_rank + m_block_in_chunk
+    # Swizzle
+    M_end = m_per_rank * (rank + 1) - 1
+    last_tile = M_end // BLOCK_M
+    pid_m = (last_tile - original_pid_m + num_pid_m) % num_pid_m
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     if pid_m >= num_pid_m or pid_n >= num_pid_n:
@@ -165,13 +165,18 @@ def kernel_all_to_all_gemm_consumer(
         else:
             b = tl.load(b_ptrs, mask=b_mask, other=0)
 
-        acc += tl.dot(a, tl.trans(b))
+        if USE_FP8 and FP8_FAST_ACCUM:
+            acc = tl.dot(a, tl.trans(b), acc=acc)
+        else:
+            acc += tl.dot(a, tl.trans(b))
 
     if USE_INT8:
+        combined_scale = a_scale[:, None] * b_scale[None, :]
         acc_fp = acc.to(tl.float32)
-        c = (acc_fp * a_scale[:, None] * b_scale[None, :]).to(tl.bfloat16)
+        c = (acc_fp * combined_scale).to(tl.bfloat16)
     elif USE_FP8:
-        acc = acc * a_scale[:, None] * b_scale[None, :]
+        combined_scale = a_scale[:, None] * b_scale[None, :]
+        acc = acc * combined_scale
         c = acc.to(tl.bfloat16)
     else:
         c = acc.to(tl.bfloat16)
@@ -298,6 +303,7 @@ def all_to_all_single_gemm(
     output: Optional[torch.Tensor] = None,
     num_comm_sms: int = -1,
     sm_margin: int = 0,
+    FAST_ACCUM: bool = False,
 ) -> torch.Tensor:
     """
     All-to-All Single GEMM operation with separated communication and computation
@@ -390,6 +396,7 @@ def all_to_all_single_gemm(
         use_fp8,
         GROUP_SIZE_M,
         input_is_e5m2_flag,
+        FP8_FAST_ACCUM=FAST_ACCUM,
     )
     current_stream.wait_stream(context.comm_stream)
     return output
@@ -401,6 +408,7 @@ def gemm_only(
     input_scale: Optional[torch.Tensor] = None,
     weight_scale: Optional[torch.Tensor] = None,
     output: Optional[torch.Tensor] = None,
+    FP8_FAST_ACCUM: bool = False,
 ) -> torch.Tensor:
     """
     GEMM-only operation without All-to-All communication
@@ -459,6 +467,7 @@ def gemm_only(
         use_fp8,
         GROUP_SIZE_M,
         input_is_e5m2_flag,
+        FP8_FAST_ACCUM=FP8_FAST_ACCUM,
     )
 
     return output

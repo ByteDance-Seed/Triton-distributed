@@ -35,15 +35,8 @@ from triton_dist.kernels.nvidia import (
     all_to_all_single_gemm,
 )
 from triton_dist.kernels.nvidia.all_to_all_single_gemm import gemm_only
-from triton_dist.utils import (
-    finalize_distributed,
-    initialize_distributed,
-    is_fp8_dtype,
-    dist_print,
-    assert_allclose,
-    group_profile,
-    sleep_async,
-)
+from triton_dist.utils import (finalize_distributed, initialize_distributed, is_fp8_dtype, dist_print, assert_allclose,
+                               group_profile, sleep_async)
 
 
 def make_cuda_graph(mempool, func):
@@ -273,7 +266,7 @@ def perf_triton(
 
     gemm_time_ms = sum(gemm_times) / iters
 
-    # Wait a bit between measurements
+    FAST_ACCUM = False
     torch.cuda.synchronize()
     torch.distributed.barrier()
     output = all_to_all_single_gemm(
@@ -282,6 +275,7 @@ def perf_triton(
         context=context,
         input_scale=input_scale,
         weight_scale=weight_scale,
+        FAST_ACCUM=FAST_ACCUM,
     )
 
     # Measure fused A2A+GEMM time
@@ -298,6 +292,7 @@ def perf_triton(
             context=context,
             input_scale=input_scale,
             weight_scale=weight_scale,
+            FAST_ACCUM=FAST_ACCUM,
         )
 
         end_events[i].record()
@@ -385,8 +380,8 @@ def run_perf_test(args):
     triton_result = perf_triton(input, weight, input_scale, weight_scale, context, warmup=1, iters=1, sp_group=sp_group)
 
     # Compare results
-    rtol = 1e-2
-    atol = 1e-2
+    rtol = 1e-2 if not is_int8 else 0
+    atol = 1e-2 if not is_int8 else 0
 
     assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol)
 
@@ -453,8 +448,8 @@ def benchmark(args):
                                     sp_group)
 
     # check allclose
-    rtol = 1e-2
-    atol = 1e-2
+    rtol = 1e-2 if not is_int8 else 0
+    atol = 1e-2 if not is_int8 else 0
     assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol)
 
     # Calculate FLOPS
@@ -513,12 +508,7 @@ def check_correctness(args):
         torch.cuda.empty_cache()
 
         # Random M values
-        # TODO: hanshi.s, currently only supports perfect blocks
-        BLOCK_M = 128
-        M_values = [
-            ((random.randint(1, max_M) + (world_size * BLOCK_M) - 1) // (world_size * BLOCK_M) * (world_size * BLOCK_M))
-            for _ in range(args.iters)
-        ]
+        M_values = [random.randint(1, max_M) // world_size * world_size for _ in range(args.iters)]
 
         dist_print(f"\nRound {round_idx + 1}/{args.check_rounds}")
 
@@ -558,10 +548,8 @@ def check_correctness(args):
             torch_result = perf_torch(input, weight, input_scale, weight_scale, warmup=1, iters=1, sp_group=sp_group)
             triton_result = perf_triton(input, weight, input_scale, weight_scale, context, warmup=1, iters=1,
                                         sp_group=sp_group)
-
-            rtol = 1e-2
-            atol = 1e-2
-
+            rtol = 1e-2 if not is_int8 else 0
+            atol = 1e-2 if not is_int8 else 0
             assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol, verbose=False)
 
         if all_passed:
@@ -586,6 +574,11 @@ if __name__ == "__main__":
     NNODES = WORLD_SIZE // LOCAL_WORLD_SIZE if LOCAL_WORLD_SIZE > 0 else 1
     SP_GROUP = initialize_distributed(seed=args.seed)
     torch.manual_seed(args.seed)
+    is_s8 = DTYPE_MAP[args.dtype] == torch.int8
+    is_fp8 = is_fp8_dtype(DTYPE_MAP[args.dtype])
+    assert is_s8 or is_fp8
+    if is_fp8:
+        torch.use_deterministic_algorithms(False, warn_only=True)
 
     dist_print("=" * 80)
     dist_print("All-to-All Single GEMM Test")
