@@ -340,6 +340,82 @@ NVSHMEM_TEAMS_MIN = 6
 NVSHMEM_TEAM_INDEX_MAX = sys.maxsize
 
 
-## TODO: add rocshmem
+# ROCSHMEM_CMPS (enum)
+ROCSHMEM_CMP_EQ = 0
+ROCSHMEM_CMP_NE = 1
+ROCSHMEM_CMP_GT = 2
+ROCSHMEM_CMP_GE = 3
+ROCSHMEM_CMP_LT = 4
+ROCSHMEM_CMP_LE = 5
+
+# ROCSHMEM_SIGNAL_OPS (enum)
+ROCSHMEM_SIGNAL_SET = 0
+ROCSHMEM_SIGNAL_ADD = 1
+
 def set_rocshmem_ctx(ctx):
+    ...
+
+def putmem_signal(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def putmem_signal_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+def getmem(dest, source, bytes, pe):
+    ...
+
+def getmem_wave(dest, source, bytes, pe):
+    ...
+
+def getmem_wg(dest, source, bytes, pe):
+    ...
+
+def getmem_nbi(dest, source, bytes, pe):
+    ...
+
+def getmem_nbi_wave(dest, source, bytes, pe):
+    ...
+
+def getmem_nbi_wg(dest, source, bytes, pe):
+    ...
+
+
+
+def putmem(dest, source, bytes, pe):
+    ...
+
+def putmem_wave(dest, source, bytes, pe):
+    ...
+
+def putmem_wg(dest, source, bytes, pe):
+    ...
+
+def putmem_nbi(dest, source, bytes, pe):
+    ...
+
+def putmem_nbi_wave(dest, source, bytes, pe):
+    ...
+
+def putmem_nbi_wg(dest, source, bytes, pe):
+    ...
+
+def wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
+    ...
+
+def barrier_all_wave():
+    ...
+
+def barrier_all_wg():
     ...
