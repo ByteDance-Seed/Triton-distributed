@@ -141,10 +141,10 @@ rocshmem_putmem_nbi_wg_wrapper(void *dest, const void *source, size_t nbytes, in
 }
 
 
-__device__ void __attribute__((visibility("default")))
-rocshmem_wait_until_wrapper(void *sig_addr, int cmp, uint64_t cmp_val) {
-  rocshmem_wait_until(sig_addr, cmp, cmp_val);
-}
+// __device__ void __attribute__((visibility("default")))
+// rocshmem_wait_until_wrapper(void *sig_addr, int cmp, uint64_t cmp_val) {
+//   rocshmem_wait_until(sig_addr, cmp, cmp_val);
+// }
 
 __device__ void __attribute__((visibility("default")))
 rocshmem_barrier_all_wrapper() {
