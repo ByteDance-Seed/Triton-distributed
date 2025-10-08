@@ -115,6 +115,9 @@ PYBIND11_MODULE(_pyrocshmem, m) {
   });
   m.def("rocshmem_finalize", []() { rocshmem_finalize(); });
   m.def("rocshmem_barrier_all", []() { rocshmem_barrier_all(); });
+  m.def("rocshmem_barrier_all_on_stream", [](intptr_t stream) {
+    rocshmem_barrier_all_on_stream((hipStream_t)stream);
+  });
   m.def("rocshmem_get_device_ctx",
         []() -> int64_t { return (int64_t)rocshmem_get_device_ctx(); });
   m.def("rocshmem_get_uniqueid", []() {

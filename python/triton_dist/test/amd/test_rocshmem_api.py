@@ -32,7 +32,7 @@ import torch
 import pyrocshmem
 from hip import hip
 import triton.language as tl
-from triton_dist.utils import (HIP_CHECK, get_torch_prof_ctx)
+from triton_dist.utils import (HIP_CHECK, get_torch_prof_ctx, group_profile, perf_func)
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
@@ -79,7 +79,7 @@ def test_rocshmem_memcpy():
     npes = pyrocshmem.rocshmem_n_pes()
     peer = (mype + 1) % npes
 
-    nelems_per_rank = 4
+    nelems_per_rank = 1024*1024
 
     comm_buffs = pyrocshmem.rocshmem_create_tensor_list_intra_node([nelems_per_rank], torch.int32)
     comm_buffs[mype].fill_(0)
@@ -87,13 +87,18 @@ def test_rocshmem_memcpy():
     torch.cuda.synchronize()
 
     one = torch.arange(nelems_per_rank, dtype=torch.int32, device=torch.cuda.current_device())
-    stream = torch.cuda.current_stream()
+    cur_stream = torch.cuda.current_stream()
+    ag_streams = [torch.cuda.Stream(priority=-1) for i in range(npes)]
+    
+    torch.cuda.synchronize()
+    pyrocshmem.rocshmem_barrier_all_on_stream(cur_stream.cuda_stream)
 
-    with torch.cuda.stream(stream):
+    with torch.cuda.stream(ag_streams[mype]):
         for i in range(npes):
             remote_rank = (i + mype) % npes
             if remote_rank == i:
                 continue
+            stream = ag_streams[i]
             dst_ptr = comm_buffs[remote_rank].data_ptr()
             src_ptr = one.data_ptr()
             nbytes = nelems_per_rank * one.element_size()
@@ -106,16 +111,18 @@ def test_rocshmem_memcpy():
             )
 
             HIP_CHECK(cp_res)
+
+    pyrocshmem.rocshmem_barrier_all_on_stream(cur_stream.cuda_stream)
+    
     torch.cuda.synchronize()
-    print(f"mype#: {mype} comm_buffs: {comm_buffs}")
 
     try:
         torch.testing.assert_close(comm_buffs[peer], one)
     except Exception as e:
-        print(f" _rocshmem_basic #{mype} - Check tensor_list failed")
+        print(f" _rocshmem_memcpy #{mype} - Check tensor_list failed")
         raise (e)
     else:
-        print(f"✅ _rocshmem_basic #{mype} - Check tensor_list pass")
+        print(f"✅ _rocshmem_memcpy #{mype} - Check tensor_list pass")
 
 
 def parse_args():
@@ -126,25 +133,10 @@ def parse_args():
 
     return parser.parse_args()
 
-
-def perf_func(func, iters, warmup_iters):
-    start_event = torch.cuda.Event(enable_timing=True)
-    stop_event = torch.cuda.Event(enable_timing=True)
-    for n in range(iters + warmup_iters):
-        if n == warmup_iters:
-            start_event.record()
-        func()
-    stop_event.record()
-    start_event.wait()
-    stop_event.wait()
-    torch.cuda.current_stream().synchronize()
-    duration_ms = start_event.elapsed_time(stop_event)
-    return duration_ms / iters
-
-
 if __name__ == "__main__":
     # init
     args = parse_args()
+    nbytes = 1024*1024 * 4
 
     torch.cuda.set_device(LOCAL_RANK)
     torch.distributed.init_process_group(
@@ -163,19 +155,13 @@ if __name__ == "__main__":
     torch.distributed.barrier()
 
     test_rocshmem_basic()
-    ctx = get_torch_prof_ctx(args.profile)
+    ctx = group_profile("rshmem_api_profile", args.profile, group=TP_GROUP)
 
     with ctx:
         perf = perf_func(partial(test_rocshmem_memcpy), iters=10, warmup_iters=5)
-
+   
     torch.cuda.synchronize()
     torch.distributed.barrier()
-
-    if args.profile:
-        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
-        prof_dir = "prof_rshmem"
-        os.makedirs(prof_dir, exist_ok=True)
-        ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
 
     print(f"rocSHMEM #{RANK} ", perf)
 
