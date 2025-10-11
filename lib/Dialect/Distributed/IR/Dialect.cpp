@@ -23,6 +23,7 @@
 
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
+#include "triton/Dialect/Triton/IR/Interfaces.h"
 
 // clang-format off
 #include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
@@ -42,6 +43,8 @@ void mlir::triton::distributed::DistributedDialect::initialize() {
 #define GET_OP_LIST
 #include "TritonDistributed/Dialect/Distributed/IR/Ops.cpp.inc"
       >();
+
+  addInterfaces<TritonInlinerInterface>();
 }
 
 #include "TritonDistributed/Dialect/Distributed/IR/DistributedEnums.cpp.inc"
