@@ -207,8 +207,8 @@ class TP_Attn:
         if verbose:
             print(f"[RANK {self.rank}] Attn initialized with parameters: qkv ({self.wqkv.shape}, o ({self.wo.shape}))")
 
-    def _init_ctx(self, max_M, ag_intranode_stream, BLOCK_M, BLOCK_N, BLOCK_K, stages, serial=False,
-                  ag_internode_stream=None):
+    def _init_ctx(self, max_M, ag_intranode_stream, BLOCK_M, BLOCK_N, BLOCK_K, serial=False, ag_internode_stream=None,
+                  stages=None):
         if serial:
             print(f"[RANK {self.rank}] Using serial mode for AG-GEMM.")
         self.ag_ctx = create_ag_gemm_intra_node_context(max_M=max_M, N=self.ag_N_per_rank, K=self.K, rank=self.rank,
@@ -216,7 +216,7 @@ class TP_Attn:
                                                         output_dtype=self.dtype, tp_group=self.group,
                                                         ag_streams=ag_intranode_stream, serial=serial, autotune=True,
                                                         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                                        stages=stages, M_PER_CHUNK=256)
+                                                        M_PER_CHUNK=256)
         self.rs_ctx = create_gemm_rs_intra_node_context(
             max_M=max_M,
             N=self.K,

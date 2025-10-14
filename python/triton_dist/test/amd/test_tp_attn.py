@@ -182,7 +182,6 @@ if __name__ == "__main__":
     BLOCK_M = 128
     BLOCK_N = 128
     BLOCK_K = 128
-    stages = 3
     ag_intranode_stream = [torch.cuda.Stream(priority=-1) for i in range(WORLD_SIZE)]
     profile = args.profile
 
@@ -209,7 +208,7 @@ if __name__ == "__main__":
         # dist triton prefill
         M = BSZ * SEQ_LEN
         attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                       BLOCK_K=BLOCK_K, stages=stages)
+                       BLOCK_K=BLOCK_K)
         dist_x = x.split(bsz_per_rank, dim=0)[RANK].contiguous()
 
         out_triton = attn.dist_triton_fwd(dist_x, position_ids, cos_sin_cache, kv_cache, layer_idx=0)
@@ -263,7 +262,7 @@ if __name__ == "__main__":
         # triton decode
         M = BSZ
         attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                       BLOCK_K=BLOCK_K, stages=stages)
+                       BLOCK_K=BLOCK_K)
         dist_x = x.split(bsz_per_rank, dim=0)[RANK].contiguous()
         out_triton = attn.dist_triton_fwd(dist_x, position_ids, cos_sin_cache, kv_cache, layer_idx=0)
         check_allclose(out_triton, out_torch, atol=ATOL, rtol=RTOL)

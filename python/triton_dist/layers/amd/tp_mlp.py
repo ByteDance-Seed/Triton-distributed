@@ -96,7 +96,7 @@ class TP_MLP:
                                                         output_dtype=self.dtype, tp_group=self.group,
                                                         ag_streams=ag_intranode_stream, serial=serial, autotune=True,
                                                         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                                        stages=stages, M_PER_CHUNK=256)
+                                                        M_PER_CHUNK=256)
         self.rs_ctx = create_gemm_rs_intra_node_context(
             max_M=max_M,
             N=self.K,

@@ -51,6 +51,7 @@ shmem/rocshmem_bind/ompi_build
 shmem/rocshmem_bind/pyrocshmem/build/
 shmem/rocshmem_bind/pyrocshmem/python/*.egg-info
 shmem/rocshmem_bind/pyrocshmem/dist
+shmem/rocshmem_bind/pyrocshmem/.eggs
 
 build
 python/triton_dist/_C/*.so
