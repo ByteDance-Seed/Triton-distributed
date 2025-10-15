@@ -655,15 +655,24 @@ def persistent_gemm_notify(a, b, out, gemm_barrier, tile_barrier, gemm_config: t
     return out
 
 
-def low_latency_gemm_allreduce_op(ctx: LLGemmARContext, a, b, gemm_config: triton.Config, copy_to_local=True,
-                                  USE_MULTIMEM_ST=True, TILE_MAP_LEVEL=0, As=None, Bs=None):
+def low_latency_gemm_allreduce_op(
+    ctx: LLGemmARContext,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    gemm_config: triton.Config,
+    copy_to_local=True,
+    USE_MULTIMEM_ST=True,
+    TILE_MAP_LEVEL=0,
+    A_scale: torch.Tensor | None = None,
+    B_scale: torch.Tensor | None = None,
+):
     ctx.update_phase()
-    M, N, K = a.shape[0], b.shape[0], b.shape[1]
+    M, N, K = A.shape[0], B.shape[0], B.shape[1]
     # Check constraints.
-    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
-    assert a.dtype == b.dtype, "Incompatible dtypes"
+    assert A.shape[1] == B.shape[1], "Incompatible dimensions"
+    assert A.dtype == B.dtype, "Incompatible dtypes"
 
-    symm_c = ctx.get_gemm_out_buf(a, b)
+    symm_c = ctx.get_gemm_out_buf(A, B)
     symm_ar_out = ctx.symm_ar_out_buf
     gemm_barrier = ctx.gemm_barrier_buf
     multi_st_barrier = ctx.multi_st_barrier_buf
@@ -672,13 +681,13 @@ def low_latency_gemm_allreduce_op(ctx: LLGemmARContext, a, b, gemm_config: trito
 
     NUM_COMM_SMS = ctx.NUM_COMM_SMS
     USE_LD_REDUCE = ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem
-    with_scale = (As is not None and Bs is not None)
+    with_scale = (A_scale is not None and B_scale is not None)
 
     if with_scale:
-        assert a.dtype == torch.int8
-        ar_out = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
+        assert A.dtype == torch.int8
+        ar_out = torch.empty((M, N), dtype=torch.bfloat16, device=A.device)
     else:
-        ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+        ar_out = torch.empty((M, N), dtype=A.dtype, device=A.device)
 
     current_stream = torch.cuda.current_stream()
     if not USE_LD_REDUCE:  # Multimem kernel will reset barrier inside the ar kernel
@@ -690,16 +699,16 @@ def low_latency_gemm_allreduce_op(ctx: LLGemmARContext, a, b, gemm_config: trito
                                             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])
                                             ), )
     kernel_fused_gemm_allreduce[grid](
-        a, b, symm_c, symm_ar_out, ar_out,  #
+        A, B, symm_c, symm_ar_out, ar_out,  #
         gemm_barrier, multi_st_barrier, grid_barrier, tile_barrier,  #
         M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        b.stride(0), b.stride(1),  #
+        A.stride(0), A.stride(1),  #
+        B.stride(0), B.stride(1),  #
         symm_c.stride(0), symm_c.stride(1),  #
         **gemm_config.all_kwargs(),  #
         NUM_COMM_SMS=NUM_COMM_SMS, BLOCK_SIZE_COMM=8192, TILE_MAP_LEVEL=TILE_MAP_LEVEL, USE_MULTIMEM_ST=USE_MULTIMEM_ST,
         FUSE_OUTPUT_CP=copy_to_local, use_cooperative=True, USE_LD_REDUCE=USE_LD_REDUCE,
-        **launch_cooperative_grid_options(), USE_INT8=with_scale, As_ptr=As, Bs_ptr=Bs)
+        **launch_cooperative_grid_options(), USE_INT8=with_scale, As_ptr=A_scale, Bs_ptr=B_scale)
 
     if USE_MULTIMEM_ST and not copy_to_local:
         return symm_ar_out.reshape(-1)[:M * N].reshape(M, N)

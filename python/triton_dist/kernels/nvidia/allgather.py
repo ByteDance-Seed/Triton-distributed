@@ -39,8 +39,8 @@ import triton.language as tl
 from triton.language.extra.cuda.language_extra import __syncthreads, tid
 from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda, _wait_eq_cuda
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, has_fullmesh_nvlink, get_numa_world_size,
-                               nvshmem_barrier_all_on_stream, sleep_async)
+from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, get_triton_dist_world, has_fullmesh_nvlink,
+                               get_group_numa_world_size, nvshmem_barrier_all_on_stream, sleep_async)
 
 
 class AllGatherMethod(Enum):
@@ -54,14 +54,15 @@ class AllGatherMethod(Enum):
 
 
 @functools.lru_cache()
-def get_auto_all_gather_method(num_ranks, num_local_ranks):
+def get_auto_all_gather_method(num_ranks, num_local_ranks, pg: torch.distributed.ProcessGroup | None = None):
     if has_fullmesh_nvlink():
         if num_ranks == num_local_ranks:
             return AllGatherMethod.All2All_IntraNode
         else:
             return AllGatherMethod.All2All_InterNode
     else:
-        numa_world_size = get_numa_world_size()
+        pg = pg or get_triton_dist_world()
+        numa_world_size = get_group_numa_world_size(pg)
         if num_local_ranks == num_ranks:
             if numa_world_size == num_ranks:
                 return AllGatherMethod.Ring1D_IntraNode
@@ -103,14 +104,14 @@ def cp_engine_producer_all_gather_full_mesh_pull(
     remote_tensor_buffers: List[torch.Tensor],
     barrier_buffers: List[torch.Tensor],
     stream: torch.cuda.Stream,
-    for_correctness=False,
+    debug=False,
 ):
     M_per_rank, N = local_tensor.shape
 
     rank_orders = [(rank + i) % num_ranks for i in range(num_ranks)]
 
     with torch.cuda.stream(stream):
-        if for_correctness:
+        if debug:
             # fake a slow communication case
             # test if the computation is waiting for the correct communication
             _add_noise_workload_debug()
@@ -130,7 +131,7 @@ def cp_engine_producer_all_gather_ring_push_1d(
     remote_tensor_buffers: List[torch.Tensor],
     barrier_buffers: List[torch.Tensor],
     stream: torch.cuda.Stream,
-    for_correctness=False,
+    debug=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
@@ -138,7 +139,7 @@ def cp_engine_producer_all_gather_ring_push_1d(
     M_per_rank, N = local_tensor.shape
     to_rank = (rank - 1 + num_ranks) % num_ranks
     with torch.cuda.stream(stream):
-        if for_correctness:
+        if debug:
             # fake a slow communication case
             # test if the computation is waiting for the correct communication
             _add_noise_workload_debug()
@@ -162,12 +163,12 @@ def cp_engine_producer_all_gather_ring_push_numa_2d(
     remote_tensor_buffers: List[torch.Tensor],
     barrier_buffers: List[torch.Tensor],
     stream: torch.cuda.Stream,
-    for_correctness=False,
+    debug=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
 
-    NUMA_WORLD_SIZE = get_numa_world_size()
+    NUMA_WORLD_SIZE = get_group_numa_world_size(get_triton_dist_world())
     assert (num_ranks % NUMA_WORLD_SIZE == 0), f"num_ranks {num_ranks} should be divisible by NUMA {NUMA_WORLD_SIZE}"
     n_numa_nodes = num_ranks // NUMA_WORLD_SIZE
     assert n_numa_nodes == 2, f"n_numa_nodes {n_numa_nodes} should be 2"
@@ -177,7 +178,7 @@ def cp_engine_producer_all_gather_ring_push_numa_2d(
     numa_node_id = rank // NUMA_WORLD_SIZE
     to_rank_numa = (rank - 1 + NUMA_WORLD_SIZE) % NUMA_WORLD_SIZE + numa_node_id * NUMA_WORLD_SIZE
     with torch.cuda.stream(stream):
-        if for_correctness:
+        if debug:
             # fake a slow communication case
             # test if the computation is waiting for the correct communication
             _add_noise_workload_debug()
@@ -205,7 +206,7 @@ def cp_engine_producer_all_gather_intra_node(
     remote_tensor_buffers: List[torch.Tensor],
     barrier_buffers: List[torch.Tensor],
     stream: torch.cuda.Stream,
-    for_correctness=False,
+    debug=False,
     all_gather_method: AllGatherMethod = AllGatherMethod.All2All_IntraNode,
 ):
     if all_gather_method == AllGatherMethod.All2All_IntraNode:
@@ -224,7 +225,7 @@ def cp_engine_producer_all_gather_intra_node(
         remote_tensor_buffers,
         barrier_buffers,
         stream,
-        for_correctness=for_correctness,
+        debug=debug,
     )
 
 
@@ -237,7 +238,7 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
     barrier_buffers: List[torch.Tensor],
     intranode_stream: torch.cuda.Stream,
     internode_stream: torch.cuda.Stream = None,
-    for_correctness=False,
+    debug=False,
 ):
     flag_dtype = barrier_buffers[0].dtype
     assert flag_dtype in [torch.int32, NVSHMEM_SIGNAL_DTYPE], flag_dtype
@@ -249,7 +250,7 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
     node_id = rank // num_local_ranks
     to_rank = (local_rank - 1 + num_local_ranks) % num_local_ranks
     with torch.cuda.stream(intranode_stream):
-        if for_correctness:
+        if debug:
             # fake a slow communication case
             # test if the computation is waiting for the correct communication
             _add_noise_workload_debug()
@@ -393,7 +394,7 @@ def cp_engine_producer_all_gather_full_mesh_pull_inter_node(
     intranode_ag_stream=None,
     internode_ag_stream=None,
     signal_target=1,
-    for_correctness=False,
+    debug=False,
 ):
     local_rank = rank % local_world_size
     n_nodes = world_size // local_world_size
@@ -460,7 +461,7 @@ def cp_engine_producer_all_gather_inter_node(
     world_size,
     intranode_ag_stream=None,
     internode_ag_stream=None,
-    for_correctness: bool = False,
+    debug: bool = False,
     all_gather_method: AllGatherMethod = AllGatherMethod.All2All_InterNode,
 ):
     if all_gather_method == AllGatherMethod.All2All_InterNode:
@@ -474,7 +475,7 @@ def cp_engine_producer_all_gather_inter_node(
             intranode_ag_stream,
             internode_ag_stream,
             signal_target=signal_target,
-            for_correctness=for_correctness,
+            debug=debug,
         )
     elif all_gather_method == AllGatherMethod.Ring2D_InterNode:
         cp_engine_producer_all_gather_ring_push_2d_inter_node(
@@ -486,7 +487,7 @@ def cp_engine_producer_all_gather_inter_node(
             signal_buffer,
             intranode_ag_stream,
             None,
-            for_correctness=for_correctness,
+            debug=debug,
         )
     else:
         raise Exception(f"Unsupported allgather method: {all_gather_method}")

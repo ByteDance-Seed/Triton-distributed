@@ -35,8 +35,9 @@ from triton_dist.kernels.allreduce import to_allreduce_method, get_allreduce_met
 from triton_dist.layers.nvidia.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import init_model_cpu
-from triton_dist.utils import (assert_allclose, initialize_distributed, perf_func, dist_print, group_profile,
-                               nvshmem_barrier_all_on_stream)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (initialize_distributed, dist_print, nvshmem_barrier_all_on_stream)
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -71,10 +72,6 @@ def parse_args():
         "Communication strategy mode: 'ag_rs' (AllGather+ReduceScatter), 'allreduce', or 'gemm_ar' (Fused GEMM+AllReduce)."
     )
     # Strategy-specific arguments
-    parser.add_argument("--ag_gemm_persistent", default=False, action="store_true",
-                        help="Use persistent kernel for AG-GEMM (ag_rs mode only)")
-    parser.add_argument("--gemm_rs_persistent", default=False, action="store_true",
-                        help="Use persistent kernel for GEMM-RS (ag_rs mode only)")
     parser.add_argument("--allreduce_method", type=str, default="two_shot_multimem", choices=get_allreduce_methods(),
                         help="All-reduce method (allreduce mode only)")
 
@@ -160,10 +157,8 @@ def run_attention_test(run_type: str, attn: TP_Attn, cos_sin_cache, kv_cache: KV
     if args.mode == 'ag_rs':
         assert args.bsz % world_size == 0, f"Batch size {args.bsz} must be divisible by world size {world_size} for 'ag_rs' mode."
         dist_x = x.split(bsz_per_rank, dim=0)[rank].contiguous()
-        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, ag_internode_stream=ag_internode_stream,
-                       BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=3)
+        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, ag_internode_stream=ag_internode_stream)
         triton_func = partial(attn.dist_triton_fwd, dist_x, position_ids, cos_sin_cache, kv_cache, layer_idx=0,
-                              ag_gemm_persistent=args.ag_gemm_persistent, gemm_rs_persistent=args.gemm_rs_persistent,
                               autotune=True)
         golden_for_assert = golden_output.split(bsz_per_rank, dim=0)[rank].contiguous()
         test_name_suffix = "ag_rs"

@@ -24,7 +24,6 @@
 ################################################################################
 import argparse
 import os
-import datetime
 from functools import partial
 
 import triton
@@ -34,7 +33,8 @@ from hip import hip
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import (HIP_CHECK, get_torch_prof_ctx)
+from triton_dist.profiler_utils import get_torch_prof_ctx
+from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
@@ -233,21 +233,7 @@ if __name__ == "__main__":
     args = parse_args()
     nbytes = 1024*1024 * 4
 
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
-
-    torch.distributed.barrier(TP_GROUP)
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
-
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
+    TP_GROUP = initialize_distributed()
 
     test_rocshmem_basic()
 
@@ -265,5 +251,4 @@ if __name__ == "__main__":
 
     print(f"rocSHMEM #{RANK} ", perf)
 
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

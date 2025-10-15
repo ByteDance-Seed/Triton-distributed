@@ -34,7 +34,9 @@ import triton
 import nvshmem.core
 from triton_dist.layers.nvidia.tp_moe import TP_MoE
 from triton_dist.models.utils import init_model_cpu
-from triton_dist.utils import initialize_distributed, perf_func, dist_print, group_profile, nvshmem_barrier_all_on_stream, assert_allclose
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import initialize_distributed, dist_print, nvshmem_barrier_all_on_stream
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,

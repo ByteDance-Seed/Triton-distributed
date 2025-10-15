@@ -30,7 +30,8 @@ import torch
 import triton
 import triton.language as tl
 from triton_dist.kernels.nvidia.reduce_scatter import (kernel_ring_reduce_non_tma)
-from triton_dist.utils import perf_func, sleep_async
+from triton_dist.profiler_utils import perf_func
+from triton_dist.utils import sleep_async
 
 
 @triton.jit

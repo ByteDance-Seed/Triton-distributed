@@ -43,7 +43,8 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
-from triton_dist.utils import finalize_distributed, initialize_distributed, nvshmem_barrier_all_on_stream, perf_func, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
+from triton_dist.profiler_utils import perf_func
+from triton_dist.utils import finalize_distributed, initialize_distributed, nvshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
 
 
 @dataclass

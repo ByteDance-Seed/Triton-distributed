@@ -116,7 +116,7 @@ class GemmARLayer(torch.nn.Module):
             ar_out = low_latency_gemm_allreduce_op(self.ctx, input, weight, self.gemm_config,
                                                    copy_to_local=self.copy_to_local,
                                                    USE_MULTIMEM_ST=self.USE_MULTIMEM_ST,
-                                                   TILE_MAP_LEVEL=self.TILE_MAP_LEVEL, As=scale_a, Bs=scale_b)
+                                                   TILE_MAP_LEVEL=self.TILE_MAP_LEVEL, A_scale=scale_a, B_scale=scale_b)
         else:
             ar_out = gemm_allreduce_op(self.ctx, input, weight, self.gemm_config, copy_to_local=self.copy_to_local,
                                        USE_MULTIMEM_ST=self.USE_MULTIMEM_ST, As=scale_a, Bs=scale_b, pg=self.tp_group)

@@ -959,7 +959,7 @@ DEPS_NVIDIA = [
     "cuda-python>=12.0",
     "nvidia-nvshmem-cu12>=3.3.9",
     "Cython>=0.29.24",
-    "nvshmem4py-cu12>=0.1.0",
+    "nvshmem4py-cu12>=0.1.2",
 ] if _is_cuda_platform() else []
 DEPS_HIP = ["hip-python"] if _is_hip_platform() else []
 DEPS = DEPS_NVIDIA + DEPS_HIP

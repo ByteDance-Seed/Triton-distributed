@@ -91,26 +91,26 @@ def get_nic_gbps_per_gpu():
     return total_bw / torch.cuda.device_count()
 
 
-def estimate_reduce_scatter_time_ms(nbytes, world_size, local_world_size, intranode_bw, internode_bw):
+def estimate_reduce_scatter_time_ms(nbytes, world_size, local_world_size, intranode_bw_in_gbps, internode_bw_in_gbps):
     """
     intranode_bw/internode_bw in GB/s
     """
     if world_size != local_world_size:
         assert world_size % local_world_size == 0
         nnodes = world_size // local_world_size
-        intra_node_ms = nbytes / world_size * (local_world_size - 1) / 1e6 / intranode_bw
-        inter_node_ms = nbytes / world_size / 1e6 / internode_bw
+        intra_node_ms = nbytes / world_size * (local_world_size - 1) / 2**30 / intranode_bw_in_gbps * 1e3
+        inter_node_ms = nbytes / world_size / 2**30 / internode_bw_in_gbps * 1e3
         if has_fullmesh_nvlink():
             # with nvlink full mesh, intra/inter node overlaps
             return min(intra_node_ms, inter_node_ms) * (nnodes - 1) + intra_node_ms
         else:
             return (intra_node_ms + inter_node_ms) * (nnodes - 1) + intra_node_ms
 
-    return nbytes / 1e6 / local_world_size * (local_world_size - 1) / intranode_bw
+    return nbytes / 1e6 / local_world_size * (local_world_size - 1) / intranode_bw_in_gbps
 
 
-def estimate_all_gather_time_ms(nbytes, world_size, local_world_size, intranode_bw, internode_bw):
+def estimate_all_gather_time_ms(nbytes, world_size, local_world_size, intranode_bw_in_gbps, internode_bw_in_gbps):
     """ just as reduce_scatter.
-    intranode_bw/internode_bw in GB/s
     """
-    return estimate_reduce_scatter_time_ms(nbytes, world_size, local_world_size, intranode_bw, internode_bw)
+    return estimate_reduce_scatter_time_ms(nbytes, world_size, local_world_size, intranode_bw_in_gbps,
+                                           internode_bw_in_gbps)

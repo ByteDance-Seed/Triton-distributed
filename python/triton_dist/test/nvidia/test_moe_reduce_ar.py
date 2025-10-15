@@ -29,7 +29,9 @@ import triton
 import torch
 from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.nvidia.moe_reduce_ar import run_moe_reduce_ar_triton_non_overlap, run_moe_reduce_ar, create_moe_ar_context
-from triton_dist.utils import dist_print, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async, finalize_distributed
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import dist_print, initialize_distributed, sleep_async, finalize_distributed
 
 
 def create_rand_tensor(rank, shape, dtype=torch.float16, device="cuda"):

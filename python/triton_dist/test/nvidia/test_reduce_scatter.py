@@ -33,7 +33,9 @@ from triton_dist.kernels.nvidia.reduce_scatter import (create_reduce_scater_2d_c
                                                        reduce_scatter_ring_push_1d_intra_node_ce,
                                                        reduce_scatter_ring_push_1d_intra_node_sm,
                                                        reduce_scatter_ring_push_1d_intra_node_sm_rma)
-from triton_dist.utils import assert_allclose, group_profile, initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_create_tensor, perf_func, sleep_async
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_create_tensor, sleep_async
 
 
 def fill_random(tensor: torch.Tensor):

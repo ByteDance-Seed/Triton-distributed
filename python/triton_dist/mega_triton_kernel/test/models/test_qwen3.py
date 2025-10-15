@@ -29,7 +29,7 @@ import triton
 from triton_dist.mega_triton_kernel import ModelBuilder
 from triton_dist.mega_triton_kernel.models import DenseModel
 
-from triton_dist.utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import get_torch_prof_ctx
 from triton_dist.models import ModelConfig
 from triton_dist.models.engine import Engine, AutoTokenizer
 from triton_dist.models.utils import sample_token

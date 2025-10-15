@@ -31,22 +31,49 @@ from typing import Optional
 import torch
 
 from triton_dist.kernels.nvidia import create_gemm_rs_context, gemm_rs
-from triton_dist.utils import (assert_allclose, dist_print, generate_data, group_profile, initialize_distributed,
-                               nvshmem_barrier_all_on_stream, perf_func, finalize_distributed)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (dist_print, initialize_distributed, finalize_distributed,
+                               wait_until_max_gpu_clock_or_warning)
+from triton_dist.kernels.nvidia.gemm import get_config_space
 
 
 def torch_gemm_rs(
-    input: torch.Tensor,  # [M, local_k]
-    weight: torch.Tensor,  # [N, local_K]
+    A: torch.Tensor,  # [M, K_per_rank]
+    B: torch.Tensor,  # [K_per_rank, N]
     bias: Optional[torch.Tensor],
-    tp_group,
+    tp_group: torch.distributed.ProcessGroup,
 ):
-    M, local_K = input.shape
-    N = weight.shape[0]
-    output = torch.matmul(input, weight.T)
+    M, _ = A.shape
+    _, N = B.shape
+    output = torch.matmul(A, B)
     if bias:
         output = output + bias
-    rs_output = torch.empty((M // WORLD_SIZE, N), dtype=output.dtype, device=input.device)
+    rs_output = torch.empty((M // WORLD_SIZE, N), dtype=output.dtype, device=A.device)
+    torch.distributed.reduce_scatter_tensor(rs_output, output, group=tp_group)
+    return rs_output
+
+
+def torch_gemm_only(
+    A: torch.Tensor,  # [M, K_per_rank]
+    B: torch.Tensor,  # [K_per_rank, N]
+    bias: Optional[torch.Tensor],
+):
+    output = torch.matmul(A, B)
+    if bias:
+        output = output + bias
+    return output
+
+
+def torch_reduce_scatter_only(
+    A: torch.Tensor,  # [M, K_per_rank]
+    B: torch.Tensor,  # [K_per_rank, N]
+    tp_group: torch.distributed.ProcessGroup,
+):
+    M, _ = A.shape
+    _, N = B.shape
+    output = torch.empty((M, N), dtype=A.dtype, device=A.device)
+    rs_output = torch.empty((M // WORLD_SIZE, N), dtype=A.dtype, device=A.device)
     torch.distributed.reduce_scatter_tensor(rs_output, output, group=tp_group)
     return rs_output
 
@@ -87,13 +114,15 @@ class GemmRS(torch.nn.Module):
 
     def forward(
         self,
-        input: torch.Tensor,  # [M, local_K]
-        weight: torch.Tensor,  # [N, local_K]
+        input: torch.Tensor,  # [M, K_per_rank]
+        weight: torch.Tensor,  # [K_per_rank, N]
         bias: Optional[torch.Tensor] = None,
     ):
-        assert input.shape[0] <= self.max_M and weight.shape[0] == self.N
-
-        return gemm_rs(input, weight, self.ctx, self.persistent, self.fuse_scatter)
+        if args.autotune:
+            return gemm_rs(input, weight, self.ctx, autotune=args.autotune)
+        else:
+            return gemm_rs.fn(input, weight, self.ctx, gemm_config=get_config_space(self.persistent)[0],
+                              persistent=self.persistent, fuse_scatter=self.fuse_scatter)
 
 
 DTYPE_MAP = {
@@ -115,12 +144,15 @@ THRESHOLD_MAP = {
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("M", type=int)
-    parser.add_argument("N", type=int)
-    parser.add_argument("K", type=int)
+    parser.add_argument("-M", "--M", type=int, required=False)
+    parser.add_argument("--M_range", "--M-range", type=str, help="M range in [start, end, step], e.g. 256-8192-8")
+    parser.add_argument("-N", "--N", type=int)
+    parser.add_argument("-K", "--K", type=int)
     parser.add_argument("--warmup", default=20, type=int, help="warmup iterations")
     parser.add_argument("--iters", default=100, type=int, help="perf iterations")
     parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
+    parser.add_argument("--trans_b", default=True, type=bool, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--autotune", default=False, type=bool, action=argparse.BooleanOptionalAction)
 
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--check", default=False, action="store_true", help="correctness check")
@@ -129,15 +161,7 @@ def parse_args():
                         default=torch.cuda.get_device_capability() >= (9, 0))
 
     parser.add_argument("--fuse_scatter", action=argparse.BooleanOptionalAction, default=False)
-
-    parser.add_argument(
-        "--transpose_weight",
-        dest="transpose_weight",
-        action=argparse.BooleanOptionalAction,
-        help="transpose weight",
-        default=True,
-    )
-    parser.add_argument("--has_bias", default=False, action="store_true", help="whether have bias")
+    parser.add_argument("--has_bias", default=False, action="store_true")
     parser.add_argument("--seed", type=int, default=42)
 
     return parser.parse_args()
@@ -150,8 +174,6 @@ if __name__ == "__main__":
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 
-    torch.cuda.set_device(LOCAL_RANK)
-
     args = parse_args()
     tp_group = initialize_distributed(args.seed)
     if torch.cuda.get_device_capability()[0] < 9:
@@ -162,24 +184,40 @@ if __name__ == "__main__":
     atol = THRESHOLD_MAP[output_dtype]
     rtol = THRESHOLD_MAP[output_dtype]
 
-    assert args.M % WORLD_SIZE == 0
-    assert args.K % WORLD_SIZE == 0
-    local_K = args.K // WORLD_SIZE
+    if args.M is None:
+        assert args.M_range is not None, "M_range is required when M is None"
+        M_range = args.M_range.split("-")
+        assert len(M_range) == 3, "M_range must be in format of [start, end, step]"
+        M_start, M_end, M_step = [int(x) for x in M_range]
+        assert M_start % WORLD_SIZE == 0, "M_start must be divisible by WORLD_SIZE"
+        assert M_end % WORLD_SIZE == 0, "M_end must be divisible by WORLD_SIZE"
+        assert M_start <= M_end, "M_start must be less than M_end"
+        assert M_step % WORLD_SIZE == 0, "M_step must be divisible by WORLD_SIZE"
+        M_max = M_end
+        M_list = list(range(M_start, M_end + 1, M_step))
+    else:
+        M_max = args.M
+        M_list = [args.M]
 
-    scale = RANK + 1
+    assert args.K % WORLD_SIZE == 0
+    K_per_rank = args.K // WORLD_SIZE
 
     def _make_data(M):
-        data_config = [
-            ((M, local_K), input_dtype, (0.01 * scale, 0)),  # A
-            ((args.N, local_K), input_dtype, (0.01 * scale, 0)),  # B
-            (  # bias
-                None if not args.has_bias else ((M, args.N), input_dtype, (1, 0))),
-        ]
-        generator = generate_data(data_config)
-        input, weight, bias = next(generator)
-        return input, weight, bias
+        scale = RANK + 1
+        A = torch.randn((M, K_per_rank), dtype=input_dtype, device="cuda")
+        A *= 0.01 * scale
+        if args.trans_b:
+            B = torch.randn((args.N, K_per_rank), dtype=input_dtype, device="cuda").T
+        else:
+            B = torch.randn((K_per_rank, args.N), dtype=input_dtype, device="cuda")
+        B *= 0.01 * scale
+        if args.has_bias:
+            bias = torch.randn((M, args.N), dtype=input_dtype, device="cuda")
+        else:
+            bias = None
+        return A, B, bias
 
-    gemm_rs_op = GemmRS(tp_group, args.M, args.N, args.K, input_dtype, output_dtype, LOCAL_WORLD_SIZE, args.persistent,
+    gemm_rs_op = GemmRS(tp_group, M_max, args.N, args.K, input_dtype, output_dtype, LOCAL_WORLD_SIZE, args.persistent,
                         args.fuse_scatter)
 
     if args.check:
@@ -191,44 +229,67 @@ if __name__ == "__main__":
             dist_out_list, torch_out_list = [], []
 
             # torch impl
-            for input, weight, bias in input_list:
-                torch_out = torch_gemm_rs(input, weight, bias, tp_group)
+            for A, weight, bias in input_list:
+                torch_out = torch_gemm_rs(A, weight, bias, tp_group)
                 torch_out_list.append(torch_out)
 
             # dist triton impl
-            for input, weight, bias in input_list:
-                dist_out = gemm_rs_op.forward(input, weight, bias)
+            for A, weight, bias in input_list:
+                dist_out = gemm_rs_op.forward(A, weight, bias)
                 dist_out_list.append(dist_out)
             # verify
             for idx, (torch_out, dist_out) in enumerate(zip(torch_out_list, dist_out_list)):
                 assert_allclose(torch_out, dist_out, atol=atol, rtol=rtol, verbose=False)
-        print(f"RANK[{RANK}]: pass.")
+        print(f"✅ RANK[{RANK}]: pass.")
 
         gemm_rs_op.ctx.finalize()
         finalize_distributed()
         exit(0)
 
-    input, weight, bias = _make_data(args.M)
-    with group_profile(f"gemm_rs_{args.M}x{args.N}x{args.K}_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile,
-                       group=tp_group):
-        torch_output, torch_perf = perf_func(partial(torch_gemm_rs, input, weight, bias, tp_group), iters=args.iters,
-                                             warmup_iters=args.warmup)
+    for M in M_list:
+        A, weight, bias = _make_data(M)
+        exp_name = f"{M}x{args.N}x{args.K}_{os.environ['TORCHELASTIC_RUN_ID']}"
+        with group_profile(f"gemm_rs_{exp_name}", args.profile, group=tp_group):
+            wait_until_max_gpu_clock_or_warning()
+            torch_output, torch_duration_ms = perf_func(partial(torch_gemm_rs, A, weight, bias, tp_group),
+                                                        iters=args.iters, warmup_iters=args.warmup)
 
-        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-        torch.cuda.synchronize()
+            wait_until_max_gpu_clock_or_warning()
+            triton_output, triton_duration_ms = perf_func(partial(gemm_rs_op.forward, A, weight, bias),
+                                                          iters=args.iters, warmup_iters=args.warmup)
+            wait_until_max_gpu_clock_or_warning()
+            _, torch_gemm_ms = perf_func(lambda: torch_gemm_only(A, weight, bias), iters=args.iters,
+                                         warmup_iters=args.warmup)
+            wait_until_max_gpu_clock_or_warning()
+            _, torch_rs_ms = perf_func(lambda: torch_reduce_scatter_only(A, weight, tp_group), iters=args.iters,
+                                       warmup_iters=args.warmup)
 
-        dist_triton_output, dist_triton_perf = perf_func(partial(gemm_rs_op.forward, input, weight, bias),
-                                                         iters=args.iters, warmup_iters=args.warmup)
+        assert_allclose(torch_output, triton_output, atol=atol, rtol=rtol)
 
-    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    torch.cuda.synchronize()
+        dist_print(
+            f"M_{M}_N_{args.N}_K_{args.K}_TP_{WORLD_SIZE} #{RANK} triton total: {triton_duration_ms:0.3f} ms/iter torch total: {torch_duration_ms:0.3f} ms/iter, GEMM {torch_gemm_ms:0.3f} ms/iter, ReduceScatter {torch_rs_ms:0.3f} ms/iter",
+            need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
-    atol, rtol = THRESHOLD_MAP[input_dtype], THRESHOLD_MAP[input_dtype]
-    assert_allclose(torch_output, dist_triton_output, atol=atol, rtol=rtol)
-    torch.cuda.synchronize()
+        # performance metrics
+        tflops = 2 * M * args.N * K_per_rank / 1e12
+        gemm_mem_read_gb = (M * K_per_rank * input_dtype.itemsize + K_per_rank * args.N * input_dtype.itemsize) / 2**30
+        gemm_mem_write_gb = (M * args.N * output_dtype.itemsize) / 2**30
+        triton_tflops = tflops / triton_duration_ms * 1e3
+        triton_gemm_mem_read_gbps = gemm_mem_read_gb / triton_duration_ms * 1e3
+        triton_gemm_mem_write_gbps = gemm_mem_write_gb / triton_duration_ms * 1e3
 
-    dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+        torch_tflops = tflops / torch_gemm_ms * 1e3
+        torch_gemm_mem_read_gbps = gemm_mem_read_gb / torch_gemm_ms * 1e3
+        torch_gemm_mem_write_gbps = gemm_mem_write_gb / torch_gemm_ms * 1e3
+
+        reduce_scatter_gb = M * args.N * output_dtype.itemsize / 2**30 * (WORLD_SIZE - 1) / WORLD_SIZE
+        torch_reduce_scatter_gbps = reduce_scatter_gb / torch_rs_ms * 1e3
+        print(
+            f"triton #{RANK} GEMM full {triton_tflops:0.2f} TFLOPS, read {triton_gemm_mem_read_gbps:0.2f} GB/s, write {triton_gemm_mem_write_gbps:0.2f} GB/s"
+        )
+        print(
+            f"torch  #{RANK} GEMM only {torch_tflops:0.2f} TFLOPS, read {torch_gemm_mem_read_gbps:0.2f} GB/s, write {torch_gemm_mem_write_gbps:0.2f} GB/s, ReduceScatter only {torch_reduce_scatter_gbps:0.2f} GB/s"
+        )
 
     gemm_rs_op.ctx.finalize()
     finalize_distributed()

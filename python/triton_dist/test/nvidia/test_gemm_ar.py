@@ -30,18 +30,20 @@ import os
 from functools import partial
 from typing import Optional
 
-from triton_dist.utils import (assert_allclose, dist_print, generate_data, group_profile, initialize_distributed,
-                               nvshmem_barrier_all_on_stream, perf_func, finalize_distributed, sleep_async)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (dist_print, generate_data, initialize_distributed, nvshmem_barrier_all_on_stream,
+                               finalize_distributed, sleep_async)
 from triton_dist.layers.nvidia import GemmARLayer
 
 
 def torch_gemm_ar(
-    input: torch.Tensor,  # [M, local_k]
+    A: torch.Tensor,  # [M, local_k]
     weight: torch.Tensor,  # [N, local_K]
     bias: Optional[torch.Tensor],
     tp_group,
 ):
-    output = torch.matmul(input, weight.T)
+    output = torch.matmul(A, weight.T)
     if bias:
         output = output + bias
     torch.distributed.all_reduce(output, group=tp_group)
@@ -49,8 +51,8 @@ def torch_gemm_ar(
 
 
 # per-channel quantization for int8_w8a8
-def torch_scaled_gemm_ar(input, weight, scale_a, scale_b, out_dtype, tp_group):
-    output = torch.matmul(input.to(torch.float32), weight.T.to(torch.float32))
+def torch_scaled_gemm_ar(A, weight, scale_a, scale_b, out_dtype, tp_group):
+    output = torch.matmul(A.to(torch.float32), weight.T.to(torch.float32))
     if bias is not None:
         output = output.to(torch.float32) * scale_a.view(-1, 1) * scale_b.view(1, -1) + bias
     else:
@@ -60,8 +62,8 @@ def torch_scaled_gemm_ar(input, weight, scale_a, scale_b, out_dtype, tp_group):
     return output
 
 
-def cutlass_scaled_gemm_ar(input, weight, scale_a, scale_b, out_dtype, tp_group):
-    output = int8_scaled_mm(input, weight.T, scale_a, scale_b, out_dtype)
+def cutlass_scaled_gemm_ar(A, weight, scale_a, scale_b, out_dtype, tp_group):
+    output = int8_scaled_mm(A, weight.T, scale_a, scale_b, out_dtype)
     torch.distributed.all_reduce(output, group=tp_group)
     return output
 
@@ -152,9 +154,9 @@ def parse_args():
     parser.add_argument("M", type=int)
     parser.add_argument("N", type=int)
     parser.add_argument("K", type=int)
-    parser.add_argument("--warmup", default=20, type=int, help="warmup iterations")
-    parser.add_argument("--iters", default=30, type=int, help="perf iterations")
-    parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
+    parser.add_argument("--warmup", default=5, type=int, help="warmup iterations")
+    parser.add_argument("--iters", default=10, type=int, help="perf iterations")
+    parser.add_argument("--dtype", default="bfloat16", help="data type")
 
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--check", default=False, action="store_true", help="correctness check")
@@ -167,16 +169,9 @@ def parse_args():
     parser.add_argument("--num_comm_sms", default=16, type=int, help="num sm for allreduce")
     parser.add_argument("--row-wise", action=argparse.BooleanOptionalAction, default=False)
 
-    parser.add_argument(
-        "--transpose_weight",
-        dest="transpose_weight",
-        action=argparse.BooleanOptionalAction,
-        help="transpose weight",
-        default=True,
-    )
     parser.add_argument("--has_bias", default=False, action="store_true", help="whether have bias")
     parser.add_argument("--quant", default=False, action="store_true")
-    parser.add_argument("--quant_out_dtype", default="bfloat16", type=str, help="output data type with scale")
+    parser.add_argument("--quant_out_dtype", default="bfloat16", help="output data type with scale")
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--print", default=False, action="store_true")
@@ -235,8 +230,8 @@ if __name__ == "__main__":
                 None if not args.has_bias else ((M, args.N), input_dtype, (1, 0))),
         ]
         generator = generate_data(data_config)
-        input, weight, bias = next(generator)
-        return input, weight, bias
+        A, weight, bias = next(generator)
+        return A, weight, bias
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     NUM_GEMM_SMS = NUM_SMS - args.num_comm_sms
@@ -269,19 +264,19 @@ if __name__ == "__main__":
             input_list = [_make_data(args.M) for _ in range(args.verify_iters)]
             dist_out_list, torch_out_list, cutlass_out_list = [], [], []
             # torch impl
-            for input, weight, bias in input_list:
+            for A, weight, bias in input_list:
                 if args.quant:
-                    torch_out = torch_scaled_gemm_ar(input, weight, scale_a, scale_b, output_dtype, tp_group)
-                    cutlass_out = cutlass_scaled_gemm_ar(input, weight, scale_a, scale_b, output_dtype, tp_group)
+                    torch_out = torch_scaled_gemm_ar(A, weight, scale_a, scale_b, output_dtype, tp_group)
+                    cutlass_out = cutlass_scaled_gemm_ar(A, weight, scale_a, scale_b, output_dtype, tp_group)
                     cutlass_out_list.append(cutlass_out)
                 else:
-                    torch_out = torch_gemm_ar(input, weight, bias, tp_group)
+                    torch_out = torch_gemm_ar(A, weight, bias, tp_group)
                 torch_out_list.append(torch_out)
 
             # dist triton impl
-            for input, weight, bias in input_list:
+            for A, weight, bias in input_list:
                 straggler(RANK)
-                dist_out = gemm_ar_op.forward(input, weight, bias, scale_a, scale_b)
+                dist_out = gemm_ar_op.forward(A, weight, bias, scale_a, scale_b)
                 dist_out_list.append(dist_out)
 
             # verify
@@ -298,42 +293,41 @@ if __name__ == "__main__":
         exit(0)
 
     # warm up
-    input, weight, bias = _make_data(args.M)
+    A, weight, bias = _make_data(args.M)
     if args.quant:
-        ar_input = torch.matmul(input.to(torch.float32), weight.T.to(torch.float32)).to(torch.bfloat16)
+        ar_input = torch.matmul(A.to(torch.float32), weight.T.to(torch.float32)).to(torch.bfloat16)
     else:
-        ar_input = torch.matmul(input, weight.T)
+        ar_input = torch.matmul(A, weight.T)
 
-    gemm_ar_op.forward(input, weight, bias, scale_a, scale_b)
+    x = gemm_ar_op.forward(A, weight, bias, scale_a, scale_b)
 
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     torch.cuda.synchronize()
 
     with group_profile(f"gemm_ar_{args.M}x{args.N}x{args.K}_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile,
                        group=tp_group):
-        dist_triton_output, dist_triton_perf = perf_func(
-            partial(gemm_ar_op.forward, input, weight, bias, scale_a, scale_b), iters=args.iters,
-            warmup_iters=args.warmup)
+        dist_triton_output, dist_triton_perf = perf_func(partial(gemm_ar_op.forward, A, weight, bias, scale_a, scale_b),
+                                                         iters=args.iters, warmup_iters=args.warmup)
 
         if args.quant:
             torch_output, torch_perf = perf_func(
-                partial(cutlass_scaled_gemm_ar, input, weight, scale_a, scale_b, output_dtype, tp_group),
-                iters=args.iters, warmup_iters=args.warmup)
+                partial(cutlass_scaled_gemm_ar, A, weight, scale_a, scale_b, output_dtype, tp_group), iters=args.iters,
+                warmup_iters=args.warmup)
         else:
-            torch_output, torch_perf = perf_func(partial(torch_gemm_ar, input, weight, bias, tp_group),
-                                                 iters=args.iters, warmup_iters=args.warmup)
+            torch_output, torch_perf = perf_func(partial(torch_gemm_ar, A, weight, bias, tp_group), iters=args.iters,
+                                                 warmup_iters=args.warmup)
 
         if args.quant:
-            _, torch_gemm_perf = perf_func(partial(int8_scaled_mm, input, weight.T, scale_a, scale_b, output_dtype),
+            _, torch_gemm_perf = perf_func(partial(int8_scaled_mm, A, weight.T, scale_a, scale_b, output_dtype),
                                            iters=args.iters, warmup_iters=args.warmup)
         else:
-            _, torch_gemm_perf = perf_func(partial(torch.matmul, input, weight.T), iters=args.iters,
+            _, torch_gemm_perf = perf_func(partial(torch.matmul, A, weight.T), iters=args.iters,
                                            warmup_iters=args.warmup)
 
         torch.cuda.synchronize()
         sleep_async(100)
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-        _, dist_triton_gemm_perf = perf_func(partial(gemm_ar_op.forward_gemm, input, weight, bias, scale_a, scale_b),
+        _, dist_triton_gemm_perf = perf_func(partial(gemm_ar_op.forward_gemm, A, weight, bias, scale_a, scale_b),
                                              iters=args.iters, warmup_iters=args.warmup)
 
         torch.cuda.synchronize()

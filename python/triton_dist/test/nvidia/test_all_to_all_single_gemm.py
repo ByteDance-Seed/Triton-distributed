@@ -35,8 +35,9 @@ from triton_dist.kernels.nvidia import (
     all_to_all_single_gemm,
 )
 from triton_dist.kernels.nvidia.all_to_all_single_gemm import gemm_only
-from triton_dist.utils import (finalize_distributed, initialize_distributed, is_fp8_dtype, dist_print, assert_allclose,
-                               group_profile, sleep_async)
+from triton_dist.profiler_utils import group_profile
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (finalize_distributed, initialize_distributed, is_fp8_dtype, dist_print, sleep_async)
 
 
 def make_cuda_graph(mempool, func):

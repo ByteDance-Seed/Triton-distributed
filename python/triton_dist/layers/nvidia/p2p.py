@@ -161,13 +161,6 @@ class CommOp(torch.nn.Module):
         remote_pe = torch.distributed.get_global_rank(self.pp_group, pp_rank)
         stream = stream if stream is not None else torch.cuda.current_stream()
         # Optionally, you can use nvshmem python bindings
-        # nvshmem_signal_wait(
-        #     self._signals[buffer_id],
-        #     remote_pe,
-        #     value,
-        #     libshmem_device.NVSHMEM_CMP_EQ,
-        #     stream=stream,
-        # )
         with torch.cuda.stream(stream):
             p2p_wait_signal[(1, )](
                 self._signals[buffer_id],

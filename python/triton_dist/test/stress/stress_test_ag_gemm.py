@@ -30,6 +30,7 @@ import torch
 import torch.distributed
 
 from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
+from triton_dist.test.utils import assert_allclose
 from triton_dist.utils import initialize_distributed
 
 TP_GROUP = initialize_distributed()
@@ -56,6 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--verify_hang", type=int, default=40)
     parser.add_argument("--seed", type=int, default=40)
     parser.add_argument("--simulate_straggler", default=False, action="store_true")
+    parser.add_argument("--trans_b", default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     dtype = torch.float16
@@ -69,14 +71,18 @@ if __name__ == "__main__":
         N_per_rank = args.N // TP_GROUP.size()
 
         A = torch.randn([M_per_rank, args.K], dtype=dtype, device="cuda")
-        B = torch.randn([N_per_rank, args.K], dtype=dtype, device="cuda")
+        if args.trans_b:
+            B = torch.randn([N_per_rank, args.K], dtype=dtype, device="cuda").T
+        else:
+            B = torch.randn([args.K, N_per_rank], dtype=dtype, device="cuda")
+
         torch_ag_out = torch.empty([M, args.K], dtype=dtype, device="cuda")
         ctx = create_ag_gemm_context(A, B, TP_GROUP.rank(), TP_GROUP.size(), max_M=M)
 
         return A, B, ctx, torch_ag_out
 
-    def _run_dist_triton(a, b, ctx, straggler_option=None):
-        return ag_gemm(a, b, ctx, straggler_option=straggler_option)
+    def _run_dist_triton(A: torch.Tensor, B: torch.Tensor, ctx, straggler_option=None):
+        return ag_gemm(A, B, ctx, straggler_option=straggler_option)
 
     for n in range(args.iters):
         # generate data for verify
@@ -92,7 +98,7 @@ if __name__ == "__main__":
             triton_out_list.append(res)
 
         for input, weight, _, torch_ag_out in tensor_inputs:
-            ag_gemm_res = torch_ag_gemm(TP_GROUP, input, weight.T, torch_ag_out)
+            ag_gemm_res = torch_ag_gemm(TP_GROUP, input, weight, torch_ag_out)
             torch_out_list.append(ag_gemm_res)
 
         # verify
@@ -101,17 +107,10 @@ if __name__ == "__main__":
             for i in range(TP_GROUP.size()):
                 torch.distributed.barrier(TP_GROUP)
                 if TP_GROUP.rank() == i:
-                    if not torch.allclose(triton_res, torch_res, atol=1e-3, rtol=1e-3):
+                    try:
+                        assert_allclose(triton_res, torch_res, atol=1e-3, rtol=1e-3)
+                    except Exception:
                         check_failed = True
-                        print("❌ check failed")
-                        print(f"Rank {TP_GROUP.rank()}")
-                        print("Golden")
-                        print(torch_res)
-                        print("Output")
-                        print(triton_res)
-                        print("Max diff", torch.max(torch.abs(torch_res - triton_res)))
-                        print("Avg diff", torch.mean(torch.abs(torch_res - triton_res)))
-                        print("Wrong Answer!")
             if check_failed:
                 exit(1)
 

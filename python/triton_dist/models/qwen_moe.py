@@ -167,8 +167,7 @@ class Qwen3MoE:
             raise RuntimeError(f"Unsupported platform: {PLATFORM}. Supported platforms are 'nvidia' and 'amd'.")
         self.ag_internode_stream = torch.cuda.Stream()
         self.layers[0].attn._init_ctx(max_M=max_M, ag_intranode_stream=self.ag_intranode_stream,
-                                      ag_internode_stream=self.ag_internode_stream, BLOCK_M=128, BLOCK_N=128,
-                                      BLOCK_K=128, stages=3)
+                                      ag_internode_stream=self.ag_internode_stream)
         self.layers[0].mlp._init_ctx(M=max_M)
         for layer in self.layers[1:]:
             layer.attn.ag_ctx = self.layers[0].attn.ag_ctx

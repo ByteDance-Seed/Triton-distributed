@@ -30,11 +30,11 @@ import torch.distributed
 from functools import partial
 from transformers import AutoConfig
 
-import pyrocshmem
 import triton
 from triton_dist.layers.amd.tp_mlp import TP_MLP
 from triton_dist.models.utils import init_model_cpu
-from triton_dist.utils import perf_func, dist_print, group_profile
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -109,24 +109,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
+    TP_GROUP = initialize_distributed()
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]
@@ -174,8 +157,7 @@ if __name__ == "__main__":
     x_triton_dist = x.split(M_per_rank, dim=0)[RANK].contiguous()
     ag_intranode_stream = [torch.cuda.Stream(priority=-1) for i in range(WORLD_SIZE)]
 
-    mlp._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                  stages=stages, serial=False)
+    mlp._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream)
     out_triton = mlp.dist_triton_fwd(x_triton_dist)
 
     out = golden.split(M_per_rank, dim=0)[RANK].contiguous()
@@ -287,5 +269,4 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         torch.distributed.barrier(TP_GROUP)
 
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

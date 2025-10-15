@@ -313,6 +313,7 @@ class MoEReduceARContext:
     def finalize(self):
         nvshmem_free_tensor_sync(self.symm_reduce_buffer)
         nvshmem_free_tensor_sync(self.symm_output_buffer)
+        nvshmem_free_tensor_sync(self.topk_done_flag)
 
 
 def create_moe_ar_context(rank, world_size, local_world_size, max_token_num, hidden_dim, num_experts, topk, input_dtype,

@@ -30,7 +30,8 @@ import triton
 import triton_dist.language as dl
 import triton.language as tl
 import nvshmem.core
-from triton_dist.utils import dist_print, initialize_distributed, nvshmem_free_tensor_sync, perf_func, nvshmem_barrier_all_on_stream, nvshmem_create_tensor
+from triton_dist.profiler_utils import perf_func
+from triton_dist.utils import dist_print, initialize_distributed, nvshmem_free_tensor_sync, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, requires_p2p_native_atomic, supports_p2p_native_atomic
 from triton.language.extra.cuda.language_extra import atomic_cas, tid
 
 
@@ -65,19 +66,19 @@ def kernel_ag_intra_node_nvlink_small_msg_split_msg(
 
 @triton.jit
 def kernel_ag_intra_node_nvlink_small_msg_split_rank(
-    rank: tl.constexpr,
+    rank,
     num_ranks: tl.constexpr,
     symm_data_ptr,
     local_out_ptr,
     comm_buf_ptr,
     num_bytes,
     BLOCK_SIZE: tl.constexpr,
-    need_sync: tl.constexpr,
+    NEED_SYNC: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pids = tl.num_programs(axis=0)
 
-    if need_sync:
+    if NEED_SYNC:
         thread_idx = tid(0)
 
         if thread_idx < num_ranks:
@@ -115,6 +116,7 @@ def nearest_power_two_u32(v):
     return v
 
 
+@requires_p2p_native_atomic
 def ag_intra_node_nvlink_small_msg(symm_data, comm_buf, rank, num_ranks, need_block_level_sync=False):
     symm_data = symm_data.to(torch.int8)
     msg_size_bytes = symm_data.shape[0]
@@ -134,6 +136,10 @@ def ag_intra_node_nvlink_small_msg(symm_data, comm_buf, rank, num_ranks, need_bl
 
 
 if __name__ == "__main__":
+    if not supports_p2p_native_atomic():
+        print("p2p native atomic not supported, skip test")
+        exit(0)
+
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))

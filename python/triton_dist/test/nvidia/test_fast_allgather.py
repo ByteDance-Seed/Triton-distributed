@@ -29,6 +29,7 @@ import nvshmem.core
 import torch
 
 from triton_dist.layers.nvidia import AllGatherLayer
+from triton_dist.profiler_utils import group_profile
 from triton_dist.utils import (initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync,
                                nvshmem_create_tensor, sleep_async)
 
@@ -107,7 +108,7 @@ def perf_ag(ag_op: AllGatherLayer, ag_buffer: torch.Tensor, nbytes: int, do_veri
     if do_verify:
         _verify()
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    from triton_dist.utils import group_profile, perf_func
+    from triton_dist.profiler_utils import perf_func
 
     with group_profile(f"all_gather_op_{nbytes//1024}KB", do_prof=args.profile, group=TP_GROUP):
         sleep_async(1000)  # in case CPU bound

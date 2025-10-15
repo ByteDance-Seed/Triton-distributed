@@ -46,6 +46,7 @@ CMD="torchrun \
   --nproc_per_node=${nproc_per_node} \
   --nnodes=${nnodes} \
   ${additional_args} \
+  ${DIST_TRITON_EXTRA_TORCHRUN_ARGS} \
   $@"
 
 echo ${CMD}

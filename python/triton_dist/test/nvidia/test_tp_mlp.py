@@ -35,7 +35,9 @@ import nvshmem.core
 from triton_dist.kernels.allreduce import to_allreduce_method
 from triton_dist.layers.nvidia.tp_mlp import TP_MLP
 from triton_dist.models.utils import init_model_cpu
-from triton_dist.utils import initialize_distributed, perf_func, dist_print, group_profile, nvshmem_barrier_all_on_stream, assert_allclose
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import initialize_distributed, dist_print, nvshmem_barrier_all_on_stream
 
 from triton_dist.kernels.allreduce import get_allreduce_methods
 
@@ -84,18 +86,14 @@ def parse_args():
     parser.add_argument("--dtype", default="bfloat16", type=str, help="data type", choices=list(DTYPE_MAP.keys()))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
+    parser.add_argument("--autotune", default=True, action=argparse.BooleanOptionalAction,
+                        help="enable autotune, default=True")
 
     # Refactored mode selection
     parser.add_argument(
         "--mode", type=str, default="ag_rs", choices=["ag_rs", "allreduce", "gemm_ar"], help=
         "Execution mode for TP MLP. 'ag_rs' for AllGather+ReduceScatter, 'allreduce' for AllReduce, 'gemm_ar' for Fused GEMM+AllReduce."
     )
-    # Arguments specific to 'ag_rs' mode
-    parser.add_argument("--ag_gemm_persistent", default=False, action="store_true",
-                        help="Use persistent kernel for AllGather-GEMM (ag_rs mode only)")
-    parser.add_argument("--gemm_rs_persistent", default=False, action="store_true",
-                        help="Use persistent kernel for GEMM-ReduceScatter (ag_rs mode only)")
-
     # Arguments specific to 'allreduce' mode
     parser.add_argument("--allreduce_method", type=str, default="two_shot_multimem", choices=get_allreduce_methods(),
                         help="All-reduce method (allreduce mode only)")
@@ -122,8 +120,8 @@ def run_benchmark(test_name: str, torch_func, triton_func, args: argparse.Namesp
         nvshmem_barrier_all_on_stream()
         torch.cuda.synchronize()
 
-    dist_print(f"torch tp mlp {test_name} #{rank}", torch_perf, need_sync=True, allowed_ranks=list(range(world_size)))
-    dist_print(f"dist-triton tp mlp {test_name} #{rank}", dist_triton_perf, f"{torch_perf/dist_triton_perf:.2f}x",
+    dist_print(f"TP MLP {test_name} #{rank} torch {torch_perf:0.3f} ms/iter" \
+               f" dist-triton {dist_triton_perf:0.3f} ms/iter", f"speedup {torch_perf/dist_triton_perf:0.3f}x",
                need_sync=True, allowed_ranks=list(range(world_size)))
 
     del torch_graph, triton_dist_graph, mempool
@@ -175,7 +173,7 @@ if __name__ == "__main__":
 
         # Init context for ag_rs
         mlp._init_ctx(max_M=M, ag_intranode_stream=torch.cuda.Stream(priority=-1),
-                      ag_internode_stream=torch.cuda.Stream(), BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=3)
+                      ag_internode_stream=torch.cuda.Stream())
 
         # Correctness check
         out_triton = mlp.dist_triton_fwd(x_triton_dist)
@@ -183,21 +181,19 @@ if __name__ == "__main__":
         assert_allclose(out_triton, out_golden_slice, atol=ATOL, rtol=RTOL)
 
         # E2E Benchmark
-        triton_fwd_func = partial(mlp.dist_triton_fwd, x_triton_dist, ag_gemm_persistent=args.ag_gemm_persistent,
-                                  gemm_rs_persistent=args.gemm_rs_persistent, autotune=True)
+        triton_fwd_func = partial(mlp.dist_triton_fwd, x_triton_dist, autotune=args.autotune)
         run_benchmark("e2e", partial(mlp.torch_fwd, x), triton_fwd_func, args, TP_GROUP, RANK, WORLD_SIZE)
 
         # Sub-module benchmarks for ag_rs mode
         N_ag, K_ag = mlp.gate_up_proj.size()
-        triton_ag_gemm_func = partial(mlp.dist_triton_ag_gemm, x_triton_dist, persistent=args.ag_gemm_persistent,
-                                      autotune=True)
+        triton_ag_gemm_func = partial(mlp.dist_triton_ag_gemm, x_triton_dist, autotune=args.autotune)
         assert_allclose(mlp.torch_ag_gemm(x_triton_dist), triton_ag_gemm_func(), atol=ATOL, rtol=RTOL)
         run_benchmark(f"ag_gemm_{M}x{N_ag}x{K_ag}", partial(mlp.torch_ag_gemm, x_triton_dist), triton_ag_gemm_func,
                       args, TP_GROUP, RANK, WORLD_SIZE)
 
         N_rs, K_rs = mlp.down_proj.size()
         x_rs_input = rand_tensor([M, K_rs], dtype=DTYPE)
-        triton_gemm_rs_func = partial(mlp.dist_triton_gemm_rs, x_rs_input, persistent=args.gemm_rs_persistent)
+        triton_gemm_rs_func = partial(mlp.dist_triton_gemm_rs, x_rs_input, autotune=args.autotune)
         assert_allclose(mlp.torch_gemm_rs(x_rs_input), triton_gemm_rs_func(), atol=ATOL, rtol=RTOL)
         run_benchmark(f"gemm_rs_{M}x{N_rs}x{K_rs}", partial(mlp.torch_gemm_rs, x_rs_input), triton_gemm_rs_func, args,
                       TP_GROUP, RANK, WORLD_SIZE)

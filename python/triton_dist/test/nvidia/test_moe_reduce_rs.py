@@ -30,7 +30,10 @@ from triton_dist.kernels.nvidia import (create_moe_rs_context)
 from triton_dist.kernels.nvidia.comm_perf_model import estimate_reduce_scatter_time_ms, get_nic_gbps_per_gpu
 from triton_dist.kernels.nvidia.gemm_perf_model import get_dram_gbps, get_tensorcore_tflops
 from triton_dist.kernels.nvidia.moe_reduce_rs import run_moe_reduce_rs, run_moe_reduce_rs_triton_non_overlap
-from triton_dist.utils import check_and_get_clocks, dist_print, finalize_distributed, get_intranode_max_speed, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import wait_until_max_gpu_clock_or_warning, dist_print, finalize_distributed, initialize_distributed, sleep_async
+from triton_dist.nv_utils import get_intranode_max_speed_gbps
 
 
 def create_rand_tensor(rank, shape, dtype=torch.float16, device="cuda"):
@@ -71,10 +74,10 @@ def print_sol_time_estimate(M, K, N, E, topk, dtype, WORLD_SIZE, LOCAL_WORLD_SIZ
     print(f"   Memory write: {memory_write_per_rank/1e9:0.2f} GB, {memory_write_ms:0.2f} ms expected")
     print(f"   SOL time: {moe_sol_ms:0.2f} ms")
     print("  ReduceScatter perf estimate")
-    intranode_bw = get_intranode_max_speed()
-    internode_bw = get_nic_gbps_per_gpu()
+    intranode_bw_in_gbps = get_intranode_max_speed_gbps()
+    internode_bw_in_gbps = get_nic_gbps_per_gpu()
     reduce_scatter_sol_ms = estimate_reduce_scatter_time_ms(M * N * dtype.itemsize, WORLD_SIZE, LOCAL_WORLD_SIZE,
-                                                            intranode_bw, internode_bw)
+                                                            intranode_bw_in_gbps, internode_bw_in_gbps)
     print(f"   SOL time: {reduce_scatter_sol_ms:0.2f} ms")
     print(f" MOE+RS SOL time: {max(reduce_scatter_sol_ms, moe_sol_ms):0.2f} ms")
 
@@ -259,28 +262,24 @@ if __name__ == "__main__":
     prof_dir = f"moe_rs_{os.environ['TORCHELASTIC_RUN_ID']}"
     with group_profile(f"{prof_dir}/non_overlap", do_prof=args.profile, group=tp_group):
         sleep_async(100)
-        clocks = check_and_get_clocks()
-        print(f"GPU clocks: {clocks} MHz")
+        wait_until_max_gpu_clock_or_warning()
         output, duration_ms_triton_non_overlap = perf_func(func_triton_non_overlap, iters=iters,
                                                            warmup_iters=warmup_iters)
 
     with group_profile(f"{prof_dir}/non_overlap_persistent", do_prof=args.profile, group=tp_group):
         sleep_async(100)
-        clocks = check_and_get_clocks()
-        print(f"GPU clocks: {clocks} MHz")
+        wait_until_max_gpu_clock_or_warning()
         output, duration_ms_triton_non_overlap_persistent = perf_func(func_triton_non_overlap_persistent, iters=iters,
                                                                       warmup_iters=warmup_iters)
 
     with group_profile(f"{prof_dir}/overlap", do_prof=args.profile, group=tp_group):
         sleep_async(100)  # in case CPU bound
-        clocks = check_and_get_clocks()
-        print(f"GPU clocks: {clocks} MHz")
+        wait_until_max_gpu_clock_or_warning()
         output, duration_ms_triton = perf_func(func_triton, iters=iters, warmup_iters=warmup_iters)
 
     with group_profile(f"{prof_dir}/overlap_persistent", do_prof=args.profile, group=tp_group):
         sleep_async(100)
-        clocks = check_and_get_clocks()
-        print(f"GPU clocks: {clocks} MHz")
+        wait_until_max_gpu_clock_or_warning()
         output, duration_ms_triton_persistent = perf_func(func_triton_persistent, iters=iters,
                                                           warmup_iters=warmup_iters)
 

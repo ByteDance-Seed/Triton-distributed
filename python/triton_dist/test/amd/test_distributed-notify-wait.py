@@ -23,13 +23,11 @@
 #
 ################################################################################
 import torch
-import os
-import datetime
 
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton_dist.utils import dist_print
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
 from triton_dist.kernels.amd.common_ops import barrier_all_with_ctx_on_stream
 from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
 import pyrocshmem
@@ -112,28 +110,6 @@ def producer_consumer_kernel(
         pass
 
 
-# %%
-# Initialization
-# --------------
-def initialize_distributed():
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    assert WORLD_SIZE <= 8  # This example only runs on a single node
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    torch.cuda.synchronize()
-    return TP_GROUP
-
-
 INPUT_SIZE = 2025  # A large input size
 QUEUE_SIZE = 32  # Queue is smaller than input size
 BLOCK_SIZE = 128
@@ -207,9 +183,7 @@ def main(TP_GROUP):
 
 # Initialize the distributed system
 TP_GROUP = initialize_distributed()
-pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
 # The main function
 main(TP_GROUP)
 # Finalize
-pyrocshmem.rocshmem_finalize()
-torch.distributed.destroy_process_group()
+finalize_distributed()

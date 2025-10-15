@@ -22,9 +22,10 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+import warnings
 import torch
 from triton_dist.kernels.nvidia import _forward_push_2d_ll_kernel, _forward_push_2d_kernel, _forward_push_3d_kernel, _forward_pull_kernel, _forward_push_2d_ll_multimem_kernel, _forward_push_numa_2d_ll_kernel, _forward_push_numa_2d_kernel, _forward_push_numa_2d_ll_multinode_kernel
-from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
+from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, get_numa_node_count_in_group, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor, get_triton_dist_world
 
 
 class AllGatherLayer:
@@ -118,11 +119,16 @@ class AllGatherLayer:
     def forward_push_numa_2d(self, symm_buffer: torch.Tensor):
         assert symm_buffer.nbytes * 2 < self.max_buffer_size
         symm_signal = self.symm_signal[self.signal_target % self.stages]
+        n_numa_nodes = get_numa_node_count_in_group(get_triton_dist_world())
+        if n_numa_nodes != 2:
+            warnings.warn("Only 2 NUMA nodes supported for now. use 1d algo instead")
+            return self.forward_push_2d(symm_buffer)
+
         _forward_push_numa_2d_kernel[(self.num_ranks, )](
             symm_buffer,
             symm_buffer.nbytes // self.num_ranks,
             symm_signal,
-            2,  # TODO(houqi.1993) 2 NUMA nodes supported
+            2,
             self.num_ranks,
             self.rank,
             self.signal_target,

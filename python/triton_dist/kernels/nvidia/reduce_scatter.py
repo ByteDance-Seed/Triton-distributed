@@ -51,7 +51,6 @@ class ReduceScatter2DContext:
     world_size: int
     local_world_size: int
     dtype: torch.dtype
-    overlap_with_gemm: bool
 
     # comm buffer
     scatter_bufs: List[torch.Tensor]
@@ -145,7 +144,7 @@ class ReduceScatter2DContext:
         nvshmem_free_tensor_sync(self.signal_bufs[self.local_rank])
 
 
-def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dtype, overlap_with_gemm=True,
+def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dtype,
                                 num_reduction_sms=15) -> ReduceScatter2DContext:
     """
         for num_reduction_sms: tunable param, 16 are enough for H800
@@ -171,10 +170,9 @@ def create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, dt
     num_sync_sms = 0
     num_p2p_sms = 1
     ctx = ReduceScatter2DContext(max_M=max_M, N=N, rank=rank, world_size=world_size, local_world_size=local_world_size,
-                                 dtype=dtype, overlap_with_gemm=overlap_with_gemm, scatter_bufs=scatter_bufs,
-                                 rs_per_node_bufs=rs_per_node_bufs, p2p_bufs=p2p_bufs, signal_bufs=signal_bufs,
-                                 barrier=BarrierAllContext(True), reduction_stream=reduction_stream,
-                                 num_sync_sms=num_sync_sms, num_p2p_sms=num_p2p_sms,
+                                 dtype=dtype, scatter_bufs=scatter_bufs, rs_per_node_bufs=rs_per_node_bufs,
+                                 p2p_bufs=p2p_bufs, signal_bufs=signal_bufs, barrier=BarrierAllContext(True),
+                                 reduction_stream=reduction_stream, num_sync_sms=num_sync_sms, num_p2p_sms=num_p2p_sms,
                                  num_reduction_sms=num_reduction_sms)
     return ctx
 
@@ -602,8 +600,7 @@ def reduce_scatter_for_each_node(input: torch.Tensor, ctx: ReduceScatter2DContex
         input_intra_node = input[cur_node_id * M_per_node:(cur_node_id + 1) * M_per_node]
         scatter_bufs_intra_node, scatter_signal_buf_intra_node = ctx.get_scatter_bufs_and_signal_for_each_node(
             input, cur_node_id)
-        intra_node_scatter(input_intra_node, scatter_bufs_intra_node, scatter_signal_buf_intra_node, local_rank,
-                           overlap_with_gemm=ctx.overlap_with_gemm)
+        intra_node_scatter(input_intra_node, scatter_bufs_intra_node, scatter_signal_buf_intra_node, local_rank)
 
         # ring reduce intra node
         rs_buf_cur_node = rs_per_node_buf[M_per_rank * cur_node_id:(cur_node_id + 1) * M_per_rank]

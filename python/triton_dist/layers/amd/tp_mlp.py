@@ -53,13 +53,13 @@ class TP_MLP:
     2. Second linear layer (down) weights are row-parallel.
     """
 
-    def __init__(self, rank=0, world_size=8, group=None):
+    def __init__(self, rank=0, world_size=8, group: torch.distributed.ProcessGroup = None):
         self.rank = rank
         self.world_size = world_size
-        self.group = group
+        self.group: torch.distributed.ProcessGroup = group
         self.act_fn = None
-        self.gate_up_proj = None
-        self.down_proj = None
+        self.gate_up_proj: torch.Tensor = None
+        self.down_proj: torch.Tensor = None
 
     def _init_parameters(self, mlp: nn.Module, verbose=False):
         """
@@ -86,17 +86,12 @@ class TP_MLP:
                 f"[RANK {self.rank}] MLP initialized with parameters: gate_up_proj shape: {self.gate_up_proj.shape}, down_proj shape: {self.down_proj.shape}"
             )
 
-    def _init_ctx(self, max_M, ag_intranode_stream, BLOCK_M, BLOCK_N, BLOCK_K, stages, serial=False,
-                  ag_internode_stream=None):
+    def _init_ctx(self, max_M, ag_intranode_stream, ag_internode_stream=None):
         """Initializes contexts for triton_dist AllGather-GEMM and GEMM-ReduceScatter operations."""
-        if serial:
-            print(f"[RANK {self.rank}] Using serial mode for AG-GEMM.")
         self.ag_ctx = create_ag_gemm_intra_node_context(max_M=max_M, N=self.ag_N_per_rank, K=self.K, rank=self.rank,
                                                         num_ranks=self.world_size, input_dtype=self.dtype,
                                                         output_dtype=self.dtype, tp_group=self.group,
-                                                        ag_streams=ag_intranode_stream, serial=serial, autotune=True,
-                                                        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                                        M_PER_CHUNK=256)
+                                                        ag_streams=ag_intranode_stream, M_PER_CHUNK=256)
         self.rs_ctx = create_gemm_rs_intra_node_context(
             max_M=max_M,
             N=self.K,

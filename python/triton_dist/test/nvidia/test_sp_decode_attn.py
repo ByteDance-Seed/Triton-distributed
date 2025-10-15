@@ -33,8 +33,8 @@ from cuda import cuda, cudart
 import nvshmem.core
 
 from triton_dist.layers.nvidia import SpGQAFlashDecodeAttention
-from triton_dist.utils import (dist_print, group_profile, initialize_distributed, nvshmem_barrier_all_on_stream,
-                               perf_func, sleep_async)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.utils import (dist_print, initialize_distributed, nvshmem_barrier_all_on_stream, sleep_async)
 
 ALL_TESTS = {}
 
@@ -197,6 +197,7 @@ def test_triton_decode_with_paged_kv(args) -> None:
 
         torch.testing.assert_close(output, ref_output, atol=0.05, rtol=1e-2), \
             f"{torch.max(torch.abs(output - ref_output))}"
+    ths_op.finalize()
     dist_print("Pass!", allowed_ranks=[0])
     ths_op.finalize()
 
@@ -267,6 +268,7 @@ def perf_decode(args):
                 iters=100,
             )
         torch.distributed.barrier(args.default_group)
+        ths_op.finalize()
         dist_print(f"rank: {args.rank} KV len={kv_lens_per_rank[0]} Performance is {time_ms} ms", allowed_ranks="all",
                    need_sync=True)
         ths_op.finalize()

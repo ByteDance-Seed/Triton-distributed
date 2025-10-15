@@ -167,7 +167,7 @@ if __name__ == "__main__":
     import logging
     import numpy as np
     import torch
-    from triton_dist.utils import perf_func
+    from triton_dist.profiler_utils import perf_func
 
     import argparse
 

@@ -23,23 +23,15 @@
 #
 ################################################################################
 import torch
-import random
 
 import argparse
 import os
 from typing import Optional
-import datetime
-import numpy as np
 
 from functools import partial
 
-import pyrocshmem
-from triton_dist.utils import (
-    generate_data,
-    get_torch_prof_ctx,
-    perf_func,
-    dist_print,
-)
+from triton_dist.profiler_utils import get_torch_prof_ctx, perf_func
+from triton_dist.utils import (generate_data, dist_print, initialize_distributed, finalize_distributed)
 
 from triton_dist.kernels.amd import gemm_rs_intra_node, create_gemm_rs_intra_node_context
 
@@ -153,46 +145,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=5)
-    torch.manual_seed(3 + RANK)
-    torch.cuda.manual_seed_all(3 + RANK)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + RANK)
-    random.seed(args.seed)
-
-    num_ranks = torch.distributed.get_world_size()
-    rank_id = torch.distributed.get_rank()
-
-    if rank_id == 0:
-        uid = pyrocshmem.rocshmem_get_uniqueid()
-        bcast_obj = [uid]
-    else:
-        bcast_obj = [None]
-
-    torch.distributed.broadcast_object_list(bcast_obj, src=0)
-    torch.distributed.barrier()
-
-    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
-
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
+    TP_GROUP = initialize_distributed(args.seed)
 
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype
@@ -280,14 +233,4 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
-    # Explicitly delete rocSHMEM-backed tensors before finalization
-    # Without explicit cleanup, rocshmem barrier_all collective operation
-    # is called during python shutdown when some ranks may already have exited
-    del dist_gemm_rs_op
-    del input, weight, bias
-    del torch_output, dist_triton_output
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

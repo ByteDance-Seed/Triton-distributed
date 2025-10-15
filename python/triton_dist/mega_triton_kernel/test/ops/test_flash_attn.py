@@ -27,7 +27,8 @@ import os
 import argparse
 
 import triton
-from triton_dist.utils import get_torch_prof_ctx, perf_func
+from triton_dist.profiler_utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import perf_func
 from triton_dist.mega_triton_kernel import ModelBuilder
 from functools import partial
 from triton_dist.mega_triton_kernel.test.triton_impl_utils import triton_attn

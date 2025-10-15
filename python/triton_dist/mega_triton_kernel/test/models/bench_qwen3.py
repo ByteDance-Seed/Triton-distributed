@@ -31,14 +31,13 @@ from triton_dist.kernels.allreduce import to_allreduce_method
 from triton_dist.kernels.allreduce import get_allreduce_methods
 from triton_dist.mega_triton_kernel import ModelBuilder
 from triton_dist.mega_triton_kernel.models import DenseModel
-from triton_dist.utils import group_profile
+from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.models import ModelConfig
 from triton_dist.models import AutoLLM
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.utils import (
     initialize_distributed,
     finalize_distributed,
-    perf_func,
     nvshmem_barrier_all_on_stream,
     dist_print,
 )

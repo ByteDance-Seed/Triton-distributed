@@ -25,7 +25,6 @@
 
 import os
 import argparse
-import datetime
 from typing import List
 import torch
 import torch.distributed as dist
@@ -33,8 +32,9 @@ import torch.distributed as dist
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.layers.nvidia.tp_mlp import TP_MLP
 from triton_dist.layers.nvidia.pp_block import PPCommLayer
-from triton_dist.utils import (perf_func, dist_print, group_profile, assert_allclose, finalize_distributed,
-                               init_nvshmem_by_torch_process_group, init_seed)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (dist_print, finalize_distributed, initialize_distributed)
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -93,14 +93,6 @@ def setup_distributed_groups(pp_size: int):
         group = dist.new_group(all_ranks[i:i + tp_size])
         if rank in all_ranks[i:i + tp_size]: tp_group = group
     return tp_group, pp_group, dist.get_rank(group=tp_group), dist.get_rank(group=pp_group), tp_size
-
-
-def init_nvshmem_global():
-    """Initialize NVSHMEM globally."""
-    # Initialize NVSHMEM with the world group using gloo backend
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    world_group_gloo = dist.new_group(ranks=list(range(WORLD_SIZE)), backend="gloo")
-    init_nvshmem_by_torch_process_group(world_group_gloo)
 
 
 def rand_tensor(shape: list[int], dtype: torch.dtype):
@@ -199,45 +191,17 @@ class PipelinedStage(torch.nn.Module):
         return None
 
 
-def initialize_distributed_without_nvshmem():
-    """Initialize distributed without NVSHMEM - we'll do that separately with team splitting."""
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    RANK = int(os.environ.get("RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    seed = 2023
-
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    # use all ranks as tp group
-    _TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(_TP_GROUP)
-
-    init_seed(seed=seed if seed is not None else RANK)
-    # Skip NVSHMEM initialization here - we'll do it with team splitting
-    return _TP_GROUP
-
-
 if __name__ == "__main__":
     args = parse_args()
 
     RANK = int(os.environ.get("RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    GROUP = initialize_distributed_without_nvshmem()
+    GROUP = initialize_distributed(args.seed, initialize_shmem=True)
 
     DTYPE = DTYPE_MAP[args.dtype]
     ATOL = THRESHOLD_MAP[DTYPE]
     RTOL = THRESHOLD_MAP[DTYPE]
-    torch.manual_seed(args.seed)
     tp_group, pp_group, tp_rank, pp_rank, tp_size = setup_distributed_groups(args.pp_size)
-
-    # Initialize NVSHMEM globally
-    init_nvshmem_global()
 
     hf_model = init_model_cpu(model_name=args.model, dtype=DTYPE)
 

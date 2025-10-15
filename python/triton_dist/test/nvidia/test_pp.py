@@ -27,9 +27,10 @@ import os
 import argparse
 import torch
 import random
-import datetime
 import torch.distributed
-from triton_dist.utils import init_nvshmem_by_torch_process_group, init_seed, finalize_distributed, nvshmem_barrier_all_on_stream, perf_func, group_profile, assert_allclose
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import finalize_distributed, nvshmem_barrier_all_on_stream, initialize_distributed
 
 from triton_dist.layers.nvidia.p2p import CommOp
 
@@ -223,22 +224,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    # use all ranks as tp group
-    WORLD_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(WORLD_GROUP)
-
-    seed = args.seed
-    init_seed(seed=seed if seed is not None else RANK)
-
-    init_nvshmem_by_torch_process_group(WORLD_GROUP)
+    WORLD_GROUP = initialize_distributed(args.seed)
 
     ep_size = args.num_pp_groups
     pp_size = WORLD_SIZE // ep_size

@@ -26,15 +26,14 @@
 import os
 import argparse
 import torch
-import torch.distributed
 from functools import partial
 from transformers import AutoConfig
 
-import pyrocshmem
 from triton_dist.layers.amd.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import init_model_cpu
-from triton_dist.utils import perf_func, dist_print, group_profile
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -112,41 +111,8 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    TP_GROUP = initialize_distributed()
 
-    num_ranks = torch.distributed.get_world_size()
-    rank_id = torch.distributed.get_rank()
-
-    if rank_id == 0:
-        uid = pyrocshmem.rocshmem_get_uniqueid()
-        bcast_obj = [uid]
-    else:
-        bcast_obj = [None]
-
-    torch.distributed.broadcast_object_list(bcast_obj, src=0)
-    torch.distributed.barrier()
-
-    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
-
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]
@@ -207,8 +173,7 @@ if __name__ == "__main__":
 
         # dist triton prefill
         M = BSZ * SEQ_LEN
-        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                       BLOCK_K=BLOCK_K)
+        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream)
         dist_x = x.split(bsz_per_rank, dim=0)[RANK].contiguous()
 
         out_triton = attn.dist_triton_fwd(dist_x, position_ids, cos_sin_cache, kv_cache, layer_idx=0)
@@ -261,8 +226,7 @@ if __name__ == "__main__":
 
         # triton decode
         M = BSZ
-        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                       BLOCK_K=BLOCK_K)
+        attn._init_ctx(max_M=M, ag_intranode_stream=ag_intranode_stream)
         dist_x = x.split(bsz_per_rank, dim=0)[RANK].contiguous()
         out_triton = attn.dist_triton_fwd(dist_x, position_ids, cos_sin_cache, kv_cache, layer_idx=0)
         check_allclose(out_triton, out_torch, atol=ATOL, rtol=RTOL)
@@ -302,5 +266,4 @@ if __name__ == "__main__":
         triton_dist_graph.reset()
         del torch_graph, triton_dist_graph, mempool
 
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

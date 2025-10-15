@@ -81,7 +81,7 @@ def barrier_all_on_stream(
     rank,
     num_ranks,
     sync_bufs_ptr,
-    stream,
+    stream: torch.cuda.Stream,
 ):
     with torch.cuda.stream(stream):
         barrier_all_ipc[(1, )](rank, num_ranks, sync_bufs_ptr)
@@ -92,7 +92,7 @@ def barrier_all_with_ctx_on_stream(
     rank,
     num_ranks,
     comm_buf_ptr,
-    stream,
+    stream: torch.cuda.Stream,
 ):
     with torch.cuda.stream(stream):
         barrier_all_with_ctx_kernel[(1, )](ctx, rank, num_ranks, comm_buf_ptr)

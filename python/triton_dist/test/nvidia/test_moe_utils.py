@@ -31,7 +31,9 @@ from triton_dist.kernels.nvidia.moe_utils import (
     calc_gather_scatter_index_v2_triton,
     reduce_topk_non_tma,
 )
-from triton_dist.utils import perf_func, assert_allclose, perf_func_with_l2_reset, sleep_async
+from triton_dist.profiler_utils import perf_func, perf_func_with_l2_reset
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import sleep_async
 
 
 def _generate_random_choosed_experts(ntokens, topk, nexperts, generator: torch.Generator = None):

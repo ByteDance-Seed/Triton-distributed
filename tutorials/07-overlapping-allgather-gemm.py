@@ -481,10 +481,10 @@ if __name__ == "__main__":
     N_per_rank = N // WORLD_SIZE
 
     A = torch.randn([M_per_rank, K], dtype=dtype, device="cuda")
-    B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda")
+    B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda").T
 
     ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
-    golden = torch_ag_gemm(TP_GROUP, A, B.T, ag_buffer)
+    golden = torch_ag_gemm(TP_GROUP, A, B, ag_buffer)
 
     # We can use a context to wrap all the tensors used at runtime.
     # We rely on NVSHMEM to allocate the symmetric memory for communication
@@ -524,6 +524,6 @@ if __name__ == "__main__":
     assert torch.allclose(golden, C, atol=1e-3, rtol=1e-3)
     print("Pass!")
 
-    ctx.finailize()
+    ctx.finalize()
     nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

@@ -29,8 +29,9 @@ from functools import partial
 import torch
 
 from triton_dist.kernels.nvidia import create_all_to_all_single_2d_context, all_to_all_single_2d
-from triton_dist.utils import (assert_allclose, dist_print, group_profile, initialize_distributed, perf_func,
-                               finalize_distributed)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (dist_print, initialize_distributed, finalize_distributed)
 import numpy as np
 
 

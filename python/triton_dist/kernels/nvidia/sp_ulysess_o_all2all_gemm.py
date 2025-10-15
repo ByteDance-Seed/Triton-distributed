@@ -33,7 +33,7 @@ import triton_dist.language as dl
 from typing import Optional
 import itertools
 
-from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, cuda_stream_max_priority, supports_p2p_native_atomic
+from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, supports_p2p_native_atomic, torch_stream_max_priority
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, _wait_eq_cuda
 from triton.language.extra.cuda.language_extra import tid, __syncthreads, st
 
@@ -549,7 +549,7 @@ class SpUlysessOAll2AllGemmKernel:
         self.fuse_sync = fuse_sync
         self.use_persistent = use_persistent
 
-        self.compute_stream = torch.cuda.Stream(priority=cuda_stream_max_priority())
+        self.compute_stream = torch.cuda.Stream(priority=torch_stream_max_priority())
         self.cp_event = torch.cuda.Event(enable_timing=False)
         self.ready_event = torch.cuda.Event(enable_timing=False)
         self.compute_event = torch.cuda.Event(enable_timing=False)
