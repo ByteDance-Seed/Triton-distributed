@@ -694,7 +694,10 @@ def rowise_ag_gemm_dispatcher(
     key_fn=key_fn,
     prune_fn=prune_fn,
 )
-def gemm_persistent(A, B, ctx: AllGatherGEMMTensorParallelContext, gemm_config: triton.Config):
+def gemm_persistent(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallelContext,
+                    gemm_config: triton.Config):
+    """ return C = A @ B
+    """
     M, K = A.shape
     _, N = B.shape
     C = torch.empty([M, N], dtype=A.dtype, device=A.device)
@@ -706,10 +709,10 @@ def gemm_persistent(A, B, ctx: AllGatherGEMMTensorParallelContext, gemm_config: 
 
     triton.set_allocator(alloc_fn)
 
-    grid = lambda META: (min(
-        NUM_SMS,
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    ), )
+    BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
+    BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
+    total_tiles = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N)
+    grid = (min(NUM_SMS, total_tiles), )
     kernel_consumer_gemm_persistent[grid](
         A,
         B,
@@ -732,12 +735,14 @@ def gemm_persistent(A, B, ctx: AllGatherGEMMTensorParallelContext, gemm_config: 
     key_fn=key_fn,
     prune_fn=prune_fn,
 )
-def gemm_non_persistent(A, B, ctx: AllGatherGEMMTensorParallelContext, gemm_config: triton.Config):
-    """ return all_gather(A) * B
+def gemm_non_persistent(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallelContext,
+                        gemm_config: triton.Config):
+    """ return C = A @ B
     """
     M, K = A.shape
     _, N = B.shape
     C = torch.empty([M, N], dtype=A.dtype, device=A.device)
+    assert A.dtype == B.dtype and A.dtype in [torch.bfloat16, torch.float16]
 
     grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
     kernel_consumer_gemm_non_persistent[grid](
@@ -749,8 +754,8 @@ def gemm_non_persistent(A, B, ctx: AllGatherGEMMTensorParallelContext, gemm_conf
         K,  #
         A.stride(0),
         A.stride(1),
-        B.stride(1),
         B.stride(0),
+        B.stride(1),
         C.stride(0),
         C.stride(1),
         ctx.rank,

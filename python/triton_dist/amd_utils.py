@@ -112,28 +112,21 @@ def _get_max_gpu_clock_rate_in_khz_amdsmi(device_id):
     _ensure_amdsmi_initialized()
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
+    # clock info is something like {'clk': 88, 'min_clk': 500, 'max_clk': 1420, 'clk_locked': 0, 'clk_deep_sleep': 88}
     clock_info = amdsmi.amdsmi_get_clock_info(handle, amdsmi.AmdSmiClkType.GFX)
-    return clock_info["max_clk"]
+    return clock_info["max_clk"] * 1000
 
 
 @functools.lru_cache()
 def _get_max_gpu_clock_rate_in_khz_rocm(device_id):
-    try:
-        # {"card0": {"Valid sclk range": "500Mhz - 1420Mhz"}}
-        data = _check_rocm_smi_json(["rocm-smi", "--showsclkrange", "--json", "-d", str(device_id)])
-        sclk_entries = data[f"card{device_id}"]["Valid sclk range"]
-        match = re.search(r"(\d+)Mhz - (\d+)Mhz", sclk_entries)
-        if not match:
-            raise ValueError(f"Could not parse sclk from rocm-smi output: {data}")
-        _, sclk_mhz_max = int(match.group(1)), int(match.group(2))
-        return sclk_mhz_max * 1000  # convert MHz to kHz
-    except (
-            subprocess.CalledProcessError,
-            ValueError,
-            KeyError,
-            json.JSONDecodeError,
-    ) as e:
-        warnings.warn(f"Could not get max GPU clock from rocm-smi: {e}. Using fallback.")
+    # {"card0": {"Valid sclk range": "500Mhz - 1420Mhz"}}
+    data = _check_rocm_smi_json(["rocm-smi", "--showsclkrange", "--json", "-d", str(device_id)])
+    sclk_entries = data[f"card{device_id}"]["Valid sclk range"]
+    match = re.search(r"(\d+)Mhz - (\d+)Mhz", sclk_entries)
+    if not match:
+        raise ValueError(f"Could not parse sclk from rocm-smi output: {data}")
+    _, sclk_mhz_max = int(match.group(1)), int(match.group(2))
+    return sclk_mhz_max * 1000  # convert MHz to kHz
 
 
 @functools.lru_cache()
@@ -232,7 +225,7 @@ def torch_uuid_to_unique_id(torch_uuid: str) -> str:
     return bytes.fromhex(h).decode("ascii")
 
 
-def _get_physical_gpu_uuid_nvsmi(device_id: int):
+def _get_physical_gpu_uuid_rocm(device_id: int):
     ret = _check_rocm_smi_json(["rocm-smi", "--showuniqueid", "--json", "-d", str(device_id)])
     uuid = ret[f"card{device_id}"]["Unique ID"]
     return uuid
@@ -245,7 +238,7 @@ def get_uuid_by_physical_device_id(gpu_index: int | None):
     except Exception:
         warnings.warn("get_uuid_by_physical_device_id failed with amdsmi, try using rocm-smi")
 
-    return _get_physical_gpu_uuid_nvsmi(gpu_index)
+    return _get_physical_gpu_uuid_rocm(gpu_index)
 
 
 @functools.lru_cache()
@@ -278,14 +271,14 @@ def get_physical_device_count():
 
 
 @functools.lru_cache()
-def _get_bus_bw_between_amdsmi(device_id_i, device_id_j):
+def _get_bus_bw_gbps_between_amdsmi(device_id_i, device_id_j):
     devices = amdsmi.amdsmi_get_processor_handles()
     handle_i = devices[device_id_i]
     handle_j = devices[device_id_j]
-    return amdsmi.amdsmi_get_minmax_bandwidth_between_processors(handle_i, handle_j)["max_bandwidth"]
+    return amdsmi.amdsmi_get_minmax_bandwidth_between_processors(handle_i, handle_j)["max_bandwidth"] * 1e6 / 2**30
 
 
-def _parse_rocm_shownodesbw_output(output):
+def _parse_rocm_shownodesbw_output_in_gbps(output):
     """
         $ rocm-smi --shownodesbw
 
@@ -337,20 +330,20 @@ def _parse_rocm_shownodesbw_output(output):
                 else:
                     try:
                         _, max_bw = map(int, value.split("-"))
-                        bandwidth_matrix[(row_gpu, col_gpu)] = max_bw
+                        bandwidth_matrix[(row_gpu, col_gpu)] = max_bw * 1e6 / 2**30
                     except ValueError:
                         # Handle potential parsing errors if format is unexpected
-                        bandwidth_matrix[(row_gpu, col_gpu)] = {"error": "parse_failed"}
+                        bandwidth_matrix[(row_gpu, col_gpu)] = float("nan")
 
     return bandwidth_matrix
 
 
 @functools.lru_cache()
-def _get_bus_bw_a2a_rocm():
+def _get_bus_bw_gbps_a2a_rocm():
     try:
         result = subprocess.run(["rocm-smi", "--shownodesbw"], capture_output=True, text=True, check=True)
         output = result.stdout
-        return _parse_rocm_shownodesbw_output(output)
+        return _parse_rocm_shownodesbw_output_in_gbps(output)
     except FileNotFoundError:
         print("Error: 'rocm-smi' command not found.")
         print("Please ensure the ROCm stack is installed and 'rocm-smi' is in your system's PATH.")
@@ -365,20 +358,20 @@ def _get_bus_bw_a2a_rocm():
 
 
 @functools.lru_cache()
-def _get_bus_bw_between_rocm(device_id_i, device_id_j):
-    bw_matrix = _get_bus_bw_a2a_rocm()
+def _get_bus_bw_gbps_between_rocm(device_id_i, device_id_j):
+    bw_matrix = _get_bus_bw_gbps_a2a_rocm()
     return bw_matrix[(device_id_i, device_id_j)]
 
 
 @functools.lru_cache()
-def _get_bus_bw_between(device_id_i, device_id_j):
+def _get_bus_bw_gbps_between(device_id_i, device_id_j):
     try:
         if has_amdsmi():
-            return _get_bus_bw_between_amdsmi(device_id_i, device_id_j)
+            return _get_bus_bw_gbps_between_amdsmi(device_id_i, device_id_j)
     except Exception:
-        warnings.warn("get_bus_bw_between fails with amdsmi, try using rocm-smi")
+        warnings.warn("get_bus_bw_gbps_between fails with amdsmi, try using rocm-smi")
 
-    return _get_bus_bw_between_rocm(device_id_i, device_id_j)
+    return _get_bus_bw_gbps_between_rocm(device_id_i, device_id_j)
 
 
 @functools.lru_cache()
@@ -388,14 +381,16 @@ def _get_xgmi_max_speed_gbps_amdsmi():
         for j, hj in enumerate(devices):
             if i == j:
                 continue
+            # No unit from the doc: https://rocm.docs.amd.com/projects/amdsmi/en/latest/reference/amdsmi-py-api.html#amdsmi-get-minmax-bandwidth-between-processors
+            # it approximately matches the number here https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html#theoretical-performance-claims-vs-achievable
+            # so here we take it as Mbps
             speed = amdsmi.amdsmi_get_minmax_bandwidth_between_processors(hi, hj)["max_bandwidth"]
-            # TODO(houqi.1993) to make sure the unit
             return speed * 1e6 / 2**30
 
 
 @functools.lru_cache()
 def _get_xgmi_max_speed_gbps_rocm():
-    return _get_bus_bw_between(0, 1)
+    return _get_bus_bw_gbps_between(0, 1)
 
 
 @functools.lru_cache()
@@ -418,9 +413,9 @@ def get_pcie_link_max_speed_gbps():
 def get_intranode_max_speed_gbps(device_id, with_scale: bool = False):
     """ suppose the node is symmetric """
     if has_fullmesh_xgmi():
-        return _get_bus_bw_between(0, 1) * (torch.cuda.device_count() - 1)
+        return _get_bus_bw_gbps_between(0, 1) * (torch.cuda.device_count() - 1)
 
-    return _get_bus_bw_between(0, 1)
+    return _get_bus_bw_gbps_between(0, 1)
 
 
 def _get_gpu_performance_mode_rocm(device_id: int):

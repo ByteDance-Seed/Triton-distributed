@@ -277,7 +277,6 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         K: int,
         input_dtype: torch.dtype,
         output_dtype: torch.dtype,
-        transpose_weight: bool = False,
         fuse_scatter: bool = True,
     ):
         self.tp_group = tp_group
@@ -288,7 +287,6 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         self.K = K
         self.input_dtype = input_dtype
         self.output_dtype = output_dtype
-        self.transpose_weight = transpose_weight
         self.fuse_scatter = fuse_scatter
 
         # Use the auxiliary functions provided by Triton-distributed to construct the context required for GEMM-RS.
@@ -304,27 +302,18 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
             self.world_size,
             self.tp_group,
             self.fuse_scatter,
-            self.transpose_weight,
         )
 
     def forward(
             self,
             input: torch.Tensor,  # [M, local_K]
             weight: torch.Tensor,  # [N, local_K]
-            transpose_weight:
-        bool = False,  # indicates whether weight already transposed
     ):
 
         ctx = self.ctx
         M, local_K = input.shape
-        if not transpose_weight:
-            N, K = weight.shape
-            stride_bk, stride_bn = weight.stride(1), weight.stride(0)
-            assert K == local_K
-        else:
-            K, N = weight.shape
-            stride_bk, stride_bn = weight.stride(0), weight.stride(1)
-            assert K == local_K
+        N, K = weight.shape
+        assert K == local_K
         M_per_rank = M // ctx.num_ranks
 
         current_stream = torch.cuda.current_stream()
@@ -351,8 +340,8 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
             K,
             input.stride(0),
             input.stride(1),
-            stride_bk,
-            stride_bn,
+            weight.stride(1),
+            weight.stride(0),
             N,
             1,
         )
@@ -373,22 +362,19 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
 def torch_gemm_rs(
     input: torch.Tensor,  # [M, local_k]
     weight: torch.Tensor,  # [N, local_K]
-    transpose_weight: bool,
     bias: Optional[torch.Tensor],
-    TP_GROUP,
+    tp_group: torch.distributed.ProcessGroup,
 ):
     M, local_K = input.shape
-    world_size = TP_GROUP.size()
-    if not transpose_weight:
-        weight = weight.T
-    N = weight.shape[1]
-    output = torch.matmul(input, weight)
+    world_size = tp_group.size()
+    N, _ = weight.shape
+    output = torch.matmul(input, weight.T)
     if bias:
         output = output + bias
     rs_output = torch.empty((M // world_size, N),
                             dtype=output.dtype,
                             device=input.device)
-    torch.distributed.reduce_scatter_tensor(rs_output, output, group=TP_GROUP)
+    torch.distributed.reduce_scatter_tensor(rs_output, output, group=tp_group)
     return rs_output
 
 
@@ -452,7 +438,7 @@ if __name__ == "__main__":
     input, weight, bias = next(generator)
 
     # torch impl
-    ref_out = torch_gemm_rs(input, weight, False, bias, TP_GROUP)
+    ref_out = torch_gemm_rs(input, weight, bias, TP_GROUP)
     torch.cuda.synchronize()
     torch.distributed.barrier()
 

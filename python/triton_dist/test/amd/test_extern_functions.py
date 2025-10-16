@@ -20,7 +20,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
 @triton.jit
-def asin_kernel(
+def test_extern_function_kernel(
     x_ptr,
     y_ptr,
     n_elements,
@@ -87,7 +87,7 @@ output_torch = torch.asin(x).to(dtype=torch.uint64)
 assert x.is_cuda and output_triton.is_cuda
 n_elements = output_torch.numel()
 grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-asin_kernel[grid](x, output_triton, n_elements, BLOCK_SIZE=1024)
+test_extern_function_kernel[grid](x, output_triton, n_elements, BLOCK_SIZE=1024)
 print(output_torch)
 print(output_triton)
 print(f'The maximum difference between torch and triton is '

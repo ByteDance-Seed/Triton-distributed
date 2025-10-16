@@ -23,7 +23,6 @@
 #
 ################################################################################
 import subprocess
-import sys
 import functools
 import warnings
 import torch
@@ -66,7 +65,7 @@ def nvsmi(attrs, device_id=0, dtype: type = int):
     attrs = ','.join(attrs)
     cmd = ['nvidia-smi', '-i', str(device_id), '--query-gpu=' + attrs, '--format=csv,noheader,nounits']
     out = subprocess.check_output(cmd)
-    ret = [x.strip() for x in out.decode(sys.stdout.encoding).split(',')]
+    ret = [x.strip() for x in out.decode("utf-8").split(',')]
     return [dtype(x) for x in ret]
 
 

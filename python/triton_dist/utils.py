@@ -528,9 +528,11 @@ def is_nvshmem_multimem_supported():
     err, is_multicast_supported = cuda.cuDeviceGetAttribute(
         cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, 0)
     CUDA_CHECK(err)
+    if is_multicast_supported == 0:
+        return False
 
     # nvshmem configure support
-    if os.getenv("NVSHMEM_DISABLE_CUDA_VMM", "0") == "1" or os.getenv("NVSHMEM_DISABLE_NVLS", "0") == "1":
+    if get_bool_env("NVSHMEM_DISABLE_CUDA_VMM", False) or get_bool_env("NVSHMEM_DISABLE_NVLS", False):
         return False
 
     # hardware support
@@ -701,7 +703,9 @@ _LAST_MAX_CLOCK_RATE_KHz = None
 
 
 def wait_until_max_gpu_clock_or_warning(device_id=None, timeout_sec=10):
-    if os.getenv("TRITON_DIST_SKIP_WAIT_GPU_CLOCK"):
+    # TODO(houqi.1993) if GPU is not in performance mode, when no workload on GPU, clock may get even lower after waiting.
+    # so by default don't wait until GPU to max clock. Make sure you set the GPU to performance mode and then export TRITON_DIST_WAIT_GPU_CLOCK=True.
+    if not get_bool_env("TRITON_DIST_WAIT_GPU_CLOCK", False):
         return True
 
     if device_id is None:
@@ -733,13 +737,17 @@ def _torch_has_fp8():
     return getattr(torch, "float8_e4m3fn", None) and getattr(torch, "float8_e5m2", None)
 
 
-def rand(shape, dtype: torch.dtype, device: torch.device = "cuda"):
+def rand_tensor(shape, dtype: torch.dtype, device: torch.device | int | str = "cuda"):
+    """
+    for float types, return uniform distribution [-1, 1]
+    for int types, return uniform distribution in [int_type_min, int_type_max]
+    """
     if dtype in [torch.float16, torch.bfloat16, torch.float]:
-        return torch.rand(shape, dtype=dtype, device=device)
+        return torch.rand(shape, dtype=dtype, device=device) * 2 - 1
 
     if _torch_has_fp8():
         if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-            return torch.rand(shape, dtype=torch.bfloat16, device=device).to(dtype)
+            return (torch.rand(shape, dtype=torch.bfloat16, device=device) * 2 - 1).to(dtype)
 
     if dtype == torch.int8:
         return torch.randint(-2**7, 2**7, shape, dtype=dtype, device=device)

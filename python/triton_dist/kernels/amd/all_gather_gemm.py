@@ -37,7 +37,7 @@ from hip import hip
 from triton_dist.utils import HIP_CHECK
 from typing import Optional, List
 import pyrocshmem
-from triton_dist.kernels.amd.common_ops import barrier_all_ipc
+from triton_dist.kernels.amd.common_ops import barrier_all_kernel
 
 
 def _get_default_num_xcds():
@@ -654,7 +654,7 @@ def prune_fn_by_shared_memory(config, A: torch.Tensor, *args, **kwargs):
     BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
     BLOCK_SIZE_K = gemm_config.kwargs["BLOCK_SIZE_K"]
-    num_stages = gemm_config.num_stages
+    num_stages = max(0, gemm_config.num_stages - 1)
     shared_mem_size = num_stages * (BLOCK_SIZE_M * BLOCK_SIZE_K * itemsize + BLOCK_SIZE_N * BLOCK_SIZE_K * itemsize)
     device = torch.cuda.current_device()
     if shared_mem_size > driver.active.utils.get_device_properties(device)["max_shared_mem"]:
@@ -1098,7 +1098,7 @@ def ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, ctx
             # TODO(houqi.1993) this may be tuned
             BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
             BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
-            total_tiles = BLOCK_SIZE_M * BLOCK_SIZE_N
+            total_tiles = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N_per_rank, BLOCK_SIZE_N)
             NUM_SMS = min(NUM_SMS, total_tiles)
             grid = (NUM_SMS, )
             full_input = ctx.workspace_tensors[ctx.rank][:M]
@@ -1168,7 +1168,7 @@ def gemm_only(A: torch.Tensor, B: torch.Tensor, transe_b: bool, ctx: AllGatherGE
     M = M_per_rank * ctx.num_ranks
     BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
-    total_tiles = BLOCK_SIZE_M * BLOCK_SIZE_N
+    total_tiles = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N_per_rank, BLOCK_SIZE_N)
     grid = (min(NUM_SMS, total_tiles), )
     full_input = ctx.workspace_tensors[ctx.rank][:M]
 
@@ -1194,4 +1194,4 @@ def allgather(A: torch.Tensor, ctx):
         cp_engine_producer_all_gather_full_mesh_push_multi_stream(ctx.rank, ctx.num_ranks, A, ctx.workspace_tensors,
                                                                   ctx.one, ctx.M_PER_CHUNK, [current_stream],
                                                                   ctx.barrier_tensors)
-    barrier_all_ipc[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)
+    barrier_all_kernel[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)

@@ -45,11 +45,9 @@ def wait_eq_sys(barrier_ptr, value):
 
 
 @triton.jit
-def barrier_all_ipc(rank, num_ranks, comm_buf_base_ptrs):
-    tid = thread_idx(axis=0)  # noqa: F841
+def barrier_all_kernel(rank, num_ranks, comm_buf_base_ptrs):
     for i in range(num_ranks):
         remote_base_ptr = tl.load(comm_buf_base_ptrs + i).to(tl.pointer_type(tl.int32))
-        # tl.device_print("remote_base_ptr", remote_base_ptr)
         while tl.atomic_cas(remote_base_ptr + rank, 0, 1, scope="sys", sem="release") != 0:
             pass
 
@@ -84,7 +82,7 @@ def barrier_all_on_stream(
     stream: torch.cuda.Stream,
 ):
     with torch.cuda.stream(stream):
-        barrier_all_ipc[(1, )](rank, num_ranks, sync_bufs_ptr)
+        barrier_all_kernel[(1, )](rank, num_ranks, sync_bufs_ptr)
 
 
 def barrier_all_with_ctx_on_stream(
@@ -99,7 +97,8 @@ def barrier_all_with_ctx_on_stream(
 
 
 def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):
-    mask = 0xFFFFFFFF
+    # This API is marked as Beta. While this feature is complete, it can change and might have outstanding issues.
+    # please refer to: https://rocm.docs.amd.com/projects/HIP/en/latest/doxygen/html/group___stream_m.html#ga9ef06d564d19ef9afc11d60d20c9c541
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype == torch.int32:
         call_result = hip.hipStreamWaitValue32(
@@ -107,7 +106,7 @@ def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.c
             signal_tensor.data_ptr(),
             val,
             hip.hipStreamWaitValueEq,
-            mask,
+            0xFFFFFFFF,
         )
     else:
         call_result = hip.hipStreamWaitValue64(
@@ -115,12 +114,14 @@ def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.c
             signal_tensor.data_ptr(),
             val,
             hip.hipStreamWaitValueEq,
-            mask,
+            0xFFFFFFFFFFFFFFFF,
         )
     HIP_CHECK(call_result)
 
 
 def _set_signal_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):
+    # This API is marked as Beta. While this feature is complete, it can change and might have outstanding issues.
+    # https://rocm.docs.amd.com/projects/HIP/en/latest/doxygen/html/group___stream_m.html#ga2520d4e1e57697edff2a85a3c03d652b
     stream = stream or torch.cuda.current_stream()
     if signal_tensor.dtype == torch.int32:
         call_result = hip.hipStreamWriteValue32(

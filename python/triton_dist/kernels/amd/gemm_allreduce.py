@@ -31,6 +31,8 @@ import triton_dist.language as dl
 import pyrocshmem
 from triton_dist.language.extra import libshmem_device
 from triton.language.extra.hip.libdevice import store_release_system
+import triton_dist.tune
+from triton.runtime.driver import driver
 
 
 @dataclasses.dataclass
@@ -43,8 +45,8 @@ class GemmARContext:
     tile_completed_buf: torch.Tensor
     ar_stream: torch.cuda.Stream
 
-    def get_gemm_out_buf(self, input, weight):
-        M, N = input.shape[0], weight.shape[0]
+    def get_gemm_out_buf(self, A: torch.Tensor, weight):
+        M, N = A.shape[0], weight.shape[0]
         assert self.symm_gemm_out_buf.numel() >= M * N
         return self.symm_gemm_out_buf.reshape(-1)[:M * N].reshape(M, N)
 
@@ -68,7 +70,7 @@ def create_gemm_ar_context(ar_stream: torch.cuda.Stream, rank, world_size, max_M
 
 
 @triton.jit(do_not_specialize=["rank"])
-def reset_signal_and_barrier_all_ipc(
+def reset_signal_and_barrier_all_kernel(
     rank,
     num_ranks,
     comm_buf_base_ptrs,
@@ -118,7 +120,7 @@ def kernel_persistent_gemm_notify_ar(
     stride_am,
     stride_ak,  # A strides
     stride_bn,
-    stride_bk,  # B strides  
+    stride_bk,  # B strides
     stride_cm,
     stride_cn,  # C strides
     BLOCK_SIZE_M: tl.constexpr,
@@ -209,12 +211,115 @@ def consumer_all_reduce_kernel(symm_buf_ptr, tile_signal_ptr, ctx,  # rocshmem c
                 tl.store(remote_buf_ptrs, c, mask=c_mask)
 
 
-def gemm_allreduce_op(ctx: GemmARContext, a, b):
-    NUM_COMM_SMS = 32
-    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
-    assert a.dtype == b.dtype, "Incompatible dtypes"
+DEFAULT_GEMM_CONFIG = triton.Config(
+    kwargs={"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 4, "waves_per_eu": 2},
+    num_warps=8, num_stages=2)
 
-    symm_c = ctx.get_gemm_out_buf(a, b)
+
+def get_hip_autotune_config():
+    return [
+        DEFAULT_GEMM_CONFIG,
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+            num_warps=8, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+            num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
+                'matrix_instr_nonkdim': 16, 'kpack': 2
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
+                'matrix_instr_nonkdim': 16, 'kpack': 2
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
+                'matrix_instr_nonkdim': 16, 'kpack': 2
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 0,
+                'matrix_instr_nonkdim': 16, 'kpack': 2
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=8, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=8, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=8, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=4, num_stages=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2,
+                'matrix_instr_nonkdim': 16, 'kpack': 1
+            }, num_warps=4, num_stages=2),
+        ##
+    ]
+
+
+def key_fn(ctx: GemmARContext, A: torch.Tensor, B: torch.Tensor, *args, **kwargs):
+    return triton_dist.tune.to_hashable(A), triton_dist.tune.to_hashable(B), ctx.num_ranks
+
+
+def prune_fn_by_shared_memory(config, ctx: GemmARContext, A: torch.Tensor, *args, **kwargs):
+    itemsize = A.itemsize
+    gemm_config: triton.Config = config["gemm_config"]
+    BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
+    BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
+    BLOCK_SIZE_K = gemm_config.kwargs["BLOCK_SIZE_K"]
+    num_stages = max(0, gemm_config.num_stages - 1)
+    shared_mem_size = num_stages * (BLOCK_SIZE_M * BLOCK_SIZE_K * itemsize + BLOCK_SIZE_N * BLOCK_SIZE_K * itemsize)
+    device = torch.cuda.current_device()
+    if shared_mem_size > driver.active.utils.get_device_properties(device)["max_shared_mem"]:
+        return False
+    return True
+
+
+@triton_dist.tune.autotune(
+    config_space=[{"gemm_config": c} for c in get_hip_autotune_config()],
+    key_fn=key_fn,
+    prune_fn=prune_fn_by_shared_memory,
+)
+def gemm_allreduce_op(ctx: GemmARContext, A: torch.Tensor, B: torch.Tensor, gemm_config: triton.Config):
+    NUM_COMM_SMS = 32
+    assert A.shape[1] == B.shape[1], "Incompatible dimensions"
+    assert A.dtype == B.dtype, "Incompatible dtypes"
+
+    symm_c = ctx.get_gemm_out_buf(A, B)
     tile_signal = ctx.tile_completed_buf
 
     current_stream = torch.cuda.current_stream()
@@ -222,26 +327,23 @@ def gemm_allreduce_op(ctx: GemmARContext, a, b):
     ar_stream.wait_stream(current_stream)
     rocshmem_ctx = pyrocshmem.rocshmem_get_device_ctx()
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-    M, K = a.shape
-    N, K = b.shape
+    M, K = A.shape
+    N, K = B.shape
     NUM_GEMM_SMS = num_sms - NUM_COMM_SMS
     assert NUM_GEMM_SMS > 0, "Not enough SMs to run GEMM kernel"
-    BLOCK_SIZE_M = 256
-    BLOCK_SIZE_N = 256
-    BLOCK_SIZE_K = 64
-    GROUP_SIZE_M = 4
-    kernel_persistent_gemm_notify_ar[(NUM_GEMM_SMS, )](a, b, symm_c, tile_signal, rocshmem_ctx, M, N, K, a.stride(0),
-                                                       a.stride(1), b.stride(0), b.stride(1), symm_c.stride(0),
+    BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
+    BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
+    GROUP_SIZE_M = gemm_config.kwargs["GROUP_SIZE_M"]
+    kernel_persistent_gemm_notify_ar[(NUM_GEMM_SMS, )](A, B, symm_c, tile_signal, rocshmem_ctx, M, N, K, A.stride(0),
+                                                       A.stride(1), B.stride(0), B.stride(1), symm_c.stride(0),
                                                        symm_c.stride(1), NUM_GEMM_SMS=NUM_GEMM_SMS,
-                                                       BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
-                                                       BLOCK_SIZE_K=BLOCK_SIZE_K, GROUP_SIZE_M=GROUP_SIZE_M,
-                                                       waves_per_eu=2, num_stages=2, num_warps=8)
+                                                       **gemm_config.all_kwargs())
     with torch.cuda.stream(ar_stream):
         consumer_all_reduce(symm_c, tile_signal, rocshmem_ctx, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
                             GROUP_SIZE_M=GROUP_SIZE_M, NUM_COMM_SMS=NUM_COMM_SMS)
     current_stream.wait_stream(ar_stream)
-    reset_signal_and_barrier_all_ipc[(num_sms, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr, tile_signal,
-                                                  tile_signal.shape[0], num_warps=16)
+    reset_signal_and_barrier_all_kernel[(num_sms, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr, tile_signal,
+                                                     tile_signal.shape[0], num_warps=16)
     return symm_c
 
 

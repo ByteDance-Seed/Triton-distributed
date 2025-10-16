@@ -31,7 +31,7 @@ import torch
 from triton_dist.kernels.amd.gemm_allreduce import create_gemm_ar_context, gemm_allreduce_op
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import dist_print, generate_data, initialize_distributed, finalize_distributed
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
 
 
 def gemm_allreduce_torch(a: torch.Tensor, b: torch.Tensor, pg: torch.distributed.ProcessGroup):
@@ -60,16 +60,12 @@ THRESHOLD_MAP = {
 }
 
 
-def _make_data(M, N, K, TP_GROUP):
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-    scale = TP_GROUP.rank() + 1
-    data_config = [((M, K), dtype, (0.01 * scale, 0)),  # A
-                   ((N, K), dtype, (0.01 * scale, 0)),  # B
-                   ]
-    generator = generate_data(data_config)
-    input, weight = next(generator)
-    return input, weight
+def _make_data(M, N, K, pg: torch.distributed.ProcessGroup):
+    current_device = torch.cuda.current_device()
+    scale = (pg.rank() + 1) * 0.01
+    A = rand_tensor((M, K), dtype=dtype, device=current_device) * scale
+    B = rand_tensor((N, K), dtype=dtype, device=current_device) * scale
+    return A, B
 
 
 def run_stress_test(args, TP_GROUP, dtype, atol, rtol):
@@ -94,9 +90,9 @@ def run_stress_test(args, TP_GROUP, dtype, atol, rtol):
                                          dtype=dtype)
 
             for _ in range(10):
-                a, b = _make_data(M, N, K_per_rank, TP_GROUP)
-                output_triton = gemm_allreduce_op(ctx, a, b)
-                output_torch = gemm_allreduce_torch(a, b, TP_GROUP)
+                A, B = _make_data(M, N, K_per_rank, TP_GROUP)
+                output_triton = gemm_allreduce_op(ctx, A, B, autotune=False)
+                output_torch = gemm_allreduce_torch(A, B, TP_GROUP)
                 assert_allclose(output_triton, output_torch, atol=atol, rtol=rtol, verbose=False)
             dist_print(f"✅ Round {round_idx + 1} passed")
 
