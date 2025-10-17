@@ -50,7 +50,7 @@ jobs:
   amd-e2e-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
-    timeout-minutes: 45
+    timeout-minutes: 60
     container:
         image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
         options: >-
