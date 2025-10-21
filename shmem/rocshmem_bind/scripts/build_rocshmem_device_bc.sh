@@ -13,10 +13,12 @@ pushd ${ROCSHMEM_INSTALL_DIR}/lib
 # TODO: arch is hardcoded
 ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
  -DENABLE_IPC_BITCODE \
+ -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem \
  -I${ROCSHMEM_INSTALL_DIR}/include \
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/rocshmem_gpu.cpp \
  -o rocshmem_gpu.bc
 
@@ -25,6 +27,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/ipc/context_ipc_device.cpp \
  -o rocshmem_context_device.bc
 
@@ -33,6 +36,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/ipc/backend_ipc.cpp \
  -o rocshmem_backend_ipc.bc
 
@@ -42,6 +46,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/ipc/context_ipc_device_coll.cpp \
  -o rocshmem_context_ipc_device_coll.bc
 
@@ -50,6 +55,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/ipc_policy.cpp \
  -o rocshmem_ipc_policy.bc
 
@@ -58,6 +64,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/team.cpp \
  -o rocshmem_team.bc
 
@@ -66,6 +73,7 @@ ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-ll
  -I${ROCSHMEM_INSTALL_DIR}/../ \
  -I${ROCSHMEM_SRC}/src \
  -I${OMPI_DIR}/include \
+ -I${ROCSHMEM_SRC}/src \
  -c ${ROCSHMEM_SRC}/src/sync/abql_block_mutex.cpp \
  -o rocshmem_abql_block_mutex.bc
 
