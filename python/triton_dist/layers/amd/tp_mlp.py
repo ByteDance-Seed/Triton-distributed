@@ -134,7 +134,7 @@ class TP_MLP:
             is_3d_input = False
 
         # ag + gemm
-        out_fused = ag_gemm_intra_node(x, self.gate_up_proj, transe_b=False, ctx=self.ag_ctx)
+        out_fused = ag_gemm_intra_node(x, self.gate_up_proj, ctx=self.ag_ctx)
         wg, w1 = torch.chunk(out_fused, 2, dim=-1)
         out = self.act_fn(wg) * w1
         # gemm + rs
@@ -175,7 +175,7 @@ class TP_MLP:
         This version uses ag_gemm.
         x: input tensor, shape [batch_size * seq_len, hidden_size]
         """
-        out = ag_gemm_intra_node(x, self.gate_up_proj, transe_b=False, ctx=self.ag_ctx)
+        out = ag_gemm_intra_node(x, self.gate_up_proj, ctx=self.ag_ctx)
         return out
 
     @torch.inference_mode()

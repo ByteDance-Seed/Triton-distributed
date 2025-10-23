@@ -278,8 +278,7 @@ class TP_Attn:
         bsz, q_len, d = x.size()
 
         # ag + gemm
-        qkv = ag_gemm_intra_node(x.view(-1, d), self.wqkv, transe_b=False,
-                                 ctx=self.ag_ctx).view(bsz * self.world_size, q_len, -1)
+        qkv = ag_gemm_intra_node(x.view(-1, d), self.wqkv, ctx=self.ag_ctx).view(bsz * self.world_size, q_len, -1)
 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         v = v.view(bsz * self.world_size, q_len, -1, self.head_dim)

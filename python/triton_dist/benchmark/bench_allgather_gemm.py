@@ -35,7 +35,7 @@ from triton_dist.kernels.nvidia import (ag_gemm, create_ag_gemm_context, gemm_pe
 from triton_dist.kernels.nvidia.allgather import (cp_engine_producer_all_gather_inter_node,
                                                   cp_engine_producer_all_gather_intra_node)
 from triton_dist.utils import (dist_print, finalize_distributed, initialize_distributed, nvshmem_barrier_all_on_stream,
-                               wait_until_max_gpu_clock_or_warning)
+                               wait_until_max_gpu_clock_or_warning, rand_tensor)
 
 
 def parse_args():
@@ -55,16 +55,34 @@ def parse_args():
 
 def torch_ag_gemm(
     pg: torch.distributed.ProcessGroup,
-    local_input: torch.Tensor,
-    local_weight: torch.Tensor,
-    ag_out: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
 ):
-    torch.distributed.all_gather_into_tensor(ag_out, local_input, pg)
-    ag_gemm_output = torch.matmul(ag_out, local_weight)
+    M_per_rank, K = A.shape
+    A_full = torch.empty([M_per_rank * pg.size(), K], dtype=A.dtype, device=A.device)
+    torch.distributed.all_gather_into_tensor(A_full, A, pg)
+    ag_gemm_output = torch.matmul(A_full, B)
     return ag_gemm_output
 
 
-def perf_test(M, config, pg):
+def make_data(M, N, K, dtype: torch.dtype, trans_b, tp_group: torch.distributed.ProcessGroup):
+    rank = tp_group.rank()
+    num_ranks = tp_group.size()
+    M_per_rank = M // num_ranks
+    N_per_rank = N // num_ranks
+    scale = (rank + 1) * 0.01
+
+    current_device = torch.cuda.current_device()
+    A = rand_tensor([M_per_rank, K], dtype=dtype, device=current_device) * scale
+    if trans_b:
+        B = rand_tensor([N_per_rank, K], dtype=dtype, device=current_device).T * scale
+    else:
+        B = rand_tensor([K, N_per_rank], dtype=dtype, device=current_device) * scale
+
+    return A, B
+
+
+def perf_test(M, config, pg: torch.distributed.ProcessGroup):
     N = config["N"]
     K = config["K"]
     rank = pg.rank()
@@ -75,23 +93,15 @@ def perf_test(M, config, pg):
 
     assert M % world_size == 0
     assert N % world_size == 0
-    M_per_rank = M // world_size
-    N_per_rank = N // world_size
 
-    A = torch.randn([M_per_rank, K], dtype=dtype, device="cuda")
-    A_gathered = torch.randn([M, K], dtype=dtype, device="cuda")
-    if args.trans_b:
-        B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda").T
-    else:
-        B = torch.randn([K, N_per_rank], dtype=dtype, device="cuda")
-
-    # in case zero GEMM runs faster than randn GEMM
-    torch_ag_buffer = torch.randn([M, K], dtype=dtype, device="cuda")
+    A, B = make_data(M, N, K, dtype, args.trans_b, pg)
+    A_gathered = torch.empty((M, K), dtype=A.dtype, device=A.device)
+    torch.distributed.all_gather_into_tensor(A_gathered, A, pg)
 
     def _torch_func():
-        return torch_ag_gemm(pg, A, B, torch_ag_buffer)
+        return torch_ag_gemm(pg, A, B)
 
-    ctx = create_ag_gemm_context(A, B, rank, world_size, M, LOCAL_WORLD_SIZE)
+    ctx = create_ag_gemm_context(M, N, K, dtype, rank, world_size, LOCAL_WORLD_SIZE)
 
     def _triton_ag_func():  # this does not include the local copy latency, which is included in ag_gemm
         current_stream = torch.cuda.current_stream()
@@ -143,10 +153,8 @@ def perf_test(M, config, pg):
         return ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
 
     for i in range(5):
-        A.copy_(torch.randn_like(A))
-        B.copy_(torch.randn_like(B))
+        A, B = make_data(M, N, K, dtype, args.trans_b, pg)
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-        torch.cuda.synchronize()
         C = _triton_func()
 
     C_golden = _torch_func()
@@ -168,10 +176,10 @@ def perf_test(M, config, pg):
     wait_until_max_gpu_clock_or_warning(torch.cuda.current_device())
     _, triton_gemm_duration_ms = perf_func(_triton_gemm_func, iters=args.iters, warmup_iters=args.warmup_iters)
     wait_until_max_gpu_clock_or_warning()
-    _, torch_ag_duration_ms = perf_func(lambda: torch.distributed.all_gather_into_tensor(torch_ag_buffer, A, pg),
+    _, torch_ag_duration_ms = perf_func(lambda: torch.distributed.all_gather_into_tensor(A_gathered, A, pg),
                                         iters=args.iters, warmup_iters=args.warmup_iters)
     wait_until_max_gpu_clock_or_warning()
-    _, torch_gemm_duration_ms = perf_func(lambda: torch.matmul(torch_ag_buffer, B), iters=args.iters,
+    _, torch_gemm_duration_ms = perf_func(lambda: torch.matmul(A_gathered, B), iters=args.iters,
                                           warmup_iters=args.warmup_iters)
 
     wait_until_max_gpu_clock_or_warning(torch.cuda.current_device())

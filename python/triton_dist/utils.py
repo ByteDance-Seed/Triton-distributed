@@ -63,7 +63,7 @@ if is_cuda():
     from cuda import cuda, cudart
     from .nv_utils import (
         get_numa_node,
-        to_physical_device_id,
+        _get_pynvml_device_id,
         get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
         has_fullmesh_nvlink,
@@ -73,7 +73,7 @@ elif is_hip():
     import pyrocshmem
     from .amd_utils import (
         get_numa_node,
-        to_physical_device_id,
+        _get_amdsmi_device_index,
         get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
     )
@@ -575,8 +575,9 @@ def get_device_property(device_id=0):
     return torch.cuda.get_device_properties(device_id)
 
 
-def sleep_async(duration_ms: int):
-    clock_rate_hz = torch.cuda.clock_rate() * 1e6
+def sleep_async(duration_ms: float):
+    """  sleep for duration_ms in CUDA kernel """
+    clock_rate_hz = get_max_gpu_clock_rate_in_khz(0) * 1e3
     torch.cuda._sleep(int(clock_rate_hz * duration_ms / 1000))
 
 
@@ -702,15 +703,20 @@ def barrier_async(pg: torch.distributed.ProcessGroup):
 _LAST_MAX_CLOCK_RATE_KHz = None
 
 
+def get_smi_device_index(device_id):
+    if is_cuda():
+        return _get_pynvml_device_id(device_id)
+    else:
+        return _get_amdsmi_device_index(device_id)
+
+
 def wait_until_max_gpu_clock_or_warning(device_id=None, timeout_sec=10):
     # TODO(houqi.1993) if GPU is not in performance mode, when no workload on GPU, clock may get even lower after waiting.
     # so by default don't wait until GPU to max clock. Make sure you set the GPU to performance mode and then export TRITON_DIST_WAIT_GPU_CLOCK=True.
     if not get_bool_env("TRITON_DIST_WAIT_GPU_CLOCK", False):
         return True
 
-    if device_id is None:
-        device_id = torch.cuda.current_device()
-    device_id = to_physical_device_id(device_id)
+    device_id = get_smi_device_index(device_id)
     end_time = time.time() + timeout_sec
     max_clock_rate = get_max_gpu_clock_rate_in_khz(device_id)
     interval = 0.1

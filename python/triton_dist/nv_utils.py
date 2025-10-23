@@ -119,7 +119,7 @@ def _get_active_nvlinks_pynvml(gpu_index: int):
     return values[0].value.siVal
 
 
-def parse_nvml_field_value(fv):
+def _parse_nvml_field_value(fv):
     import pynvml
     if fv.valueType == pynvml.NVML_VALUE_TYPE_DOUBLE:
         return fv.value.dVal
@@ -141,15 +141,18 @@ def parse_nvml_field_value(fv):
 def _get_nvlink_max_speed_gbps_pynvml(gpu_index=0):
     handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
     values = pynvml.nvmlDeviceGetFieldValues(handle, [pynvml.NVML_FI_DEV_NVLINK_GET_SPEED])
-    speed = parse_nvml_field_value(values[0])
+    speed = _parse_nvml_field_value(values[0])
     # speed in Mbps but in 1e6, not MB (1024 * 1024)
     speed = speed * 1e6 / 2**30
     return _get_active_nvlinks_pynvml(gpu_index) * speed
 
 
 @functools.lru_cache()
-def to_physical_device_id(gpu_index: int | None = None):
-    uuid = _get_nvml_gpu_uuid(gpu_index)
+def _get_pynvml_device_id(device_id: int | None = None):
+    if device_id is None:
+        device_id = torch.cuda.current_device()
+
+    uuid = _get_nvml_gpu_uuid(device_id)
 
     uuid_map = {get_physical_gpu_uuid(i): i for i in range(get_physical_device_count())}
     return uuid_map[uuid]
@@ -176,6 +179,7 @@ def _get_nvlink_max_speed_gbps_nvsmi(gpu_index=0):
 
 
 def get_nvlink_max_speed_gbps(gpu_index=0):
+    gpu_index = _get_pynvml_device_id(gpu_index)
     try:
         if with_pynvml():
             return _get_nvlink_max_speed_gbps_pynvml(gpu_index)
@@ -264,6 +268,7 @@ def _get_pcie_link_max_speed_gbps_pynvml(gpu_index=0):
 
 @functools.lru_cache()
 def get_pcie_link_max_speed_gbps(gpu_index):
+    gpu_index = _get_pynvml_device_id(gpu_index)
     if with_pynvml():
         return _get_pcie_link_max_speed_gbps_pynvml(gpu_index)
 
@@ -272,6 +277,7 @@ def get_pcie_link_max_speed_gbps(gpu_index):
 
 @functools.lru_cache()
 def get_numa_node(gpu_index):
+    gpu_index = _get_pynvml_device_id(gpu_index)
     try:
         if with_pynvml():
             _get_numa_node_pynvml(gpu_index)
@@ -307,10 +313,12 @@ def get_intranode_max_speed_gbps(gpu_index=0, with_scale: bool = False):
 
 @functools.lru_cache()
 def get_device_name(device_id):
+    device_id = _get_pynvml_device_id(device_id)
     return nvsmi(["name"], device_id, dtype=str)[0]
 
 
-def get_current_gpu_clock_rate_in_khz(device_id=0):
+def get_current_gpu_clock_rate_in_khz(device_id: int | None = None):
+    device_id = _get_pynvml_device_id(device_id)
     if with_pynvml():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         return pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM) * 1e3
@@ -325,9 +333,7 @@ def gpu_uuid_string(uuid_bytes: bytes) -> str:
 
 
 @functools.lru_cache()
-def _get_nvml_gpu_uuid(device_id: int | None):
-    if device_id is None:
-        device_id = torch.cuda.current_device()
+def _get_nvml_gpu_uuid(device_id: int):
     try:
         uuid = torch.cuda.get_device_properties(device_id).uuid
         return "GPU-" + uuid
@@ -344,18 +350,18 @@ def _get_nvml_gpu_uuid(device_id: int | None):
         return gpu_uuid_string(uuid_bytes)
 
 
-def _get_physical_gpu_uuid_pynvml(device_id: int | None):
+def _get_physical_gpu_uuid_pynvml(device_id: int):
     device_id = device_id or 0
     handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
     return pynvml.nvmlDeviceGetUUID(handle)
 
 
-def _get_physical_gpu_uuid_nvsmi(device_id: int | None):
+def _get_physical_gpu_uuid_nvsmi(device_id: int):
     device_id = device_id or 0
     return nvsmi(["uuid"], device_id, dtype=str)[0]
 
 
-def get_physical_gpu_uuid(gpu_index: int | None):
+def get_physical_gpu_uuid(gpu_index: int):
     if with_pynvml():
         return _get_physical_gpu_uuid_pynvml(gpu_index)
     return _get_physical_gpu_uuid_nvsmi(gpu_index)
@@ -379,6 +385,7 @@ def _get_gpu_performance_mode_pynvml(device_id: int) -> int:
 
 @functools.lru_cache()
 def is_gpu_max_performance_mode(device_id: int):
+    device_id = _get_pynvml_device_id(device_id)
     if with_pynvml():
         return _get_gpu_performance_mode_pynvml(device_id) == 0
 
@@ -387,7 +394,7 @@ def is_gpu_max_performance_mode(device_id: int):
 
 __all__ = [
     "get_numa_node",
-    "to_physical_device_id",
+    "_get_pynvml_device_id",
     "get_max_gpu_clock_rate_in_khz",
     "get_current_gpu_clock_rate_in_khz",
     "get_intranode_max_speed_gbps",

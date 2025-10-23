@@ -39,7 +39,24 @@ LAYER_CONFIGS = {
 }
 
 
-def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True):
+def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True, allow_nan: bool = False,
+                    allow_inf: bool = False):
+    if not allow_nan:
+        if torch.any(x.isnan()):
+            print(f"x has nan: {x}")
+            raise RuntimeError
+        if torch.any(y.isnan()):
+            print(f"y has nan: {y}")
+            raise RuntimeError
+
+    if not allow_inf:
+        if torch.any(x.isinf()):
+            print(f"x has inf: {x}")
+            raise RuntimeError
+        if torch.any(y.isinf()):
+            print(f"y has inf: {y}")
+            raise RuntimeError
+
     if not torch.allclose(x, y, rtol=rtol, atol=atol):
         print(f"shape of x: {x.shape}")
         print(f"shape of y: {y.shape}")

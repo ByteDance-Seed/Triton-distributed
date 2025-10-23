@@ -89,15 +89,14 @@ def _get_current_gpu_clock_rate_in_khz_rocm(device_id=None):
         return 1700 * 1000  # in kHz
 
 
-def _get_current_gpu_clock_rate_in_khz_amdsmi(device_id):
+def _get_current_gpu_clock_rate_in_khz_amdsmi(device_id: int):
     handle = amdsmi.amdsmi_get_processor_handles()[device_id]
     clock_info = amdsmi.amdsmi_get_clock_info(handle, amdsmi.AmdSmiClkType.GFX)
     return clock_info["clk"] * 1000
 
 
 def get_current_gpu_clock_rate_in_khz(device_id=None):
-    if device_id is None:
-        device_id = torch.cuda.current_device()
+    device_id = _get_amdsmi_device_index(device_id)
     try:
         if has_amdsmi():
             return _get_current_gpu_clock_rate_in_khz_amdsmi(device_id)
@@ -130,9 +129,8 @@ def _get_max_gpu_clock_rate_in_khz_rocm(device_id):
 
 
 @functools.lru_cache()
-def get_max_gpu_clock_rate_in_khz(device_id=None):
-    if device_id is None:
-        device_id = torch.cuda.current_device()
+def get_max_gpu_clock_rate_in_khz(device_id: int | None = None):
+    device_id = _get_amdsmi_device_index(device_id)
     try:
         if has_amdsmi():
             return _get_max_gpu_clock_rate_in_khz_amdsmi(device_id)
@@ -143,14 +141,14 @@ def get_max_gpu_clock_rate_in_khz(device_id=None):
 
 
 @functools.lru_cache()
-def _get_numa_node_amdsmi(device_id):
+def _get_numa_node_amdsmi(device_id: int):
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
     return amdsmi.amdsmi_topo_get_numa_node_number(handle)
 
 
 @functools.lru_cache()
-def _get_numa_node_rocm(device_id):
+def _get_numa_node_rocm(device_id: int):
     """
     Uses `rocm-smi --showtoponuma --json` and returns {"card0": 0, ...}
     """
@@ -159,8 +157,7 @@ def _get_numa_node_rocm(device_id):
 
 
 def get_numa_node(device_id=None):
-    if device_id is None:
-        device_id = torch.cuda.current_device()
+    device_id = _get_amdsmi_device_index(device_id)
     try:
         if has_amdsmi():
             return _get_numa_node_amdsmi(device_id)
@@ -205,7 +202,7 @@ def has_fullmesh_xgmi():
 
 
 @functools.lru_cache()
-def _get_gpu_uuid_by_physical_device_id(device_id):
+def _get_gpu_uuid_by_physical_device_id(device_id: int):
     _ensure_amdsmi_initialized()
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
@@ -231,18 +228,18 @@ def _get_physical_gpu_uuid_rocm(device_id: int):
     return uuid
 
 
-def get_uuid_by_physical_device_id(gpu_index: int | None):
+def get_uuid_by_physical_device_id(device_id: int | None = None):
     try:
         if has_amdsmi():
-            return _get_gpu_uuid_by_physical_device_id(gpu_index)
+            return _get_gpu_uuid_by_physical_device_id(device_id)
     except Exception:
         warnings.warn("get_uuid_by_physical_device_id failed with amdsmi, try using rocm-smi")
 
-    return _get_physical_gpu_uuid_rocm(gpu_index)
+    return _get_physical_gpu_uuid_rocm(device_id)
 
 
 @functools.lru_cache()
-def _get_gpu_uuid(device_id):
+def _get_gpu_uuid(device_id: int):
     try:
         return torch_uuid_to_unique_id(str(torch.cuda.get_device_properties(device_id).uuid))
     except AttributeError:
@@ -253,8 +250,11 @@ def _get_gpu_uuid(device_id):
 
 
 @functools.lru_cache()
-def to_physical_device_id(gpu_index: int | None):
-    uuid = _get_gpu_uuid(gpu_index)
+def _get_amdsmi_device_index(device_id: int | None):
+    if device_id is None:
+        device_id = torch.cuda.current_device()
+
+    uuid = _get_gpu_uuid(device_id)
 
     uuid_map = {get_uuid_by_physical_device_id(i)[-12:]: i for i in range(get_physical_device_count())}
     return uuid_map[uuid[-12:]]
@@ -358,13 +358,13 @@ def _get_bus_bw_gbps_a2a_rocm():
 
 
 @functools.lru_cache()
-def _get_bus_bw_gbps_between_rocm(device_id_i, device_id_j):
-    bw_matrix = _get_bus_bw_gbps_a2a_rocm()
-    return bw_matrix[(device_id_i, device_id_j)]
+def _get_bus_bw_gbps_between_rocm(device_id_i: int, device_id_j: int):
+    bw_matrix_gbps = _get_bus_bw_gbps_a2a_rocm()
+    return bw_matrix_gbps[(device_id_i, device_id_j)]
 
 
 @functools.lru_cache()
-def _get_bus_bw_gbps_between(device_id_i, device_id_j):
+def _get_bus_bw_gbps_between(device_id_i: int, device_id_j: int):
     try:
         if has_amdsmi():
             return _get_bus_bw_gbps_between_amdsmi(device_id_i, device_id_j)
@@ -429,6 +429,7 @@ def _get_gpu_performance_mode_amdsmi(device_id: int) -> str:
 
 
 def is_gpu_max_performance_mode(device_id: int):
+    device_id = _get_amdsmi_device_index(device_id)
     try:
         if has_amdsmi():
             return _get_gpu_performance_mode_amdsmi(device_id) == "AMDSMI_DEV_PERF_LEVEL_HIGH"
@@ -438,7 +439,19 @@ def is_gpu_max_performance_mode(device_id: int):
     return _get_gpu_performance_mode_rocm(device_id) == "high"
 
 
+def get_num_xcds_by_amdsmi(device_id: int = 0):
+    if has_amdsmi():
+        try:
+            devices = amdsmi.amdsmi_get_processor_handles()
+            handle = devices[device_id]
+            return amdsmi.amdsmi_get_gpu_xcd_counter(handle)
+        except Exception:
+            return -1
+    return -1
+
+
 __all__ = [
-    "to_physical_device_id", "get_max_gpu_clock_rate_in_khz", "get_current_gpu_clock_rate_in_khz",
-    "get_intranode_max_speed_gbps", "get_numa_node", "is_gpu_max_performance_mode"
+    "_get_amdsmi_device_index", "get_max_gpu_clock_rate_in_khz", "get_current_gpu_clock_rate_in_khz",
+    "get_intranode_max_speed_gbps", "get_numa_node", "is_gpu_max_performance_mode", "get_num_xcds_by_amdsmi",
+    "has_amdsmi"
 ]

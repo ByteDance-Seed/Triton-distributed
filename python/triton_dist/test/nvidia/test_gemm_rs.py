@@ -34,7 +34,7 @@ from triton_dist.kernels.nvidia import create_gemm_rs_context, gemm_rs
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
 from triton_dist.utils import (dist_print, initialize_distributed, finalize_distributed,
-                               wait_until_max_gpu_clock_or_warning)
+                               wait_until_max_gpu_clock_or_warning, rand_tensor)
 from triton_dist.kernels.nvidia.gemm import get_config_space
 
 
@@ -204,15 +204,15 @@ if __name__ == "__main__":
 
     def _make_data(M):
         scale = RANK + 1
-        A = torch.randn((M, K_per_rank), dtype=input_dtype, device="cuda")
+        A = rand_tensor((M, K_per_rank), dtype=input_dtype, device="cuda")
         A *= 0.01 * scale
         if args.trans_b:
-            B = torch.randn((args.N, K_per_rank), dtype=input_dtype, device="cuda").T
+            B = rand_tensor((args.N, K_per_rank), dtype=input_dtype, device="cuda").T
         else:
-            B = torch.randn((K_per_rank, args.N), dtype=input_dtype, device="cuda")
+            B = rand_tensor((K_per_rank, args.N), dtype=input_dtype, device="cuda")
         B *= 0.01 * scale
         if args.has_bias:
-            bias = torch.randn((M, args.N), dtype=input_dtype, device="cuda")
+            bias = rand_tensor((M, args.N), dtype=input_dtype, device="cuda")
         else:
             bias = None
         return A, B, bias

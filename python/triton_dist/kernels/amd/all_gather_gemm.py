@@ -34,10 +34,10 @@ from triton.runtime.driver import driver
 
 from triton.language.extra.hip.libdevice import store_release_system
 from hip import hip
-from triton_dist.utils import HIP_CHECK
+from triton_dist.utils import HIP_CHECK, launch_cooperative_grid_options
 from typing import Optional, List
 import pyrocshmem
-from triton_dist.kernels.amd.common_ops import barrier_all_kernel
+from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel, barrier_on_this_grid
 
 
 def _get_default_num_xcds():
@@ -413,7 +413,7 @@ def matmul_get_configs():
 
 
 @triton.jit(do_not_specialize=["rank"])
-def local_copy_and_barrier_all_ipc(
+def local_copy_and_barrier_all_ipc_kernel(
     rank,
     local_buf_ptr,
     global_buf_ptr,
@@ -427,6 +427,7 @@ def local_copy_and_barrier_all_ipc(
     comm_buf_base_ptrs,
     barrier_ptr,
     chunk_counters_ptr,
+    sync_grid_buf_ptr,
     m_chunk_num: tl.constexpr,
     num_chunks: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -465,18 +466,9 @@ def local_copy_and_barrier_all_ipc(
     for i in range(sm_id, num_chunks, num_sms):
         tl.store(chunk_counters_ptr + i, 0)
 
+    barrier_on_this_grid(sync_grid_buf_ptr, use_cooperative=False)
     if sm_id == 0:
-        for i in range(num_ranks):
-            remote_base_ptr = tl.load(comm_buf_base_ptrs + i).to(tl.pointer_type(tl.int32))
-            while tl.atomic_cas(remote_base_ptr + rank, 0, 1, scope="sys", sem="release") != 0:
-                pass
-
-        for i in range(num_ranks):
-            local_base_ptr = tl.load(comm_buf_base_ptrs + rank).to(tl.pointer_type(tl.int32))
-            while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
-                pass
-
-        tl.debug_barrier()
+        barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs)
 
 
 @triton.jit
@@ -889,6 +881,7 @@ class AllGatherGEMMTensorParallelContext:
     dst_tensor_ptrs: torch.Tensor = dataclasses.field(init=False)
     barrier_ptrs: torch.Tensor = dataclasses.field(init=False)
     chunk_counters: torch.Tensor = dataclasses.field(init=False)
+    sync_grid_buf: torch.Tensor = dataclasses.field(init=False)
 
     gemm_stream_torch: Optional[torch.cuda.streams.Stream] = None
 
@@ -904,6 +897,8 @@ class AllGatherGEMMTensorParallelContext:
         for i in range(self.num_ranks):
             self.dst_tensor_ptrs[i] = self.workspace_tensors[i].data_ptr()
             self.barrier_ptrs[i] = self.barrier_tensors[i].data_ptr()
+
+        self.sync_grid_buf = torch.zeros((1, ), dtype=torch.uint32, device="cuda")
 
 
 def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype: torch.dtype, output_dtype: torch.dtype, rank, num_ranks,
@@ -1049,12 +1044,13 @@ def ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, ctx
     N_per_rank, _ = B.shape
     current_stream = torch.cuda.current_stream()
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-    local_copy_and_barrier_all_ipc[(num_sms, )](
+    local_copy_and_barrier_all_ipc_kernel[(num_sms, )](
         ctx.rank, A, ctx.workspace_tensors[ctx.rank], M_per_rank, K, A.stride(0), A.stride(1),
         ctx.workspace_tensors[ctx.rank].stride(0), ctx.workspace_tensors[ctx.rank].stride(1), ctx.num_ranks,
         ctx.comm_buf_ptr, barrier_ptr=ctx.barrier_tensors[ctx.rank], chunk_counters_ptr=ctx.chunk_counters,
-        m_chunk_num=ctx.barrier_tensors[ctx.rank].shape[0], num_chunks=ctx.chunk_counters.shape[0], BLOCK_SIZE_M=128,
-        BLOCK_SIZE_N=256, num_warps=16)
+        sync_grid_buf_ptr=ctx.sync_grid_buf, m_chunk_num=ctx.barrier_tensors[ctx.rank].shape[0],
+        num_chunks=ctx.chunk_counters.shape[0], BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=16,
+        **launch_cooperative_grid_options())
 
     if use_fused_kernel:
         # Use the new fused kernel
@@ -1118,33 +1114,25 @@ def ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, ctx
             current_stream.wait_stream(ctx.gemm_stream_torch)
 
 
-def ag_gemm_intra_node(A: torch.Tensor, B: torch.Tensor, transe_b: bool, ctx: AllGatherGEMMTensorParallelContext,
+def ag_gemm_intra_node(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallelContext,
                        use_fused_kernel=False, autotune: bool = True):
     """allgather gemm for intra-node
 
-    Allgather global matrix A and do matmul with local matrix B, produces local matrix C
+    return C = all_gather(A) @ B.T
 
     Args:
         A (torch.Tensor<float>): local matmul A matrix. shape: [M_per_rank, K]
-        B (torch.Tensor<float>): local matmul B matrix. shape: [K, N_per_rank]
-        transe_b (bool): indicates whether tensor b is transposed
-        ctx: (Optional[AllGatherGEMMTensorParallelContext]): if not provided, created immediately
+        B (torch.Tensor<float>): local matmul B matrix. shape: [N_per_rank, K]
+        ctx: (AllGatherGEMMTensorParallelContext):
         use_fused_kernel (bool): whether to use the fused all-gather-gemm kernel
 
     Returns:
-        c (torch.Tensor<float>): local matmul C matrix. shape: [M, N_per_rank]
+        C (torch.Tensor<float>): local matmul C matrix. shape: [M, N_per_rank]
     """
-    if ctx is None:
-        raise RuntimeError("requires ctx for ipc handle")
-
-    if transe_b:
-        raise NotImplementedError("transpose weight is not yet supported")
-
     M_per_rank, K = A.shape
-    N_per_rank = B.shape[0] if not transe_b else B.shape[1]
+    N_per_rank, _ = B.shape
     C = torch.empty([ctx.num_ranks * M_per_rank, N_per_rank], dtype=A.dtype, device=A.device)
     ag_gemm_intra_node_op(A, B, C, ctx, use_persistent_gemm=True, use_fused_kernel=use_fused_kernel, autotune=autotune)
-
     return C
 
 
@@ -1153,16 +1141,10 @@ def ag_gemm_intra_node(A: torch.Tensor, B: torch.Tensor, transe_b: bool, ctx: Al
     key_fn=key_fn,
     prune_fn=prune_fn_by_shared_memory,
 )
-def gemm_only(A: torch.Tensor, B: torch.Tensor, transe_b: bool, ctx: AllGatherGEMMTensorParallelContext, NUM_SMS: int,
+def gemm_only(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallelContext, NUM_SMS: int,
               gemm_config: triton.Config = DEFAULT_CONFIG):
-    if ctx is None:
-        raise RuntimeError("requires ctx for ipc handle")
-
-    if transe_b:
-        raise NotImplementedError("transpose weight is not yet supported")
-
     M_per_rank, K = A.shape
-    N_per_rank = B.shape[0] if not transe_b else B.shape[1]
+    N_per_rank, _ = B.shape
     C = torch.empty([ctx.num_ranks * M_per_rank, N_per_rank], dtype=A.dtype, device=A.device)
 
     M = M_per_rank * ctx.num_ranks
@@ -1194,4 +1176,4 @@ def allgather(A: torch.Tensor, ctx):
         cp_engine_producer_all_gather_full_mesh_push_multi_stream(ctx.rank, ctx.num_ranks, A, ctx.workspace_tensors,
                                                                   ctx.one, ctx.M_PER_CHUNK, [current_stream],
                                                                   ctx.barrier_tensors)
-    barrier_all_kernel[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)
+    barrier_all_ipc_kernel[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)

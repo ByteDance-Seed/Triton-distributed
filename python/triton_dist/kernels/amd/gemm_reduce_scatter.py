@@ -389,7 +389,8 @@ class GEMMReduceScatterTensorParallelContext:
     fuse_scatter: bool
 
 
-def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group, fuse_scatter=True):
+def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group: torch.distributed.ProcessGroup,
+                                      fuse_scatter=True):
     """create context for gemm reduce-scatter intra-node
 
     Args:
@@ -414,7 +415,8 @@ def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, t
     scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([max_M, N], output_dtype)
     scatter_bufs_ptr = torch.tensor([t.data_ptr() for t in scatter_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
-
+    torch.cuda.synchronize()
+    torch.distributed.barrier(tp_group)
     ret = GEMMReduceScatterTensorParallelContext(
         rank=rank,
         num_ranks=num_ranks,

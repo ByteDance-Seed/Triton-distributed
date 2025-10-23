@@ -30,7 +30,7 @@ import torch
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import LAYER_CONFIGS, assert_allclose
 from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
-from triton_dist.utils import (dist_print, finalize_distributed, initialize_distributed)
+from triton_dist.utils import (dist_print, finalize_distributed, initialize_distributed, rand_tensor)
 from triton_dist.kernels.nvidia.gemm_perf_model import get_tensorcore_tflops
 from triton_dist.nv_utils import get_intranode_max_speed_gbps
 
@@ -56,16 +56,41 @@ def get_args():
     parser.add_argument("--persistent", action=argparse.BooleanOptionalAction,
                         default=torch.cuda.get_device_capability() >= (9, 0))
     parser.add_argument("--profile", default=False, action="store_true")
-    parser.add_argument("--autotune", default=False, action="store_true")
+    parser.add_argument("--autotune", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--trans_b", default=True, action=argparse.BooleanOptionalAction)
 
     args = parser.parse_args()
     return args
 
 
+def ag_gemm_torch(A: torch.Tensor, B: torch.Tensor, tp_group: torch.distributed.ProcessGroup):
+    M_per_rank, K = A.shape
+    K, N = B.shape
+    M = M_per_rank * tp_group.size()
+    A_full = torch.empty([M, K], dtype=A.dtype, device=A.device)
+    torch.distributed.all_gather_into_tensor(A_full, A, group=args.default_group)
+    return torch.matmul(A_full, B)
+
+
+def make_data(M, N, K, dtype: torch.dtype, trans_b, tp_group: torch.distributed.ProcessGroup):
+    rank = tp_group.rank()
+    num_ranks = tp_group.size()
+    M_per_rank = M // num_ranks
+    N_per_rank = N // num_ranks
+    scale = (rank + 1) * 0.01
+
+    current_device = torch.cuda.current_device()
+    A = rand_tensor([M_per_rank, K], dtype=dtype, device=current_device) * scale
+    if trans_b:
+        B = rand_tensor([N_per_rank, K], dtype=dtype, device=current_device).T * scale
+    else:
+        B = rand_tensor([K, N_per_rank], dtype=dtype, device=current_device) * scale
+
+    return A, B
+
+
 @register_test("check")
 def test_ag_gemm(args):
-    device = "cuda"
     dtype = torch.float16
     rank = args.rank
     num_ranks = args.num_ranks
@@ -75,48 +100,30 @@ def test_ag_gemm(args):
 
     assert M % num_ranks == 0
     assert N % num_ranks == 0
-    M_per_rank = M // num_ranks
-    N_per_rank = N // num_ranks
 
-    A = torch.randn([M_per_rank, K], dtype=dtype, device=device)
-    if args.trans_b:
-        B = torch.randn([N_per_rank, K], dtype=dtype, device=device).T
-    else:
-        B = torch.randn([K, N_per_rank], dtype=dtype, device=device)
+    A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
 
-    ctx = create_ag_gemm_context(A, B, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE, max_M=M)
+    ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE)
     if rank == 0:
         print(f"all gather with: {ctx.all_gather_method}")
 
-    def func():
-        return ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
+    for i in range(5):
+        # every time, use a new input data to check correctness
+        A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
+        ctx.symm_workspace[:M].random_()
+        C_triton = ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
+        C_torch = ag_gemm_torch(A, B, args.default_group)
 
-    with group_profile("ag_gemm_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=args.default_group):
-        for i in range(5):
-            # every time, use a new input data to check correctness
-            A.random_()
-            B.random_()
-            ctx.symm_workspace[:M].random_()
-            C = func()
-
-    ag_A = torch.empty([M, K], dtype=dtype, device=device)
-    torch.distributed.all_gather_into_tensor(
-        ag_A,
-        A,
-        group=args.default_group,
-    )
-    C_golden = torch.matmul(ag_A, B)
-    for i in range(num_ranks):
-        torch.distributed.barrier(args.default_group)
-        if rank == i:
-            print(f"Rank {rank}")
-            assert_allclose(C_golden, C, atol=1e-3, rtol=1e-3)
+        for i in range(num_ranks):
+            torch.distributed.barrier(args.default_group)
+            if rank == i:
+                assert_allclose(C_torch, C_triton, atol=1e-3, rtol=1e-3, verbose=False)
+    print("✅ check passed")
     ctx.finalize()
 
 
 @register_test("perf")
 def perf_ag_gemm(args):
-    device = "cuda"
     dtype = torch.float16
     rank = args.rank
     num_ranks = args.num_ranks
@@ -127,26 +134,11 @@ def perf_ag_gemm(args):
 
     assert M % num_ranks == 0
     assert N % num_ranks == 0
-    M_per_rank = M // num_ranks
     N_per_rank = N // num_ranks
 
-    A = torch.randn([M_per_rank, K], dtype=dtype, device=device)
-    if args.trans_b:
-        B = torch.randn([N_per_rank, K], dtype=dtype, device=device).T
-    else:
-        B = torch.randn([K, N_per_rank], dtype=dtype, device=device)
+    A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
 
-    ag_intranode_stream = torch.cuda.Stream(priority=-1)
-
-    ctx = create_ag_gemm_context(
-        A,
-        B,
-        rank,
-        num_ranks,
-        M,
-        LOCAL_WORLD_SIZE,
-        ag_intranode_stream=ag_intranode_stream,
-    )
+    ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, LOCAL_WORLD_SIZE)
 
     def func():
         return ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
@@ -171,10 +163,10 @@ def perf_ag_gemm(args):
     with group_profile(f"ag_gemm_perf_{os.environ['TORCHELASTIC_RUN_ID']}", args.profile, group=args.default_group):
         for i in range(20):
             func()
-    ag_A = torch.empty([M, K], dtype=dtype, device=device)
-    torch.distributed.all_gather_into_tensor(ag_A, A, group=args.default_group)
-    C_golden = torch.matmul(ag_A, B)
-    assert_allclose(C_golden, C, atol=1e-3, rtol=1e-3)
+
+    C_torch = ag_gemm_torch(A, B, args.default_group)
+    assert_allclose(C, C_torch, atol=1e-3, rtol=1e-3)
+
     ctx.finalize()
     return duration_ms
 

@@ -472,21 +472,19 @@ class AllGatherGEMMTensorParallelContext:
 
 
 def create_ag_gemm_context(
-    A: torch.Tensor,
-    B: torch.Tensor,
+    max_M,
+    N,
+    K,
+    dtype: torch.dtype,
     rank,
     num_ranks,
-    max_M,
     num_local_ranks=8,
     ag_intranode_stream=None,
     ag_internode_stream=None,
 ) -> AllGatherGEMMTensorParallelContext:
-    # TODO(houqi.1993) use no A and B. use N/K/dtype instead
     """create context for allgather gemm intra-node
 
     Args:
-        A (torch.Tensor<float>): A matrix. shape: [M_per_rank, K]
-        B (torch.Tensor<float>): B matrix. shape: [K, N_per_rank]
         rank (int): current rank
         num_ranks (int): total number of ranks
         max_M: max number of M shape, should be greater than M_per_rank * num_ranks
@@ -496,15 +494,12 @@ def create_ag_gemm_context(
     Returns:
         AllGatherGEMMTensorParallelContext
     """
-    _, K = A.shape
-    _, N_per_rank = B.shape
-    assert K == B.shape[0]
-    assert A.dtype == B.dtype, f"Dtype of input and weight must be same: A dtype {A.dtype}, B dtype {B.dtype}"
-
+    assert N % num_ranks == 0
+    N_per_rank = N // num_ranks
     ctx = AllGatherGEMMTensorParallelContext(
         N_per_rank=N_per_rank,
         K=K,
-        dtype=A.dtype,
+        dtype=dtype,
         rank=rank,
         num_ranks=num_ranks,
         num_local_ranks=num_local_ranks,
@@ -587,9 +582,9 @@ def ag_gemm(
 
 
 def rowise_ag_gemm_dispatcher(
-    a,
-    B,
-    C,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
     ctx: AllGatherGEMMTensorParallelContext,
     gemm_config: triton.Config,
     straggler_option=None,
@@ -604,7 +599,7 @@ def rowise_ag_gemm_dispatcher(
         cp_engine_producer_all_gather_intra_node(
             ctx.rank,
             ctx.num_ranks,
-            a,
+            A,
             ctx.symm_workspaces,
             ctx.symm_barriers,
             ctx.ag_intranode_stream,
@@ -613,7 +608,7 @@ def rowise_ag_gemm_dispatcher(
         )
     else:
         cp_engine_producer_all_gather_inter_node(
-            a,
+            A,
             ctx.symm_workspaces,
             ctx.symm_barriers,
             ctx.barrier_target,
@@ -629,7 +624,7 @@ def rowise_ag_gemm_dispatcher(
     if straggler_option and ctx.rank == straggler_option[0]:
         torch.cuda._sleep(straggler_option[1])
 
-    M_per_rank, K = a.shape
+    M_per_rank, K = A.shape
     M = M_per_rank * ctx.num_ranks
     persistent = torch.cuda.get_device_capability()[0] >= 9
     if not persistent:
@@ -643,8 +638,8 @@ def rowise_ag_gemm_dispatcher(
             ctx.K,  #
             ctx.symm_workspace.stride(0),
             ctx.symm_workspace.stride(1),
-            B.stride(1),
             B.stride(0),
+            B.stride(1),
             C.stride(0),
             C.stride(1),
             ctx.rank,

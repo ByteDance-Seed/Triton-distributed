@@ -32,7 +32,7 @@ import random
 
 from triton_dist.profiler_utils import perf_func, group_profile
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import generate_data, dist_print, initialize_distributed, finalize_distributed
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
 from triton_dist.kernels.amd.all_gather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm_only, allgather
 
 
@@ -51,25 +51,21 @@ def make_cuda_graph(mempool, func):
 
 
 def torch_ag_gemm(
-    input: torch.Tensor,  # [local_M, K]
-    weight: torch.Tensor,  # [local_N, K]
-    transed_weight: bool,
+    A: torch.Tensor,  # [local_M, K]
+    B: torch.Tensor,  # [local_N, K]
     bias: Optional[torch.Tensor],
-    TP_GROUP,
+    tp_group: torch.distributed.ProcessGroup,
 ):
-    local_M, K = input.shape
-    world_size = TP_GROUP.size()
-    if transed_weight:
-        assert K == weight.shape[0]
-    else:
-        assert K == weight.shape[1]
-        weight = weight.T
-    assert input.device == weight.device
+    """ return C = all_gather(A) @ B.T """
+    local_M, K = A.shape
+    world_size = tp_group.size()
+    assert K == B.shape[1]
+    assert A.device == B.device
     # AG
-    full_input = torch.empty((local_M * world_size, K), dtype=input.dtype, device=input.device)
-    torch.distributed.all_gather_into_tensor(full_input, input, group=TP_GROUP)
+    full_A = torch.empty((local_M * world_size, K), dtype=A.dtype, device=A.device)
+    torch.distributed.all_gather_into_tensor(full_A, A, group=tp_group)
     # Gemm
-    output = torch.matmul(full_input, weight)
+    output = torch.matmul(full_A, B.T)
 
     if bias:
         output = output + bias
@@ -110,40 +106,33 @@ class AGGemmIntraNode(torch.nn.Module):
     def forward(
         self,
         A: torch.Tensor,  # [local_M, K]
-        weight: torch.Tensor,  # [local_N, K]
-        transed_weight: bool,  # indicates whether weight already transposed
+        B: torch.Tensor,  # [local_N, K]
         use_fused_kernel: bool = False,  # whether to use fused kernel
         autotune: bool = False,
     ):
-
+        """ return C = all_gather(A) @ B.T """
         _, K = A.shape
-
         assert K == self.K
         assert self.max_M % self.world_size == 0
-        if transed_weight:
-            assert weight.shape[0] == K
-        else:
-            assert weight.shape[1] == K
+        assert B.shape == (self.N // self.world_size, K)
 
-        output = ag_gemm_intra_node(A, weight, transed_weight, ctx=self.ctx, use_fused_kernel=use_fused_kernel,
-                                    autotune=autotune)
+        output = ag_gemm_intra_node(A, B, ctx=self.ctx, use_fused_kernel=use_fused_kernel, autotune=autotune)
 
         return output
 
-    def gemm_only(self, A: torch.Tensor, weight: torch.Tensor, transed_weight: bool, NUM_SMS: int):
-        return gemm_only(A, weight, transed_weight, ctx=self.ctx, NUM_SMS=NUM_SMS)
+    def gemm_only(self, A: torch.Tensor, weight: torch.Tensor, NUM_SMS: int):
+        return gemm_only(A, weight, ctx=self.ctx, NUM_SMS=NUM_SMS)
 
-    def gemm_only_perf(self, A: torch.Tensor, weight: torch.Tensor, transed_weight: bool, iters: int = 100,
-                       warmup_iters: int = 10):
+    def gemm_only_perf(self, A: torch.Tensor, weight: torch.Tensor, iters: int = 100, warmup_iters: int = 10):
 
         barrier_ptr = self.ctx.barrier_tensors[self.ctx.rank]
         barrier_ptr.fill_(1)
         torch.cuda.synchronize()
         NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
         with group_profile("gemm_only", True, group=self.tp_group):
-            _, gemm_perf = perf_func(partial(self.gemm_only, A, weight, transed_weight, NUM_SMS), iters=iters,
+            _, gemm_perf = perf_func(partial(self.gemm_only, A, weight, NUM_SMS), iters=iters,
                                      warmup_iters=warmup_iters)
-
+        barrier_ptr.fill_(0)
         dist_print("gemm only perf: ", gemm_perf, need_sync=True, allowed_ranks=list(range(self.world_size)))
 
         return gemm_perf
@@ -214,12 +203,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_stress_test(args, TP_GROUP):
+def run_stress_test(args, TP_GROUP: torch.distributed.ProcessGroup):
     """Run stress test with random shapes"""
-
-    RANK = torch.distributed.get_rank()
-    WORLD_SIZE = torch.distributed.get_world_size()
-
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype
     atol = THRESHOLD_MAP[output_dtype]
@@ -233,13 +218,10 @@ def run_stress_test(args, TP_GROUP):
     for round_idx in range(args.stress_rounds):
         # Generate random dimensions for each round
         M_per_rank = random.randint(128, max_K) // 128 * 128
-        M = M_per_rank * WORLD_SIZE
+        M = M_per_rank * TP_GROUP.size()
         N = random.randint(128, max_N)
         K = random.randint(128, max_K) // 128 * 128
         chunk_m = random.choice([64, 128, 256, 512])
-
-        local_M = M // WORLD_SIZE
-        local_N = N // WORLD_SIZE
 
         dist_print(f"\nRound {round_idx + 1}/{args.stress_rounds}: M={M}, N={N}, K={K}, chunk_m={chunk_m}")
 
@@ -248,28 +230,15 @@ def run_stress_test(args, TP_GROUP):
             dist_ag_gemm_op = AGGemmIntraNode(TP_GROUP, M, N, K, chunk_m, input_dtype, output_dtype,
                                               args.use_copy_kernel, args.comm_sms_per_rank)
 
-            # Generate test data with different scales for each rank
-            scale = RANK + 1
-
-            input = (torch.rand((local_M, K), dtype=input_dtype, device="cuda") * 2 - 1) * 0.01 * scale
-            weight = (torch.rand((local_N, K), dtype=input_dtype, device="cuda") * 2 - 1) * 0.01 * scale
-
-            if args.transpose_weight:
-                weight = weight.T.contiguous()
-
-            bias = None
-            if args.has_bias:
-                bias = (torch.rand((M, local_N), dtype=input_dtype, device="cuda") * 2 - 1)
             use_fused = args.use_fused_kernel
 
             for _ in range(10):
-                input.uniform_(-0.1 * scale, 0.1 * scale)
-                weight.uniform_(-0.1 * scale, 0.1 * scale)
+                A, B, bias = _make_data(M, N, K, args.has_bias, TP_GROUP)
                 # Run distributed AG-GEMM
-                dist_output = dist_ag_gemm_op.forward(input, weight, args.transpose_weight, use_fused, args.autotune)
+                dist_output = dist_ag_gemm_op.forward(A, B, use_fused, args.autotune)
 
                 # Run reference PyTorch implementation
-                torch_output = torch_ag_gemm(input, weight, args.transpose_weight, bias, TP_GROUP)
+                torch_output = torch_ag_gemm(A, B, bias, TP_GROUP)
 
                 # Check correctness
                 assert_allclose(torch_output, dist_output, atol=atol, rtol=rtol, verbose=False)
@@ -289,6 +258,24 @@ def run_stress_test(args, TP_GROUP):
     dist_print(f"✅ Stress test completed: All {args.stress_rounds} rounds passed")
 
 
+def _make_data(M, N, K, has_bias, tp_group: torch.distributed.ProcessGroup):
+    current_device = torch.cuda.current_device()
+    rank, num_ranks = tp_group.rank(), tp_group.size()
+    local_M = M // num_ranks
+    local_N = N // num_ranks
+    scale = (rank + 1) * 0.01
+
+    A = rand_tensor((local_M, K), dtype=input_dtype, device=current_device) * scale
+    if args.transpose_weight:
+        B = rand_tensor((K, local_N), dtype=input_dtype, device=current_device).T * scale
+    else:
+        B = rand_tensor((local_N, K), dtype=input_dtype, device=current_device) * scale
+    bias = None
+    if has_bias:
+        bias = rand_tensor((M, local_N), dtype=input_dtype, device=current_device)
+    return A, B, bias
+
+
 if __name__ == "__main__":
     args = parse_args()
     RANK = int(os.environ.get("RANK", 0))
@@ -303,32 +290,16 @@ if __name__ == "__main__":
 
     assert args.M % WORLD_SIZE == 0
     assert args.N % WORLD_SIZE == 0
-    assert args.K % WORLD_SIZE == 0
     local_M = args.M // WORLD_SIZE
     local_N = args.N // WORLD_SIZE
-
-    scale = TP_GROUP.rank() + 1
-
-    def _make_data():
-        data_config = [
-            ((local_M, args.K), input_dtype, (0.01 * scale, 0)),  # A
-            ((local_N, args.K), input_dtype, (0.01 * scale, 0)),  # B
-            (  # bias
-                None if not args.has_bias else ((args.M, local_N), input_dtype, (1, 0))),
-        ]
-        generator = generate_data(data_config)
-        input, weight, bias = next(generator)
-        if args.transpose_weight:
-            weight = weight.T.contiguous()  # from N,K to K,N
-        return input, weight, bias
 
     dist_ag_gemm_op = AGGemmIntraNode(TP_GROUP, args.M, args.N, args.K, args.chunk_m, input_dtype, output_dtype,
                                       args.use_copy_kernel, args.comm_sms_per_rank)
 
-    A, weight, bias = _make_data()
+    A, B, bias = _make_data(args.M, args.N, args.K, args.has_bias, TP_GROUP)
 
     if args.gemm_only_perf:
-        dist_ag_gemm_op.gemm_only_perf(A, weight, args.transpose_weight, iters=args.iters, warmup_iters=args.warmup)
+        dist_ag_gemm_op.gemm_only_perf(A, B, iters=args.iters, warmup_iters=args.warmup)
 
     elif args.comm_only_perf:
         dist_ag_gemm_op.comm_only_perf(A, iters=args.iters, warmup_iters=args.warmup)
@@ -339,17 +310,16 @@ if __name__ == "__main__":
             # Run stress test with random shapes
             run_stress_test(args, TP_GROUP)
 
-        torch_output = torch_ag_gemm(A, weight, args.transpose_weight, bias, TP_GROUP)
-        dist_triton_output = dist_ag_gemm_op.forward(A, weight, args.transpose_weight, args.use_fused_kernel)
+        torch_output = torch_ag_gemm(A, B, bias, TP_GROUP)
+        dist_triton_output = dist_ag_gemm_op.forward(A, B, args.use_fused_kernel)
 
         with group_profile("ag_gemm", args.profile, group=TP_GROUP):
 
-            _, dist_triton_perf = perf_func(
-                partial(dist_ag_gemm_op.forward, A, weight, args.transpose_weight, args.use_fused_kernel),
-                iters=args.iters, warmup_iters=args.warmup)
+            _, dist_triton_perf = perf_func(partial(dist_ag_gemm_op.forward, A, B, args.use_fused_kernel),
+                                            iters=args.iters, warmup_iters=args.warmup)
 
-            _, torch_perf = perf_func(partial(torch_ag_gemm, A, weight, args.transpose_weight, bias, TP_GROUP),
-                                      iters=args.iters, warmup_iters=args.warmup)
+            _, torch_perf = perf_func(partial(torch_ag_gemm, A, B, bias, TP_GROUP), iters=args.iters,
+                                      warmup_iters=args.warmup)
 
         torch.cuda.synchronize()
         torch.distributed.barrier()

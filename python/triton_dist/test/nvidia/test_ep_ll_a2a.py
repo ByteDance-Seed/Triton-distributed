@@ -24,7 +24,8 @@
 ################################################################################
 import torch
 import torch.distributed
-from triton_dist.utils import finalize_distributed, initialize_distributed, perf_func, get_torch_prof_ctx
+from triton_dist.utils import finalize_distributed, initialize_distributed
+from triton_dist.profiler_utils import perf_func, get_torch_prof_ctx
 from functools import partial
 
 import argparse

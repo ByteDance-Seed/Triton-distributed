@@ -45,8 +45,8 @@ class GemmARContext:
     tile_completed_buf: torch.Tensor
     ar_stream: torch.cuda.Stream
 
-    def get_gemm_out_buf(self, A: torch.Tensor, weight):
-        M, N = A.shape[0], weight.shape[0]
+    def get_gemm_out_buf(self, A: torch.Tensor, B: torch.Tensor):
+        M, N = A.shape[0], B.shape[0]
         assert self.symm_gemm_out_buf.numel() >= M * N
         return self.symm_gemm_out_buf.reshape(-1)[:M * N].reshape(M, N)
 
