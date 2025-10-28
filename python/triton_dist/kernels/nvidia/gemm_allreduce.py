@@ -36,6 +36,7 @@ from triton.language.extra.cuda.utils import num_warps
 from triton.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, multimem_ld_reduce_v4,
                                                        multimem_st_v4, st_v4_b32, atomic_add)
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid
+from triton_dist.utils import is_nvshmem_multimem_supported
 
 
 @dataclasses.dataclass
@@ -681,6 +682,8 @@ def low_latency_gemm_allreduce_op(
 
     NUM_COMM_SMS = ctx.NUM_COMM_SMS
     USE_LD_REDUCE = ctx.all_reduce_method == OverlappingAllReduceMethod.Consumer_Multimem
+    if USE_MULTIMEM_ST or USE_LD_REDUCE:
+        assert is_nvshmem_multimem_supported(), "multimem is unsupported"
     with_scale = (A_scale is not None and B_scale is not None)
 
     if with_scale:

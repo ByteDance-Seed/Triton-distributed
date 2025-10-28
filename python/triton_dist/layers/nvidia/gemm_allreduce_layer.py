@@ -28,6 +28,7 @@ import triton
 from typing import Optional
 from triton_dist.utils import nvshmem_barrier_all_on_stream
 from triton_dist.kernels.nvidia import create_gemm_ar_context, low_latency_gemm_allreduce_op, create_ll_gemm_ar_context, gemm_allreduce_op
+from triton_dist.utils import is_nvshmem_multimem_supported
 
 
 class GemmARLayer(torch.nn.Module):
@@ -66,7 +67,7 @@ class GemmARLayer(torch.nn.Module):
         NUM_GEMM_SMS = NUM_SMS - NUM_COMM_SMS - NUM_SM_MARGIN
         self.NUM_GEMM_SMS = NUM_GEMM_SMS
         self.NUM_COMM_SMS = NUM_COMM_SMS
-        self.USE_MULTIMEM_ST = True
+        self.USE_MULTIMEM_ST = is_nvshmem_multimem_supported()
         self.TILE_MAP_LEVEL = TILE_MAP_LEVEL
         self.copy_to_local = copy_to_local
         self.user_gemm_config = user_gemm_config
