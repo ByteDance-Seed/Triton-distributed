@@ -51,7 +51,7 @@ def kernel_pre_attn_qkv_pack_a2a(
     recv_out_q_buf,  # [bs, seq, local_q_nheads, k_head_dim]
     recv_out_k_buf,  # [bs, seq, local_kv_nheads, k_head_dim]
     recv_out_v_buf,  # [bs, seq, local_kv_nheads, v_head_dim]
-    p2p_signal_buf,  # [nnodes, ]
+    p2p_signal_buf,  # [nnodes * 2, ]
     intra_node_sync_signal_buf,  # [local_world_size, ]
     grid_sync_buf,  # [1, ]
     bs,
@@ -101,6 +101,13 @@ def kernel_pre_attn_qkv_pack_a2a(
         # step 0: inter-node p2p(between gpu with same id)
         if target_node_id != node_id:
             if pid == 0:
+                # skip first round
+                if node_offset > 0:
+                    if thread_idx == 0:
+                        libshmem_device.signal_wait_until(p2p_signal_buf + NNODES + target_node_id,
+                                                          libshmem_device.NVSHMEM_CMP_EQ, 1)
+                    __syncthreads()
+
                 q_nbytes = (q_nheads_end - q_nheads_start) * local_seq * K_HEAD_DIM * q_elem_size
                 k_nbytes = (kv_nheads_end - kv_nheads_start) * local_seq * K_HEAD_DIM * k_elem_size
                 v_nbytes = (kv_nheads_end - kv_nheads_start) * local_seq * V_HEAD_DIM * v_elem_size
@@ -162,6 +169,19 @@ def kernel_pre_attn_qkv_pack_a2a(
             recv_p2p_v_buf_src_node_base = send_v_buf + kv_nheads_start_src_node * local_seq * K_HEAD_DIM
 
         membar(scope="gl")
+
+        # for nxt round
+        if pid == 0:
+            if node_offset + 2 < NNODES:
+                nxt_step_src_node = (node_id - node_offset - 2 + NNODES) % NNODES
+                if thread_idx == 0:
+                    libshmem_device.signal_op(
+                        p2p_signal_buf + NNODES + node_id,
+                        1,
+                        libshmem_device.NVSHMEM_SIGNAL_SET,
+                        local_rank + nxt_step_src_node * LOCAL_WORLD_SIZE,
+                    )
+                __syncthreads()
 
         tl.static_assert(K_HEAD_DIM == triton.next_power_of_2(K_HEAD_DIM))
         tl.static_assert(V_HEAD_DIM == triton.next_power_of_2(V_HEAD_DIM))
@@ -459,7 +479,7 @@ class UlyssesSPPreAttnCommContext:
     recv_out_k_buf: torch.Tensor  # [bs, seq, local_kv_nheads, k_head_dim]
     recv_out_v_buf: torch.Tensor  # [bs, seq, local_kv_nheads, v_head_dim]
 
-    p2p_signal_buf: torch.Tensor  # [nnodes, ], zero init
+    p2p_signal_buf: torch.Tensor  # [2 * nnodes, ], zero init
     intra_node_sync_signal_buf: torch.Tensor  # [local_world_size] zero init
     grid_sync_buf: torch.Tensor  # [1, ]
 
@@ -556,9 +576,12 @@ def create_ulysses_sp_pre_attn_comm_context(bs: int, max_seq: int, q_nheads: int
     recv_out_q_buf = nvshmem_create_tensor([bs, max_seq, local_q_nheads, k_head_dim], dtype)
     recv_out_k_buf = nvshmem_create_tensor([bs, max_seq, local_kv_nheads, k_head_dim], dtype)
     recv_out_v_buf = nvshmem_create_tensor([bs, max_seq, local_kv_nheads, v_head_dim], dtype)
-
+    """
+        p2p-signal-buf[:nnodes] is used to notify the receiver,
+        p2p-signal-buf[nnodes:] is used to notify the next round sender.
+    """
     p2p_signal_buf = nvshmem_create_tensor([
-        nnodes,
+        nnodes * 2,
     ], NVSHMEM_SIGNAL_DTYPE)
     p2p_signal_buf.zero_()
     intra_node_sync_signal_buf = nvshmem_create_tensor([
@@ -643,7 +666,7 @@ def pre_attn_qkv_pack_a2a_op(ctx: UlyssesSPPreAttnCommContext, q, k, v, skip_q_a
         ctx.recv_out_q_buf,  # [bs, seq, local_q_nheads, k_head_dim]
         ctx.recv_out_k_buf,  # [bs, seq, local_kv_nheads, k_head_dim]
         ctx.recv_out_v_buf,  # [bs, seq, local_kv_nheads, v_head_dim]
-        ctx.p2p_signal_buf,  # [nnodes, ]
+        ctx.p2p_signal_buf,  # [nnodes * 2, ]
         ctx.intra_node_sync_signal_buf,
         ctx.grid_sync_buf,
         bs,
