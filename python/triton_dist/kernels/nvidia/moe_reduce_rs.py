@@ -443,7 +443,7 @@ def reduce_topk_reduce_scatter_a2a_intra_node_kernel(
             out_ptr = tl.multiple_of(out_ptr, 16)
             reduce_topk_kernel(
                 input_this_chunk_ptr + peer * ntokens_per_rank * TOPK * stride_m,
-                expert_weight_ptr,
+                expert_weight_ptr + peer * ntokens_per_rank * TOPK if expert_weight_ptr is not None else None,
                 0,  # no scale
                 out_ptr + rank * ntokens_per_rank * stride_m,
                 ntokens_per_rank,

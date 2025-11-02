@@ -316,11 +316,11 @@ def reduce_topk_kernel(
 
         if scale_ptr:  # rely on the compiler to move scale_ptr out of for-loop
             reduced_topk = tl.load(inptrs, mask=mask)
-            weight = tl.load(scale_ptr + offs_m, mask=mask_m)[:, None]
+            weight = tl.load(scale_ptr + offs_m * TOPK, mask=mask_m)[:, None]
             reduced_topk = reduced_topk * weight
             for i in range(1, TOPK):
                 val = tl.load(inptrs + i * stride_m, mask=mask)
-                weight = tl.load(scale_ptr + offs_m + i, mask=mask_m)[:, None]
+                weight = tl.load(scale_ptr + offs_m * TOPK + i, mask=mask_m)[:, None]
                 reduced_topk += val * weight
         else:
             reduced_topk = tl.load(inptrs, mask=mask)
