@@ -25,7 +25,7 @@
 import triton
 import triton.language as tl
 import torch
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     tid,
     ntid,
     laneid,

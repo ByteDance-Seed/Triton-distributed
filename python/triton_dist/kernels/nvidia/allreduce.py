@@ -35,8 +35,8 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libnvshmem_device
 from triton_dist.kernels.allreduce import AllReduceMethod
-from triton.language.extra.cuda.language_extra import (__syncthreads, load_v2_b64, multimem_st_b64, ntid, pack_b32_v2,
-                                                       st_v4_b32, tid, multimem_ld_reduce_v4)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, load_v2_b64, multimem_st_b64, ntid,
+                                                            pack_b32_v2, st_v4_b32, tid, multimem_ld_reduce_v4)
 from triton.language.extra.cuda.utils import num_warps
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, barrier_all_intra_node_non_atomic_block, barrier_on_this_grid
 from triton_dist.kernels.nvidia.reduce_scatter import copy_continuous_kernel, kernel_ring_reduce_tma, kernel_ring_reduce_non_tma

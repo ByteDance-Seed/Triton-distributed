@@ -24,10 +24,10 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import tid, __syncthreads
+from triton_dist.language.extra.language_extra import tid, __syncthreads
 from .task_context import TaskBaseInfo, Scoreboard
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import (st_v4_b32, multimem_ld_reduce_v4)
+from triton_dist.language.extra.cuda.language_extra import (st_v4_b32, multimem_ld_reduce_v4)
 from triton.language.extra.cuda.utils import num_warps
 
 

@@ -33,7 +33,8 @@ import triton
 import triton.language as tl
 from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st, tid)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st,
+                                                            tid)
 from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor)
 
 

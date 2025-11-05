@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from cuda import cudart
 
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import __syncthreads, tid
+from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, nvshmem_create_tensors
 
 ##################################################

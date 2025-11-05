@@ -28,7 +28,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
+from triton_dist.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
 from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid)
 

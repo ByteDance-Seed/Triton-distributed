@@ -31,7 +31,7 @@ import torch.distributed
 
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     tid,
     multimem_ld_reduce_v4,
     st_v4_b32,

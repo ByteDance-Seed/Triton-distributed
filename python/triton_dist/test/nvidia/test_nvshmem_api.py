@@ -33,8 +33,8 @@ import torch.distributed
 
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import (__syncthreads, load_v4_u32, multimem_st_b32, multimem_st_v2,
-                                                       multimem_st_v4, ntid, st, tid, multimem_st_p_b32)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, load_v4_u32, multimem_st_b32, multimem_st_v2,
+                                                            multimem_st_v4, ntid, st, tid, multimem_st_p_b32)
 from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import (NVSHMEM_SIGNAL_DTYPE, has_nvshmemi_bc_built, initialize_distributed,
                                nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor,

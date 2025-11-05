@@ -26,7 +26,7 @@ import triton
 import triton.language as tl
 import triton_dist.language as tdl
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid, __syncthreads
+from triton_dist.language.extra.language_extra import tid, __syncthreads
 
 
 @triton.jit

@@ -29,7 +29,7 @@ from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, N
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import tid, __syncthreads, membar
+from triton_dist.language.extra.cuda.language_extra import tid, __syncthreads, membar
 from triton_dist.language.extra import libshmem_device
 
 

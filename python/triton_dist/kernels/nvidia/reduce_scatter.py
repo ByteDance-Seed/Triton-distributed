@@ -40,7 +40,7 @@ from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid, Barrier
 from triton_dist.utils import (CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, has_fullmesh_nvlink, has_tma,
                                launch_cooperative_grid_options, nvshmem_barrier_all_on_stream, nvshmem_create_tensors,
                                nvshmem_free_tensor_sync)
-from triton.language.extra.cuda.language_extra import tid, __syncthreads, ld, st, atomic_add
+from triton_dist.language.extra.language_extra import tid, __syncthreads, ld, st, atomic_add
 
 
 @dataclasses.dataclass

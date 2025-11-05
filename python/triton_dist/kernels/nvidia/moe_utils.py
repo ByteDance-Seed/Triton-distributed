@@ -27,7 +27,7 @@ import triton
 import triton.language as tl
 import torch
 from triton_dist.kernels.nvidia.common_ops import cooperative_barrier_on_this_grid, next_power_of_2, bisect_right_kernel_aligned
-from triton.language.extra.cuda.language_extra import __syncthreads
+from triton_dist.language.extra.language_extra import __syncthreads
 from triton_dist.utils import launch_cooperative_grid_options
 
 

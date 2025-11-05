@@ -35,7 +35,7 @@ import itertools
 
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, supports_p2p_native_atomic, torch_stream_max_priority
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, _wait_eq_cuda
-from triton.language.extra.cuda.language_extra import tid, __syncthreads, st
+from triton_dist.language.extra.language_extra import tid, __syncthreads, st
 
 
 @tlc.extern

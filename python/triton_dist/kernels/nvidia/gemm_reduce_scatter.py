@@ -30,7 +30,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, tid, st)
+from triton_dist.language.extra.language_extra import (__syncthreads, atomic_add, tid, st)
 from triton_dist.kernels.nvidia.reduce_scatter import (ReduceScatter2DContext, create_reduce_scater_2d_ctx,
                                                        reduce_scatter_2d_op, ring_reduce)
 from triton_dist.kernels.nvidia.gemm_rs_threadblock_swizzle import threadblock_swizzle_gemm_reduce_scatter_kernel

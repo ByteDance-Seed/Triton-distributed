@@ -33,8 +33,8 @@ from triton_dist.utils import (nvshmem_barrier_all_on_stream, nvshmem_create_ten
                                launch_cooperative_grid_options)
 from triton_dist.language.extra import libshmem_device
 from triton.language.extra.cuda.utils import num_warps
-from triton.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, multimem_ld_reduce_v4,
-                                                       multimem_st_v4, st_v4_b32, atomic_add)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, multimem_ld_reduce_v4,
+                                                            multimem_st_v4, st_v4_b32, atomic_add)
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid
 from triton_dist.utils import is_nvshmem_multimem_supported
 

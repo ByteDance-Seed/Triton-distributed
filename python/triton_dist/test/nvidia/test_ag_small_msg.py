@@ -32,7 +32,7 @@ import triton.language as tl
 import nvshmem.core
 from triton_dist.profiler_utils import perf_func
 from triton_dist.utils import dist_print, initialize_distributed, nvshmem_free_tensor_sync, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, requires_p2p_native_atomic, supports_p2p_native_atomic
-from triton.language.extra.cuda.language_extra import atomic_cas, tid
+from triton_dist.language.extra.language_extra import atomic_cas, tid
 
 
 @triton.jit

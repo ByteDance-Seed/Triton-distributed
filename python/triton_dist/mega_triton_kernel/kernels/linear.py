@@ -24,7 +24,7 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import st
+from triton_dist.language.extra.language_extra import st
 from .task_context import TaskBaseInfo, Scoreboard, TensorDesc
 
 

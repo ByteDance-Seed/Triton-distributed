@@ -29,7 +29,7 @@ import triton.language as tl
 import triton_dist.language as dl
 from typing import Optional, List
 from dataclasses import dataclass
-from triton.language.extra.cuda.language_extra import tid, st
+from triton_dist.language.extra.language_extra import tid, st
 
 from triton_dist.utils import (nvshmem_create_tensors, nvshmem_free_tensor_sync, NVSHMEM_SIGNAL_DTYPE)
 from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda, barrier_all_intra_node_non_atomic, nvshmem_barrier_all_on_stream

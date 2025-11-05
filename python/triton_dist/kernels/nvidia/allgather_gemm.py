@@ -31,7 +31,7 @@ import triton
 import triton.language as tl
 import triton_dist.tune
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import st, tid
+from triton_dist.language.extra.language_extra import st, tid
 from triton_dist.kernels.nvidia.ag_gemm_threadblock_swizzle import \
     threadblock_swizzle_allgather_gemm_kernel
 from triton_dist.kernels.nvidia.allgather import (AllGatherMethod, cp_engine_producer_all_gather_inter_node,

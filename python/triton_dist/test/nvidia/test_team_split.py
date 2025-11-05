@@ -30,7 +30,7 @@ import triton
 import triton.language as tl
 from triton_dist.utils import initialize_distributed, finalize_distributed
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.cuda.language_extra import tid
 
 
 @triton.jit

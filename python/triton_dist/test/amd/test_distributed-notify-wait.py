@@ -29,9 +29,8 @@ import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
 from triton_dist.kernels.amd.common_ops import barrier_all_with_ctx_on_stream
-from triton.language.extra.hip.libdevice import store_release_system, __syncthreads
 import pyrocshmem
-from triton.language.extra.hip.libdevice import thread_idx
+from triton_dist.language.extra.hip.language_extra import tid, st, __syncthreads
 from triton_dist.language.extra import libshmem_device
 
 
@@ -79,8 +78,8 @@ def producer_consumer_kernel(
             # TODO(zhengxuegui.0): use `dl.notify` instead of the libdevice.
             set_value = queue_repeat * 2 + 1
             set_value = set_value.to(tl.int32)
-            if thread_idx(0) == 0:
-                store_release_system(remote_signal_ptr + queue_offset, set_value)
+            if tid(0) == 0:
+                st(remote_signal_ptr + queue_offset, set_value, semantic="release", scope="system")
             __syncthreads()
     elif pid < NUM_PRODUCER_SMS + NUM_CONSUMER_SMS:
         #
@@ -103,8 +102,8 @@ def producer_consumer_kernel(
             __syncthreads()
             set_value = queue_repeat * 2 + 2
             set_value = set_value.to(tl.int32)
-            if thread_idx(0) == 0:
-                store_release_system(signal_ptr + queue_offset, set_value)
+            if tid(0) == 0:
+                st(signal_ptr + queue_offset, set_value, scope="system", semantic="release")
             __syncthreads()
     else:
         pass

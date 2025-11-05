@@ -26,7 +26,6 @@ import torch
 import dataclasses
 import triton
 import triton.language as tl
-from triton.language.extra.hip import libdevice
 from typing import List
 
 import pyrocshmem
@@ -177,7 +176,6 @@ def kernel_gemm_rs_producer_fuse_scatter(
     # pid_m = (pid_m + rank_swizzle_offset) % num_pid_m
     rank_offset = (rank_offset + rank + 1) % num_ranks
     pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
-    thread_idx = libdevice.thread_idx(axis=0)  # noqa: F841
 
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)

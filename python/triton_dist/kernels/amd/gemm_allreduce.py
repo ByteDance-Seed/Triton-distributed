@@ -30,7 +30,7 @@ import triton.language as tl
 import triton_dist.language as dl
 import pyrocshmem
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.hip.libdevice import store_release_system
+from triton_dist.language.extra.language_extra import st
 import triton_dist.tune
 from triton.runtime.driver import driver
 
@@ -171,7 +171,7 @@ def kernel_persistent_gemm_notify_ar(
         signal_offset = tile_id * world_size + rank
         for remote in range(world_size):
             remote_signal_ptr = dl.symm_at(tile_signal_ptr, remote)
-            store_release_system(remote_signal_ptr + signal_offset, 1)
+            st(remote_signal_ptr + signal_offset, 1, semantic="release", scope="system")
 
 
 @triton.jit

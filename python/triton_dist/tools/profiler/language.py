@@ -24,7 +24,7 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     st,
     pack_b32_v2,
 )

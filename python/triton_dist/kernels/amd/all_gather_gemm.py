@@ -32,7 +32,7 @@ import triton_dist.language as dl
 import triton_dist.tune
 from triton.runtime.driver import driver
 
-from triton.language.extra.hip.libdevice import store_release_system
+from triton_dist.language.extra.language_extra import st
 from hip import hip
 from triton_dist.utils import HIP_CHECK, launch_cooperative_grid_options
 from typing import Optional, List
@@ -137,9 +137,10 @@ def copy_kernel_2d(
                 old = tl.atomic_add(chunk_counters_ptr + prev_global_chunk_idx, local_count)
                 if old + local_count == prev_chunk_total_blocks:
                     target_barrier_ptr = tl.load(barrier_ptrs + target_rank).to(tl.pointer_type(tl.int32))
-                    store_release_system(
+                    st(
                         target_barrier_ptr + rank * NUM_CHUNKS_PER_RANK_M +
-                        (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1)
+                        (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1, semantic="release",
+                        scope="system")
             prev_global_chunk_idx = global_chunk_idx
             local_count = 1
 
@@ -163,9 +164,9 @@ def copy_kernel_2d(
         old = tl.atomic_add(chunk_counters_ptr + prev_global_chunk_idx, local_count)
         if old + local_count == last_chunk_total_blocks:
             target_barrier_ptr = tl.load(barrier_ptrs + target_rank).to(tl.pointer_type(tl.int32))
-            store_release_system(
+            st(
                 target_barrier_ptr + rank * NUM_CHUNKS_PER_RANK_M +
-                (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1)
+                (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1, semantic="release", scope="system")
 
 
 @triton.jit(do_not_specialize=["rank"])
@@ -262,7 +263,7 @@ def copy_kernel_2d_pull(
                     target_barrier_ptr = tl.load(barrier_ptrs + rank).to(tl.pointer_type(tl.int32))
                     chunk_idx_in_src_rank_m = prev_global_chunk_idx - src_rank * NUM_CHUNKS_PER_RANK_M
                     signal_ptr = target_barrier_ptr + src_rank * NUM_CHUNKS_PER_RANK_M + chunk_idx_in_src_rank_m
-                    store_release_system(signal_ptr, 1)
+                    st(signal_ptr, 1, semantic="release", scope="system")
             prev_global_chunk_idx = global_chunk_idx
             local_count = 1
 
@@ -288,7 +289,7 @@ def copy_kernel_2d_pull(
             target_barrier_ptr = tl.load(barrier_ptrs + rank).to(tl.pointer_type(tl.int32))
             chunk_idx_in_src_rank_m = prev_global_chunk_idx - src_rank * NUM_CHUNKS_PER_RANK_M
             signal_ptr = target_barrier_ptr + src_rank * NUM_CHUNKS_PER_RANK_M + chunk_idx_in_src_rank_m
-            store_release_system(signal_ptr, 1)
+            st(signal_ptr, 1, semantic="release", scope="system")
 
 
 def cp_engine_producer_all_gather_full_mesh_push_multi_stream(
@@ -746,9 +747,10 @@ def kernel_fused_ag_gemm(A, localA,  # Local tensor for this rank [M_per_rank, K
                     old = tl.atomic_add(chunk_counters_ptr + prev_global_chunk_idx, local_count)
                     if old + local_count == prev_chunk_total_blocks:
                         target_barrier_ptr = tl.load(barrier_ptrs + target_rank).to(tl.pointer_type(tl.int32))
-                        store_release_system(
+                        st(
                             target_barrier_ptr + rank * NUM_CHUNKS_PER_RANK_M +
-                            (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1)
+                            (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1, semantic="release",
+                            scope="system")
                 prev_global_chunk_idx = global_chunk_idx
                 local_count = 1
 
@@ -772,9 +774,10 @@ def kernel_fused_ag_gemm(A, localA,  # Local tensor for this rank [M_per_rank, K
             old = tl.atomic_add(chunk_counters_ptr + prev_global_chunk_idx, local_count)
             if old + local_count == last_chunk_total_blocks:
                 target_barrier_ptr = tl.load(barrier_ptrs + target_rank).to(tl.pointer_type(tl.int32))
-                store_release_system(
+                st(
                     target_barrier_ptr + rank * NUM_CHUNKS_PER_RANK_M +
-                    (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1)
+                    (prev_global_chunk_idx - target_rank * NUM_CHUNKS_PER_RANK_M), 1, semantic="release",
+                    scope="system")
 
     else:
         gemm_pid = global_pid - NUM_COMM_SMS

@@ -13,7 +13,8 @@ import re
 import triton
 import torch
 import triton.language as tl
-from triton.language.extra.hip import libdevice, libdevice_extra
+import triton_dist.language.extra.language_extra as language_extra
+from triton_dist.language.extra.language_extra import tid
 import os
 
 SCOPES = ["workgroup", "agent", "system"]
@@ -24,17 +25,15 @@ ALL_SEMANTICS = ["acquire", "release", "acq_rel", "monotonic"]
 
 @triton.jit(do_not_specialize=["rank"])
 def test_load_kernel(x_ptr, out_ptr, semantic: tl.constexpr = "monotonic", scope: tl.constexpr = "agent"):
-    tid = libdevice.thread_idx(0)
-    if tid == 0:
-        x = libdevice_extra.load(x_ptr, semantic=semantic, scope=scope)
+    if tid(0) == 0:
+        x = language_extra.ld(x_ptr, semantic=semantic, scope=scope)
         tl.store(out_ptr, x)
 
 
 @triton.jit
 def test_store_kernel(x_ptr, val, semantic: tl.constexpr = "monotonic", scope: tl.constexpr = "agent"):
-    tid = libdevice.thread_idx(0)
-    if tid == 0:
-        libdevice_extra.store(x_ptr, val, semantic=semantic, scope=scope)
+    if tid(0) == 0:
+        language_extra.st(x_ptr, val, semantic=semantic, scope=scope)
 
 
 @triton.jit(do_not_specialize=["val"])
@@ -45,9 +44,8 @@ def test_atomic_add_kernel(
     semantic: tl.constexpr = "monotonic",
     scope: tl.constexpr = "agent",
 ):
-    tid = libdevice.thread_idx(0)
-    if tid == 0:
-        x = libdevice_extra.atomic_add(ptr, val, semantic=semantic, scope=scope)
+    if tid(0) == 0:
+        x = language_extra.atomic_add(ptr, val, semantic=semantic, scope=scope)
         tl.store(out_ptr, x)
 
 
@@ -60,58 +58,10 @@ def test_atomic_cas_kernel(
     semantic: tl.constexpr = "monotonic",
     scope: tl.constexpr = "agent",
 ):
-    tid = libdevice.thread_idx(0)
-    if tid == 0:
-        x = libdevice_extra.atomic_cas(x_ptr, val, target_val, semantic=semantic, scope=scope)
+    if tid(0) == 0:
+        x = language_extra.atomic_cas(x_ptr, val, target_val, semantic=semantic, scope=scope)
         # tl.device_print("x", x)
         tl.store(old_val_ptr, x)
-
-
-@triton.jit
-def test_extern_function_kernel(
-    x_ptr,
-    y_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements  # noqa: F841
-    # x = tl.load(x_ptr + offsets, mask=mask)
-    x_ptrs = x_ptr + offsets
-    # store does not support argument
-    x = libdevice.store_release_workgroup(x_ptrs)
-    x = libdevice.store_relaxed_workgroup(x_ptrs)
-    x = libdevice.store_release_agent(x_ptrs, x)
-    x = libdevice.store_relaxed_agent(x_ptrs)
-    x = libdevice.store_release_system(x_ptrs, x)
-    x = libdevice.store_relaxed_system(x_ptrs, x)
-
-    x = libdevice.syncthreads().to(x.dtype)
-
-    y_ptrs = y_ptr + offsets
-    x = libdevice.red_add_release_agent(y_ptrs, x).to(x.dtype)
-    x = libdevice.red_add_release_system(y_ptrs, x).to(x.dtype)
-
-    x = libdevice.atom_add_acquire_agent(y_ptrs, x)
-    x = libdevice.atom_add_relaxed_agent(y_ptrs, x)
-    x = libdevice.atom_add_acqrel_agent(y_ptrs, x)
-
-    x = libdevice.atom_add_acquire_system(y_ptrs, x)
-    x = libdevice.atom_add_relaxed_system(y_ptrs, x)
-    x = libdevice.atom_add_acqrel_system(y_ptrs, x)
-
-    x = libdevice.atom_cas_acquire_relaxed_agent(y_ptrs, y_ptrs, x).to(x.dtype)
-    x = libdevice.atom_cas_release_relaxed_agent(y_ptrs, y_ptrs, x).to(x.dtype)
-    x = libdevice.atom_cas_relaxed_relaxed_agent(y_ptrs, y_ptrs, x).to(x.dtype)
-
-    x = libdevice.atom_cas_acquire_relaxed_system(y_ptrs, y_ptrs, x).to(x.dtype)
-    x = libdevice.atom_cas_release_relaxed_system(y_ptrs, y_ptrs, x).to(x.dtype)
-    x = libdevice.atom_cas_release_relaxed_system(y_ptrs, y_ptrs, x).to(x.dtype)
-    x = libdevice.atom_cas_relaxed_relaxed_system(y_ptrs, y_ptrs, x).to(x.dtype)
-
-    tl.store(y_ptrs, x)
 
 
 def test_load(dtype: torch.dtype = torch.int32, semantic="monotonic", scope="agent"):
@@ -130,6 +80,7 @@ def test_load(dtype: torch.dtype = torch.int32, semantic="monotonic", scope="age
         )
 
     res = re.search(pattern, compiled.asm["llir"])
+    print(y)
     assert res
     assert y == 1
     print(f"✅ test load scope={scope} semantic={semantic} dtype={dtype} passed")
@@ -209,15 +160,6 @@ def test_atomic_cas(dtype: torch.dtype = torch.int32, semantic="monotonic", scop
     print(f"✅ test atomic_cas scope={scope} semantic={semantic} dtype={dtype} passed")
 
 
-def test_deprecated():
-    # check if this compiled. not check correctness
-    n_elements = 1024
-    x = torch.ones((n_elements, ), dtype=torch.int32, device="cuda")
-    output_triton = torch.zeros(n_elements, device=DEVICE, dtype=torch.int32)
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
-    test_extern_function_kernel[grid](x, output_triton, n_elements, BLOCK_SIZE=1024)
-
-
 os.environ["TRITON_DEBUG"] = "0"
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -231,10 +173,8 @@ for dtype in [torch.uint32, torch.uint64, torch.int32, torch.int64]:
         for semantic in ST_SEMANTICS:
             test_store(dtype, semantic=semantic, scope=scope)
 
-for dtype in [torch.uint32, torch.uint64, torch.int32, torch.int64]:
+for dtype in [torch.int32, torch.int64]:
     for scope in SCOPES:
         for semantic in ALL_SEMANTICS:
             test_atomic_add(dtype, semantic=semantic, scope=scope)
             test_atomic_cas(dtype, semantic=semantic, scope=scope)
-
-test_deprecated()

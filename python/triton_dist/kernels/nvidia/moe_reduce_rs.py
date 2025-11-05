@@ -31,7 +31,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import __syncthreads, atomic_add, tid, st
+from triton_dist.language.extra.language_extra import __syncthreads, atomic_add, tid, st
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid, barrier_all_intra_node_atomic_cas_block
 from triton_dist.language.extra import libshmem_device
 from triton_dist.kernels.nvidia.moe_utils import calc_gather_scatter_index_triton, calc_gather_scatter_index_v2_triton, reduce_topk_non_tma_kernel

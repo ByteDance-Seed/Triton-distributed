@@ -24,7 +24,7 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import tid, st, ld_acquire, __syncthreads, ld
+from triton_dist.language.extra.language_extra import tid, st, __syncthreads, ld
 from triton.language.extra.cuda.utils import num_warps
 
 
@@ -132,7 +132,7 @@ class Scoreboard:
             num_signals = r - l
             sb_wait_base_ptr = self.scoreboard_table + l
             for i in range(lane_id, num_signals, self.WARP_SIZE):
-                while ld_acquire(sb_wait_base_ptr + i, "gpu") != self.TILE_READY_SIGNAL:
+                while ld(sb_wait_base_ptr + i, scope="gpu", semantic="acquire") != self.TILE_READY_SIGNAL:
                     pass
 
         __syncthreads()

@@ -29,17 +29,16 @@ import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
 from typing import Optional
 
-from triton.language.extra.hip.libdevice import thread_idx, __syncthreads
-from triton.language.extra.hip.libdevice_extra import load, atomic_add, sync_grid, atomic_cas
+from triton_dist.language.extra.hip.language_extra import load, atomic_add, sync_grid, atomic_cas, tid, __syncthreads
 from hip import hip
 from triton_dist.utils import HIP_CHECK
 
 
 @triton.jit
 def _is_cta_master():
-    thread_idx_x = thread_idx(0)
-    thread_idx_y = thread_idx(1)
-    thread_idx_z = thread_idx(2)
+    thread_idx_x = tid(0)
+    thread_idx_y = tid(1)
+    thread_idx_z = tid(2)
     return (thread_idx_x + thread_idx_y + thread_idx_z) == 0
 
 
@@ -115,16 +114,6 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
         unsafe_barrier_on_this_grid(ptr)
 
 
-@triton.jit
-def wait_eq_sys(barrier_ptr, value):
-    tid = thread_idx(axis=0)
-    if tid == 0:
-        while load(barrier_ptr, semantic="acquire", scope="system") != value:
-            pass
-
-    tl.debug_barrier()
-
-
 @triton.jit(do_not_specialize=["rank"])
 def barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs):
     for i in range(num_ranks):
@@ -140,16 +129,15 @@ def barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs):
 
 @triton.jit(do_not_specialize=["rank"])
 def barrier_all_ipc_kernel_v2(rank, num_ranks, comm_buf_base_ptrs):
-    tid = thread_idx(axis=0)
-    if tid < num_ranks:
-        remote_base_ptr = tl.load(comm_buf_base_ptrs + tid).to(tl.pointer_type(tl.int32))
+    if tid(0) < num_ranks:
+        remote_base_ptr = tl.load(comm_buf_base_ptrs + tid(0)).to(tl.pointer_type(tl.int32))
         while atomic_cas(remote_base_ptr + rank, 0, 1, semantic="release", scope="system") != 0:
             pass
     __syncthreads()
 
-    if tid < num_ranks:
+    if tid(0) < num_ranks:
         local_base_ptr = tl.load(comm_buf_base_ptrs + rank).to(tl.pointer_type(tl.int32))
-        while atomic_cas(local_base_ptr + tid, 1, 0, semantic="acquire", scope="system") != 1:
+        while atomic_cas(local_base_ptr + tid(0), 1, 0, semantic="acquire", scope="system") != 1:
             pass
     __syncthreads()
 

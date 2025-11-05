@@ -60,7 +60,7 @@ from triton_dist.mega_triton_kernel.kernels import *
 
 from triton_dist.mega_triton_kernel.kernels.task_context import Scoreboard
 from triton_dist.tools.profiler import Profiler
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.language_extra import tid
 
 @triton.jit
 def FETCH_TASK(work_queues, idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER=False):

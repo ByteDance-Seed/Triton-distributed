@@ -30,7 +30,7 @@ import triton
 import triton.language as tl
 from triton_dist.language.extra import libshmem_device
 
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     __syncthreads,
     pack_b32_v2,
     tid,
