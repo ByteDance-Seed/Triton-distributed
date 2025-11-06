@@ -83,6 +83,7 @@ else:
 # Some code from python/flux/util.py in flux project
 
 _TRITON_DIST_WORLD: torch.distributed.ProcessGroup = None
+_TRITON_DIST_LOCAL_WORLD_SIZE: int = None
 
 
 def CUDA_CHECK(err):
@@ -214,6 +215,9 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 8))
+    global _TRITON_DIST_LOCAL_WORLD_SIZE
+    _TRITON_DIST_LOCAL_WORLD_SIZE = LOCAL_WORLD_SIZE
     torch.cuda.set_device(LOCAL_RANK)
     torch.distributed.init_process_group(
         backend="cpu:gloo,cuda:nccl",
@@ -238,6 +242,11 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
 def get_triton_dist_world():
     global _TRITON_DIST_WORLD
     return _TRITON_DIST_WORLD
+
+
+def get_triton_dist_local_world_size():
+    global _TRITON_DIST_LOCAL_WORLD_SIZE
+    return _TRITON_DIST_LOCAL_WORLD_SIZE
 
 
 @contextmanager

@@ -43,7 +43,8 @@ import triton
 import triton_dist
 from triton_dist.utils import (is_cuda, get_nvshmem_hash, get_nvshmem_version, get_rocshmem_hash, get_rocshmem_version,
                                get_triton_dist_world, get_cpu_info_linux, triton_dist_key, warn_if_cuda_launch_blocking,
-                               get_bool_env, get_int_env, barrier_async, wait_until_max_gpu_clock_or_warning)
+                               get_bool_env, get_int_env, barrier_async, wait_until_max_gpu_clock_or_warning,
+                               get_triton_dist_local_world_size)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -345,7 +346,6 @@ class AutoTuner:
                     )
                 else:
                     raise ValueError(f"Duplicate keyword arguments {dups}, and autotune_allow_arg_overwrite is False.")
-
             if not autotune:
                 return self.fn(
                     *args,
@@ -359,6 +359,7 @@ class AutoTuner:
                 if timings is None or _autotune_always_tune():
                     logger.info(f"Tuning for key {key}")
                     autotune_pg = autotune_pg or get_triton_dist_world()
+                    local_world_size = get_triton_dist_local_world_size()
                     config_space = self.get_pruned_config(*args, **kwargs)
                     assert config_space
                     with log_to_file(self._get_tune_log_path(key, autotune_pg)):
@@ -368,7 +369,7 @@ class AutoTuner:
                         wait_until_max_gpu_clock_or_warning()
                         timings = self.tune(config_space, autotune_pg, *args, **kwargs)
                     # also save to cache
-                    if autotune_pg is None or autotune_pg.rank() == 0:
+                    if autotune_pg is None or autotune_pg.rank() % local_world_size == 0:
                         self.save_tune_config(key, timings)
 
                 timings.sort(key=lambda x: x[0])
