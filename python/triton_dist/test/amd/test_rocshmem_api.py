@@ -151,9 +151,10 @@ def test_rocshmem_basic():
     ctx = pyrocshmem.rocshmem_get_device_ctx()
     comm_buf = pyrocshmem.rocshmem_create_tensor((2, ), torch.int32)
 
-    torch.distributed.barrier()
+    # torch.distributed.barrier()
     _rocshmem_basic[(1, )](comm_buf, ctx, mype, npes)
-    torch.distributed.barrier()
+    # torch.distributed.barrier()
+    pyrocshmem.rocshmem_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
     torch.cuda.synchronize()
 
     print(f"mype#: {mype} comm_buffs: {comm_buf}")

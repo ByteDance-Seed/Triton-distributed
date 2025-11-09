@@ -96,6 +96,16 @@ def barrier_all_warp():
 
 
 @_shmem_module.dispatch
+def barrier_all_wave():
+    ...
+
+
+@_shmem_module.dispatch
+def barrier_all_wg():
+    ...
+
+
+@_shmem_module.dispatch
 def barrier(team):
     ...
 
@@ -171,7 +181,27 @@ def getmem_nbi(dest, source, bytes, pe):
 
 
 @_shmem_module.dispatch
+def getmem_nbi_wave(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def getmem_nbi_wg(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
 def getmem(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def getmem_wave(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def getmem_wg(dest, source, bytes, pe):
     ...
 
 
@@ -201,7 +231,27 @@ def putmem(dest, source, bytes, pe):
 
 
 @_shmem_module.dispatch
+def putmem_wave(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_wg(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
 def putmem_nbi(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_nbi_wave(dest, source, bytes, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_nbi_wg(dest, source, bytes, pe):
     ...
 
 
@@ -236,6 +286,26 @@ def putmem_signal_warp(dest, source, bytes, sig_addr, signal, sig_op, pe):
 
 
 @_shmem_module.dispatch
+def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+
+@_shmem_module.dispatch
+def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+    ...
+
+
+@_shmem_module.dispatch
 def signal_op(sig_addr, signal, sig_op, pe):
     ...
 
@@ -243,6 +313,10 @@ def signal_op(sig_addr, signal, sig_op, pe):
 @_shmem_module.dispatch
 def signal_wait_until(sig_addr, cmp_, cmp_val):
     ...
+
+
+# def wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
+#     ...
 
 
 # DON'T USE THIS. NVSHMEM 3.2.5 does not implement this
@@ -424,7 +498,6 @@ NVSHMEM_TEAM_GPU_LEADERS_INDEX = 5
 NVSHMEM_TEAMS_MIN = 6
 NVSHMEM_TEAM_INDEX_MAX = sys.maxsize
 
-
 # ROCSHMEM_CMPS (enum)
 ROCSHMEM_CMP_EQ = 0
 ROCSHMEM_CMP_NE = 1
@@ -436,50 +509,3 @@ ROCSHMEM_CMP_LE = 5
 # ROCSHMEM_SIGNAL_OPS (enum)
 ROCSHMEM_SIGNAL_SET = 0
 ROCSHMEM_SIGNAL_ADD = 1
-
-
-def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
-
-def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
-
-def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
-
-def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
-    ...
-
-def getmem_wave(dest, source, bytes, pe):
-    ...
-
-def getmem_wg(dest, source, bytes, pe):
-    ...
-
-def getmem_nbi_wave(dest, source, bytes, pe):
-    ...
-
-def getmem_nbi_wg(dest, source, bytes, pe):
-    ...
-
-
-def putmem_wave(dest, source, bytes, pe):
-    ...
-
-def putmem_wg(dest, source, bytes, pe):
-    ...
-
-def putmem_nbi_wave(dest, source, bytes, pe):
-    ...
-
-def putmem_nbi_wg(dest, source, bytes, pe):
-    ...
-
-# def wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
-#     ...
-
-def barrier_all_wave():
-    ...
-
-def barrier_all_wg():
-    ...

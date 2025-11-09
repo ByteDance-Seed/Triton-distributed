@@ -15,11 +15,12 @@ CLANG="${ROCM_PATH}/lib/llvm/bin/clang++"
 CLANG_FLAGS=(
     -x hip
     --cuda-device-only
-    -std=c++17
+    -std=c++20
     -emit-llvm
     --offload-arch=${BITCODE_LIB_ARCH}
     -I${ROCSHMEM_INSTALL_DIR}/include
     -I${ROCSHMEM_INSTALL_DIR}/../
+    -I${ROCSHMEM_SRC}/src
     -I${OMPI_DIR}/include
 )
 
