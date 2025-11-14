@@ -66,6 +66,7 @@ if is_cuda():
     from nvshmem.core.utils import _get_device
 elif is_hip():
     from hip import hip
+    import pyrocshmem
 else:
     pass
 
@@ -201,7 +202,10 @@ def initialize_distributed(seed=None) -> torch.distributed.ProcessGroup:
     torch.distributed.barrier(_TP_GROUP_GLOO)
 
     init_seed(seed=seed if seed is not None else RANK)
-    init_nvshmem_by_torch_process_group(_TP_GROUP_GLOO)
+    if is_cuda():
+        init_nvshmem_by_torch_process_group(_TP_GROUP_GLOO)
+    elif is_hip():
+        pyrocshmem.init_rocshmem_by_uniqueid(_TP_GROUP_GLOO)
     return _TP_GROUP
 
 
