@@ -279,5 +279,15 @@ if __name__ == "__main__":
     dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    # Explicitly delete rocSHMEM-backed tensors before finalization
+    # without explicit cleanup, rocshmem barrier_all collective operation 
+    # is called during python shutdown when some ranks may already have exited,
+    # which may cause segfaults.
+    del dist_ag_gemm_op
+    del input, weight, bias
+    del torch_output, dist_triton_output
+    torch.cuda.synchronize()
+    torch.distributed.barrier()
+
     pyrocshmem.rocshmem_finalize()
     torch.distributed.destroy_process_group()
