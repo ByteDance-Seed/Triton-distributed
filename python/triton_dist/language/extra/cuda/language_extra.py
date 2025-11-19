@@ -26,6 +26,7 @@
 import triton
 import triton.language as tl
 from triton.language import core
+from triton_dist.language import vector, make_vector
 
 
 @core.extern
@@ -140,11 +141,18 @@ def tma_sync(N: core.constexpr = core.constexpr(0), _semantic=None):
 
 
 @core.extern
-def _load_v4_impl(ptr, suffix: core.constexpr, _semantic=None):
+def _load_v4_impl(ptr, suffix: core.constexpr, scope: core.constexpr = "", semantic: core.constexpr = "",
+                  _semantic=None):
     val_type: core.constexpr = _ptx_suffix_to_tl_type(suffix, _semantic=_semantic)
     c: core.constexpr = _ptx_suffix_to_constraint(suffix, _semantic=_semantic)
+    scope = core._unwrap_if_constexpr(scope)
+    semantic = core._unwrap_if_constexpr(semantic)
+    if scope != "":
+        scope = f".{scope}"
+    if semantic != "":
+        semantic = f".{semantic}"
     return tl.inline_asm_elementwise(
-        asm=f"ld.volatile.global.v4.{suffix.value} {{$0,$1,$2,$3}}, [$4];",
+        asm=f"ld.global{semantic}{scope}.v4.{suffix.value} {{$0,$1,$2,$3}}, [$4];",
         constraints=(f"={c.value},={c.value},={c.value},={c.value},l"),
         args=[ptr],
         dtype=(val_type, val_type, val_type, val_type),
@@ -175,8 +183,8 @@ def load_v4_u32(ptr, _semantic=None):
 
 
 @core.extern
-def load_v4_b32(ptr, _semantic=None):
-    return _load_v4_impl(ptr, core.constexpr("b32"), _semantic=_semantic)
+def load_v4_b32(ptr, scope: core.constexpr = "", semantic: core.constexpr = "", _semantic=None):
+    return _load_v4_impl(ptr, core.constexpr("b32"), scope, semantic, _semantic=_semantic)
 
 
 @core.extern
@@ -190,11 +198,18 @@ def load_v2_b64(ptr, _semantic=None):
 
 
 @core.extern
-def _store_v4_impl(ptr, val0, val1, val2, val3, suffix: core.constexpr, _semantic=None):
+def _store_v4_impl(ptr, val0, val1, val2, val3, suffix: core.constexpr, scope="gpu", semantic="relaxed",
+                   _semantic=None):
     c: core.constexpr = _ptx_suffix_to_constraint(suffix, _semantic=_semantic)
+    scope = core._unwrap_if_constexpr(scope)
+    semantic = core._unwrap_if_constexpr(semantic)
+    if scope != "":
+        scope = f".{scope}"
+    if semantic != "":
+        semantic = f".{semantic}"
     return tl.inline_asm_elementwise(
         asm=f"""
-        st.volatile.global.v4.{suffix.value} [$1], {{$2,$3,$4,$5}};
+        st.global{semantic}{scope}.v4.{suffix.value} [$1], {{$2,$3,$4,$5}};
         mov.u32 $0, 0;
         """,
         constraints=(f"=r,l,{c.value},{c.value},{c.value},{c.value}"),  # no use output
@@ -230,9 +245,9 @@ def st_v4_u32(ptr, val0, val1, val2, val3, _semantic=None):
 
 
 @core.extern
-def st_v4_b32(ptr, val0, val1, val2, val3, _semantic=None):
+def st_v4_b32(ptr, val0, val1, val2, val3, scope="", semantic="", _semantic=None):
     return _store_v4_impl(tl.cast(ptr, tl.pi32_t, _semantic=_semantic), val0, val1, val2, val3, core.constexpr("b32"),
-                          _semantic=_semantic)
+                          scope=scope, semantic=semantic, _semantic=_semantic)
 
 
 @core.extern
@@ -583,9 +598,13 @@ def ld(
     )
     element_ty: tl.dtype = ptr.dtype.element_ty
     constraint = _int_constraint(core.constexpr(element_ty.primitive_bitwidth), _semantic=_semantic)
+    if semantic != "":
+        semantic = f".{semantic}"
+    if scope != "":
+        scope = f".{scope}"
     # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-ld
     return tl.inline_asm_elementwise(
-        asm=f"ld.global.{semantic}.{scope}.b{element_ty.primitive_bitwidth} $0, [$1];",
+        asm=f"ld.global{semantic}{scope}.b{element_ty.primitive_bitwidth} $0, [$1];",
         constraints=f"={constraint.value},l",
         args=[ptr],
         dtype=ptr.dtype.element_ty,
@@ -593,6 +612,60 @@ def ld(
         pack=1,
         _semantic=_semantic,
     )
+
+
+@core.extern
+def ld_vector(
+    ptr,
+    vec_size: core.constexpr = 1,
+    scope: core.constexpr = "",
+    semantic: core.constexpr = "",
+    _semantic=None,
+):
+    assert isinstance(vec_size, tl.constexpr)
+
+    elems_bits = ptr.dtype.element_ty.primitive_bitwidth
+    total_bits: tl.constexpr = elems_bits * vec_size
+    if total_bits % 128 == 0:
+        # currently user need to guarantee the alignment of `ptr`.
+        ptr_i32 = tl.cast(ptr, tl.pi32_t, _semantic=_semantic)
+        vals_i32 = []
+        num_iters = total_bits // 128
+        for idx in range(num_iters):
+            val0, val1, val2, val3 = load_v4_b32(tl.add(ptr_i32, idx * 4, _semantic=_semantic), scope=scope,
+                                                 semantic=semantic, _semantic=_semantic)
+            vals_i32 += [val0, val1, val2, val3]
+        return make_vector(vals_i32, _semantic=_semantic).recast(ptr.dtype.element_ty, _semantic=_semantic)
+
+    else:
+        ret = []
+        for i in range(vec_size):
+            ret.append(ld(tl.add(ptr, i, _semantic=_semantic), scope=scope, semantic=semantic, _semantic=_semantic))
+        return make_vector(ret, _semantic=_semantic)
+
+
+@core.extern
+def st_vector(
+        ptr,
+        vec,
+        scope: core.constexpr = core.constexpr(""),
+        semantic: core.constexpr = core.constexpr(""),
+        _semantic=None,
+):
+    assert ptr.dtype.element_ty == vec.type.elem_type, f"ptr.dtype.element_ty {ptr.dtype.element_ty} != vec.type.elem_type {vec.type.elem_type}"
+    assert isinstance(vec, vector)
+    total_bits = vec.type.vector_nbits
+    if total_bits % 128 == 0:
+        vec_i32 = vec.recast(tl.uint32, _semantic=_semantic)
+        ptr_i32 = tl.cast(ptr, tl.pointer_type(tl.uint32), _semantic=_semantic)
+        vals_i32 = [tl.cast(val, tl.uint32, _semantic=_semantic) for val in vec_i32]
+        num_iters = total_bits // 128
+        for idx in range(num_iters):
+            st_v4_b32(tl.add(ptr_i32, idx * 4, _semantic=_semantic), *vals_i32[idx * 4:(idx + 1) * 4], scope=scope,
+                      semantic=semantic, _semantic=_semantic)
+    else:
+        for idx, v in enumerate(vec):
+            st(tl.add(ptr, idx, _semantic=_semantic), v, scope=scope, semantic=semantic, _semantic=_semantic)
 
 
 @core.extern
@@ -618,44 +691,57 @@ def st(
         semantic: core.constexpr = core.constexpr("relaxed"),
         _semantic=None,
 ):
-    tl.static_assert(
-        ptr.dtype.is_ptr() and ptr.dtype.element_ty.is_int(),
-        "st(ptr, val) argument 0 `ptr` should be a pointer of int type",
-        _semantic=_semantic,
-    )
-    dtype = ptr.dtype.element_ty
-    if isinstance(val, core.constexpr):
-        val = tl.cast(val.value, dtype, _semantic=_semantic)
+    if isinstance(val, vector):
+        st_vector(ptr, val, scope, semantic, _semantic=_semantic)
     else:
-        val = tl.cast(val, dtype, _semantic=_semantic)
+        int_dtype = core.get_int_dtype(ptr.dtype.element_ty.primitive_bitwidth, signed=False)
+        if isinstance(val, core.constexpr) and ptr.dtype.element_ty.is_int():
+            val = tl.cast(val.value, int_dtype, _semantic=_semantic)
+        elif val.dtype.primitive_bitwidth == ptr.dtype.element_ty.primitive_bitwidth:
+            val = tl.cast(val, int_dtype, bitcast=True, _semantic=_semantic)
+        ptr = tl.cast(ptr, core.pointer_type(int_dtype), _semantic=_semantic)
+        tl.static_assert(
+            ptr.dtype.is_ptr() and ptr.dtype.element_ty.is_int(),
+            "st(ptr, val) argument 0 `ptr` should be a pointer of int type",
+            _semantic=_semantic,
+        )
+        dtype = ptr.dtype.element_ty
+        if isinstance(val, core.constexpr):
+            val = tl.cast(val.value, dtype, _semantic=_semantic)
+        else:
+            val = tl.cast(val, dtype, _semantic=_semantic)
 
-    tl.static_assert(val.dtype.is_int(), "st(ptr, val) argument `val` should be of int type", _semantic=_semantic)
+        tl.static_assert(val.dtype.is_int(), "st(ptr, val) argument `val` should be of int type", _semantic=_semantic)
 
-    if isinstance(scope, core.constexpr):
-        scope = scope.value
-    if isinstance(semantic, core.constexpr):
-        semantic = semantic.value
-    tl.static_assert(scope in ["gpu", "sys"], "scope should be gpu or sys", _semantic=_semantic)
-    tl.static_assert(
-        semantic in ["relaxed", "release"],
-        "semantic should be relaxed or release",
-        _semantic=_semantic,
-    )
-    constraint = _int_constraint(core.constexpr(dtype.primitive_bitwidth), _semantic=_semantic)
-    # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-st
-    # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#volatile-operation
-    return tl.inline_asm_elementwise(
-        asm=f"""
-        st.{semantic}.{scope}.global.b{dtype.primitive_bitwidth} [$1], $2;
-        mov.u32 $0, 0;
-        """,
-        constraints=(f"=r,l,{constraint.value}"),  # no use output
-        args=[ptr, val],
-        dtype=tl.int32,  # never used
-        is_pure=False,
-        pack=1,
-        _semantic=_semantic,
-    )
+        if isinstance(scope, core.constexpr):
+            scope = scope.value
+        if isinstance(semantic, core.constexpr):
+            semantic = semantic.value
+        tl.static_assert(scope in ["gpu", "sys"], "scope should be gpu or sys", _semantic=_semantic)
+        tl.static_assert(
+            semantic in ["relaxed", "release"],
+            "semantic should be relaxed or release",
+            _semantic=_semantic,
+        )
+        constraint = _int_constraint(core.constexpr(dtype.primitive_bitwidth), _semantic=_semantic)
+        # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-st
+        # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#volatile-operation
+        if semantic != "":
+            semantic = f".{semantic}"
+        if scope != "":
+            scope = f".{scope}"
+        return tl.inline_asm_elementwise(
+            asm=f"""
+            st.global{semantic}{scope}.b{dtype.primitive_bitwidth} [$1], $2;
+            mov.u32 $0, 0;
+            """,
+            constraints=(f"=r,l,{constraint.value}"),  # no use output
+            args=[ptr, val],
+            dtype=tl.int32,  # never used
+            is_pure=False,
+            pack=1,
+            _semantic=_semantic,
+        )
 
 
 @core.extern
@@ -912,6 +998,58 @@ def pack_b32_v2(val0, val1, _semantic=None):
         pack=1,
         _semantic=_semantic,
     )
+
+
+@core.extern
+def pack(src: vector, dst_type, _semantic=None):
+    assert isinstance(src, vector)
+    dst_nbits = dst_type.primitive_bitwidth
+    src_elem_dtype = src.type.elem_type
+    assert src.type.vector_nbits == dst_type.primitive_bitwidth, f"src.type.vector_nbits {src.type.vector_nbits} != dst_type.primitive_bitwidth {dst_type.primitive_bitwidth}"
+    src_elem_int_ty = core.get_int_dtype(src_elem_dtype.primitive_bitwidth, False)
+    src = src.recast(src_elem_int_ty, _semantic=_semantic)
+
+    dst_constraint = _int_constraint(core.constexpr(dst_nbits), _semantic=_semantic).value
+    src_constraint = _int_constraint(core.constexpr(src_elem_dtype.primitive_bitwidth), _semantic=_semantic).value
+
+    src_operands = [f'${i + 1}' for i in range(src.type.vec_size)]
+    src_constraints = [src_constraint for i in range(src.type.vec_size)]
+    asm = f"mov.b{dst_nbits} $0, {{{', '.join(src_operands)}}};"
+    constraints = f"={dst_constraint},{', '.join(src_constraints)}"
+    return tl.inline_asm_elementwise(
+        asm=asm,
+        constraints=constraints,
+        args=src.values,
+        dtype=dst_type,
+        is_pure=False,
+        pack=1,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def unpack(src, dst_type, _semantic=None):
+    src_nbits = src.dtype.primitive_bitwidth
+    dst_nbits = dst_type.primitive_bitwidth
+    assert src_nbits % dst_nbits == 0, f"src_nbits {src_nbits} %dst_nbits {dst_nbits}!= 0"
+    num_elements = src_nbits // dst_nbits
+    dst_constraint = _int_constraint(core.constexpr(dst_nbits), _semantic=_semantic).value
+    src_constraint = _int_constraint(core.constexpr(src_nbits), _semantic=_semantic).value
+
+    dst_operands = [f'${i}' for i in range(num_elements)]
+    dst_constraints = ['=' + dst_constraint for i in range(num_elements)]
+    asm = f"mov.b{src_nbits} {{{', '.join(dst_operands)}}}, ${num_elements};"
+    constraints = f"{','.join(dst_constraints)}, {src_constraint}"
+    vals = tl.inline_asm_elementwise(
+        asm=asm,
+        constraints=constraints,
+        args=[src],
+        dtype=tuple([dst_type for _ in range(num_elements)]),
+        is_pure=False,
+        pack=1,
+        _semantic=_semantic,
+    ).values
+    return vector(vals)
 
 
 __all__ = [

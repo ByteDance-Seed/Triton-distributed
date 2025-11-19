@@ -31,6 +31,7 @@ from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
 from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid)
+from triton_dist.language.extra.language_extra import threads_per_warp
 
 
 ########## triton kernels ##########
@@ -164,7 +165,7 @@ def kernel_combine_token(
     num_warps: tl.constexpr,
 ):
     tl.static_assert(hidden_size <= BLOCK_SIZE, "BLOCK_SIZE must be larger than hidden_size")
-    WARP_SIZE = 32
+    WARP_SIZE = threads_per_warp()
 
     rank = dl.rank()
     world_size = dl.num_ranks()
@@ -176,6 +177,7 @@ def kernel_combine_token(
     token_block_offs = tl.arange(0, BLOCK_SIZE)
     token_mask = (token_block_offs[:] < hidden_size)
     thread_idx = tid(0)
+    lane_id = thread_idx % WARP_SIZE
     total_warps = num_warps * num_pid
     warp_id = thread_idx // WARP_SIZE
     global_warp_id = pid * num_warps + warp_id
@@ -218,23 +220,44 @@ def kernel_combine_token(
 
     num_dispatch_token_cur_rank = tl.load(num_input_tokens_per_rank + rank)
     # for current node
-    for token_idx in range(pid, num_dispatch_token_cur_rank, num_pid):
-        token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
-        for j in range(topk):
-            expert_idx = tl.load(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
-            expert_rank = expert_idx // expert_per_rank
-            expert_node_idx = expert_rank // local_world_size
+    # for token_idx in range(pid, num_dispatch_token_cur_rank, num_pid):
+    #     token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+    #     for j in range(topk):
+    #         expert_idx = tl.load(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
+    #         expert_rank = expert_idx // expert_per_rank
+    #         expert_node_idx = expert_rank // local_world_size
 
-            if expert_node_idx == node_id:
-                token_scatter_idx = tl.load(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
-                remote_input_ptr = dl.symm_at(input_buf, expert_rank)
-                remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
-                token = tl.load(remote_input_ptr + token_scatter_idx * hidden_size + token_block_offs,
-                                mask=token_mask).to(tl.float32)
-                token_accum = token_accum + token
+    #         if expert_node_idx == node_id:
+    #             token_scatter_idx = tl.load(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
+    #             remote_input_ptr = dl.symm_at(input_buf, expert_rank)
+    #             remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
+    #             token = tl.load(remote_input_ptr + token_scatter_idx * hidden_size + token_block_offs,
+    #                             mask=token_mask).to(tl.float32)
+    #             token_accum = token_accum + token
 
-        tl.store(send_buf + (node_id * max_tokens + token_idx) * hidden_size + token_block_offs,
-                 token_accum.to(send_buf.dtype.element_ty), token_mask)
+    #     tl.store(send_buf + (node_id * max_tokens + token_idx) * hidden_size + token_block_offs,
+    #              token_accum.to(send_buf.dtype.element_ty), token_mask)
+
+    for token_idx in range(global_warp_id, num_dispatch_token_cur_rank, total_warps):
+        # token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+        vec_size: tl.constexpr = 128 // send_buf.dtype.element_ty.primitive_bitwidth
+        tl.static_assert(hidden_size % vec_size == 0)
+        for i in range(lane_id * vec_size, hidden_size, WARP_SIZE * vec_size):
+            token_accum = dl.zeros_vector(vec_size, tl.float32)
+            for j in range(topk):
+                expert_idx = ld(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
+                expert_rank = expert_idx // expert_per_rank
+                expert_node_idx = expert_rank // local_world_size
+
+                if expert_node_idx == node_id:
+                    token_scatter_idx = ld(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
+                    remote_input_ptr = dl.symm_at(input_buf, expert_rank)
+                    remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
+                    token = dl.ld_vector(remote_input_ptr + token_scatter_idx * hidden_size + i,
+                                         vec_size=vec_size).to(tl.float32)
+                    token_accum = token_accum + token.to(tl.float32)
+            dl.st_vector(send_buf + (node_id * max_tokens + token_idx) * hidden_size + i,
+                         token_accum.to(send_buf.dtype.element_ty))
 
 
 @triton.jit(do_not_specialize=["nelems"])

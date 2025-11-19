@@ -428,7 +428,7 @@ if __name__ == "__main__":
     input_dtype = DTYPE_MAP[args.dtype]
     weight_dtype = DTYPE_MAP[args.weight_dtype]
     triton_a2a_op = EPAll2AllLayer(EP_GROUP, args.M, args.N, args.topk, RANK, args.G, LOCAL_WORLD_SIZE, WORLD_SIZE,
-                                   input_dtype, weight_dtype=weight_dtype)
+                                   input_dtype, weight_dtype=weight_dtype, num_sm=args.sm_margin)
 
     def _make_data(token_num):
         exp_indices = generate_random_exp_indices(token_num, args.G, args.topk, args.drop_ratio)

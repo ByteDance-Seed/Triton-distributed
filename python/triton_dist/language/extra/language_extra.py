@@ -25,6 +25,7 @@
 import triton_dist.language.extra.cuda.language_extra as cuda_language_extra
 import triton_dist.language.extra.hip.language_extra as hip_language_extra
 from triton_dist.utils import is_cuda, is_hip
+from triton_dist.language import vector
 from triton.language import core
 from .utils import ModuleProxy
 
@@ -61,6 +62,27 @@ def ld(ptr, scope, semantic):
 
 @_extra_module.dispatch
 def st(ptr, val, scope, semantic):
+    ...
+
+
+# TODO(zhengxuegui.0): introduce ld/st ops in the simt dialect
+@_extra_module.dispatch
+def ld_vector(ptr, vec_size: core.constexpr, scope, semantic):
+    ...
+
+
+@_extra_module.dispatch
+def st_vector(ptr, vec: vector, scope, semantic):
+    ...
+
+
+@_extra_module.dispatch
+def pack(src, dst_type):
+    ...
+
+
+@_extra_module.dispatch
+def unpack(src, dst_type):
     ...
 
 

@@ -28,7 +28,7 @@ import triton.language as tl
 
 from typing import List
 from triton_dist.language.extra import libshmem_device
-from triton_dist.language.extra.cuda.language_extra import tid, atomic_add_per_warp, __syncthreads, membar, pack_b32_v2, ld, st, load_v4_u32, st_v4_u32
+from triton_dist.language.extra.cuda.language_extra import tid, atomic_add_per_warp, __syncthreads, membar, pack_b32_v2, ld, st
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid
 import triton_dist.language as dl
@@ -445,8 +445,8 @@ def combine_kernel_v2(
                     VEC_SIZE: tl.constexpr = 16 // ELEMENT_SIZE
                     num_hidden_iters = HIDDEN // VEC_SIZE
                     for h_idx in range(lane_id, num_hidden_iters, WARP_SIZE):
-                        val0, val1, val2, val3 = load_v4_u32(src_ptr + h_idx * VEC_SIZE)
-                        st_v4_u32(dst_remote_ptr + h_idx * VEC_SIZE, val0, val1, val2, val3)
+                        val_vec = dl.ld_vector(src_ptr + h_idx * VEC_SIZE, vec_size=VEC_SIZE)
+                        dl.st_vector(dst_remote_ptr + h_idx * VEC_SIZE, val_vec)
 
         libshmem_device.fence()
         __syncthreads()
