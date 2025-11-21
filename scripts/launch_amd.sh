@@ -19,6 +19,7 @@ esac
 
 export TRITON_CACHE_DIR=triton_cache
 export ROCSHMEM_HOME=${ROCSHMEM_ROOT}
+export ROCSHMEM_BACKEND=${ROCSHMEM_BACKEND:=IPC}
 
 ## AMD env vars
 export TRITON_HIP_USE_BLOCK_PINGPONG=1 # for gemm perf
@@ -40,7 +41,6 @@ else
 fi
 
 additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
-
 CMD="torchrun \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
