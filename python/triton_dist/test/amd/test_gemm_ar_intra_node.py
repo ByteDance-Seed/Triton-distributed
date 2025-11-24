@@ -176,4 +176,9 @@ if __name__ == "__main__":
     speedup = duration_ms_torch / duration_ms_triton
     dist_print(f"Speedup: {speedup:0.2f}x", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
+    # Explicitly delete rocSHMEM-backed tensors before finalization
+    # without explicit cleanup, rocshmem barrier_all collective operation
+    # is called during python shutdown when some ranks may already have exited,
+    # which may cause segfaults.
+    del ctx, a, b, triton_output
     finalize_distributed()

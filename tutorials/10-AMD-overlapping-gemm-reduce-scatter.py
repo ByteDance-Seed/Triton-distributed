@@ -455,6 +455,11 @@ if __name__ == "__main__":
         )
         dist_print("❌ Triton and Torch differ")
 
+    # Explicitly delete rocSHMEM-backed tensors before finalization
+    # without explicit cleanup, rocshmem barrier_all collective operation
+    # is called during python shutdown when some ranks may already have exited,
+    # which may cause segfaults.
+    del dist_gemm_rs_op, input, weight, bias, tri_out
     pyrocshmem.rocshmem_finalize()
     # Finally destroy distributed process group.
     destroy()

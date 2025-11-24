@@ -70,4 +70,9 @@ if __name__ == "__main__":
     _, duration_ms = perf_func(fn, iters=10, warmup_iters=5)
     print(f"barrier_all v2 {duration_ms * 1000:0.2f} us/iter")
 
+    # Explicitly delete rocSHMEM-backed tensors before finalization
+    # without explicit cleanup, rocshmem barrier_all collective operation
+    # is called during python shutdown when some ranks may already have exited,
+    # which may cause segfaults.
+    del signals
     finalize_distributed()
