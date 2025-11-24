@@ -31,6 +31,7 @@ import torch
 import pyrocshmem
 from hip import hip
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
 from triton_dist.profiler_utils import get_torch_prof_ctx
@@ -44,7 +45,7 @@ LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 
 def test_rocshmem_device():
 
-    @triton.jit
+    @triton_dist.jit
     def _rocshmem_device(comm_buf, ctx, ptr):
         libshmem_device.set_rocshmem_ctx(ctx)
         mype = dl.rank()
@@ -56,7 +57,7 @@ def test_rocshmem_device():
         comm_buf += 1
         tl.store(comm_buf, npes)
 
-    @triton.jit
+    @triton_dist.jit
     def _rocshmem_put(ptr, ctx):
         libshmem_device.set_rocshmem_ctx(ctx)
 
@@ -66,7 +67,7 @@ def test_rocshmem_device():
 
         libshmem_device.int_p(ptr, mype, peer)
 
-    @triton.jit
+    @triton_dist.jit
     def _rocshmem_get_put_symm_at(local_ptr, ctx):
         libshmem_device.set_rocshmem_ctx(ctx)
 

@@ -28,6 +28,7 @@ from typing import List, Optional
 import torch
 
 import triton
+import triton_dist
 import triton.language as tl
 import triton_dist.tune
 import triton_dist.language as dl
@@ -80,7 +81,7 @@ def copy_kernel(
         tl.store(dst_ptr, data, mask=mask_dst)
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "flag_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "flag_value"])
 def copy_and_barrier_all_intra_node_kernel(
     local_rank,
     rank,
@@ -160,7 +161,7 @@ def _matmul_launch_metadata(grid, kernel, args):
     return ret
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata)
+@triton_dist.jit(launch_metadata=_matmul_launch_metadata)
 def kernel_consumer_gemm_persistent(a_ptr, b_ptr, c_ptr,  #
                                     M, N, K,  #
                                     rank: tl.constexpr, num_ranks: tl.constexpr, ready_ptr,
@@ -300,8 +301,8 @@ def _kernel_consumer_gemm_non_persistent_repr(proxy):
     return f"triton3x_sm{cap_major}{cap_minor}_ag_gemm_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_{a_trans}{b_trans}{c_trans}"
 
 
-@triton.jit(do_not_specialize=["rank"], launch_metadata=_matmul_launch_metadata,
-            repr=_kernel_consumer_gemm_non_persistent_repr)
+@triton_dist.jit(do_not_specialize=["rank"], launch_metadata=_matmul_launch_metadata,
+                 repr=_kernel_consumer_gemm_non_persistent_repr)
 def kernel_consumer_gemm_non_persistent(
         # Pointers to matrices
         a_ptr, b_ptr, c_ptr,

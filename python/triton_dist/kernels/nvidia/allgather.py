@@ -34,8 +34,8 @@ import nvshmem.core
 import torch
 from cuda import cudart
 
-import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda, _wait_eq_cuda
 from triton_dist.language.extra import libshmem_device
@@ -291,7 +291,7 @@ def cp_engine_producer_all_gather_ring_push_2d_inter_node(
                 _set_signal_cuda(barrier_buffers[to_rank][segment], 1, intranode_stream)
 
 
-@triton.jit(do_not_specialize=["rank", "local_world_size", "world_size"])
+@triton_dist.jit(do_not_specialize=["rank", "local_world_size", "world_size"])
 def nvshmem_device_producer_all_gather_2d_put_block_kernel(
     ag_buffer_ptr,
     signal_buffer_ptr,
@@ -353,7 +353,7 @@ def nvshmem_device_producer_all_gather_2d_put_block_kernel(
         )
 
 
-@triton.jit
+@triton_dist.jit
 def nvshmem_device_producer_p2p_put_block_kernel(
     ag_buffer_ptr,
     signal_buffer_ptr,

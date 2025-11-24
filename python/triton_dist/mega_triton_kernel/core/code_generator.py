@@ -55,6 +55,7 @@ def make_mega_kernel_src(tasks_dispatch_code: str, task_types_and_str: Dict[int,
 
     src = f"""
 import triton
+import triton_dist
 import triton.language as tl
 from triton_dist.mega_triton_kernel.kernels import *
 
@@ -62,7 +63,7 @@ from triton_dist.mega_triton_kernel.kernels.task_context import Scoreboard
 from triton_dist.tools.profiler import Profiler
 from triton_dist.language.extra.language_extra import tid
 
-@triton.jit
+@triton_dist.jit
 def FETCH_TASK(work_queues, idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER=False):
     sm_id = tl.program_id(axis=0)
     TASK_TYPE_OFFSET = 0
@@ -96,7 +97,7 @@ def FETCH_TASK(work_queues, idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENA
     return task_base_info
 
 
-@triton.jit
+@triton_dist.jit
 def MEGA_TRITON_KERNEL(
     {"profiler_buf, # ensor<uint64>" if enable_profiling else ""}
     work_queue_start, # [1, ] int32, init with zero

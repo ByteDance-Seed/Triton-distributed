@@ -29,6 +29,7 @@ import torch
 
 import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda
 import triton_dist.language as dl
 from triton_dist.language.extra.language_extra import __syncthreads
@@ -41,7 +42,7 @@ from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, launch_cooperative_grid_options, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def _copy_and_reset_and_barrier_all_kernel(
     local_data_ptr,  # [M_per_rank, K]
     out_data_ptr,  # [M_per_rank, K]

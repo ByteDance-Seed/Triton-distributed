@@ -28,13 +28,14 @@ from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, N
 
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra.cuda.language_extra import tid, __syncthreads, membar
 from triton_dist.language.extra import libshmem_device
 
 
 # assume that bs == 1
-@triton.jit(do_not_specialize=["bs", "seq"])
+@triton_dist.jit(do_not_specialize=["bs", "seq"])
 def kernel_pre_attn_qkv_pack_a2a(
     q,  # [bs, seq // P, q_nheads, k_head_dim]
     k,  # [bs, seq // P, kv_nheads, k_head_dim]
@@ -275,7 +276,7 @@ def kernel_pre_attn_qkv_pack_a2a(
 
 
 # src/dst has added offset in batch and nheads dimension
-@triton.jit
+@triton_dist.jit
 def _kernel_inner_tile_copy(
     src_base_ptr,
     dst_base_ptr,
@@ -301,7 +302,7 @@ def _kernel_inner_tile_copy(
 
 
 # [batch, seq, nheads, head_dim] -> [batch, nheads, seq, head_dim]
-@triton.jit(do_not_specialize=["bs", "seq"])
+@triton_dist.jit(do_not_specialize=["bs", "seq"])
 def kernel_qkv_bsnd_to_bnsd(
     q,  # [bs, seq, q_nheads, k_head_dim]
     k,  # [bs, seq, kv_nheads, k_head_dim]

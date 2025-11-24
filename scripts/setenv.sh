@@ -30,6 +30,15 @@ fi
 OMPI_BUILD=${SCRIPT_DIR}/shmem/rocshmem_bind/ompi_build/install/ompi
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${NVSHMEM_HOME}/lib:${OMPI_BUILD}/lib
+
+NVSHMEM_SRC_DIR=${NVSHMEM_SRC_DIR:-$HOME/.cache/nvshmem_src}
+if [ -d "${NVSHMEM_SRC_DIR}/build/src/lib" ]; then
+  NVSHMEM_SRC_HOME="${NVSHMEM_SRC_DIR}/build/src"
+  export LD_LIBRARY_PATH=${NVSHMEM_SRC_HOME}/lib:$LD_LIBRARY_PATH
+  export NVSHMEM_SRC_HOME=${NVSHMEM_SRC_HOME}
+  echo "NVSHMEM_SRC_HOME=${NVSHMEM_SRC_HOME}"
+fi
+
 export NVSHMEM_DISABLE_CUDA_VMM=1 # moving from cpp to shell
 export NVSHMEM_BOOTSTRAP=UID
 

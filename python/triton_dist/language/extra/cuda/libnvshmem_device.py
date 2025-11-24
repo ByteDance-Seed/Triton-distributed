@@ -232,7 +232,7 @@ def _barrier_impl(team, SCOPE_SUFFIX: core.constexpr, _semantic=None):
         "",
         [team],
         {
-            (tl.int32, ): (f"nvshmem{'x' if SCOPE_SUFFIX.value else ''}_barrier{SCOPE_SUFFIX.value}", ()),
+            (tl.int32, ): (f"nvshmem{'x' if SCOPE_SUFFIX.value else ''}_barrier{SCOPE_SUFFIX.value}", tl.int32),
         },
         is_pure=False,
         _semantic=_semantic,
@@ -333,7 +333,7 @@ def _team_sync_impl(team, SCOPE_SUFFIX: core.constexpr, _semantic=None):
         "",
         [team],
         {
-            (tl.int32, ): (f"nvshmemx_team_sync{SCOPE_SUFFIX.value}", ()),
+            (tl.int32, ): (f"nvshmemx_team_sync{SCOPE_SUFFIX.value}", tl.int32),
         },
         is_pure=False,
         _semantic=_semantic,

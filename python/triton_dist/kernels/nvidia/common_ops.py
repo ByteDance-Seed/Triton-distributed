@@ -31,6 +31,7 @@ import torch
 
 import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE
 import triton_dist.language as dl
 from triton_dist.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st,
@@ -139,7 +140,7 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
         unsafe_barrier_on_this_grid(ptr)
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
 def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, symm_flag_ptr):
     """ NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
     """
@@ -156,7 +157,7 @@ def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, 
         __syncthreads()
 
 
-@triton.jit
+@triton_dist.jit
 def _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, local_world_size, symm_flags, target_value):
     with dl.simt_exec_region() as (thread_idx, block_size):
         if thread_idx < local_world_size:  # thread_idx => local_rank
@@ -168,7 +169,7 @@ def _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, local_world_
         __syncthreads()
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_flags, target_value):
     """ symm_flags is expected to:
         1. of int32 dtype
@@ -183,7 +184,7 @@ def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_fl
     _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags + num_ranks, target_value)
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, target_value,
                                       use_cooperative: tl.constexpr):
     """ symm_flags is expected to:

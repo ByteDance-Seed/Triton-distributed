@@ -24,7 +24,6 @@
 ################################################################################
 import torch
 
-import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
@@ -32,9 +31,10 @@ from triton_dist.kernels.amd.common_ops import barrier_all_with_ctx_on_stream
 import pyrocshmem
 from triton_dist.language.extra.hip.language_extra import tid, st, __syncthreads
 from triton_dist.language.extra import libshmem_device
+import triton_dist
 
 
-@triton.jit
+@triton_dist.jit
 def producer_consumer_kernel(
     ctx,
     rank: tl.constexpr,

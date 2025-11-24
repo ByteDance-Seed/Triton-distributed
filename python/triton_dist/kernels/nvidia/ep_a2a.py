@@ -26,6 +26,7 @@
 import torch
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
@@ -35,7 +36,7 @@ from triton_dist.language.extra.language_extra import threads_per_warp
 
 
 ########## triton kernels ##########
-@triton.jit
+@triton_dist.jit
 def kernel_dispatch_token(
     send_reqs_for_nodes,
     signals_for_nodes,
@@ -145,7 +146,7 @@ def kernel_dispatch_token(
                             expert_rank)
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_combine_token(
     counter_ptr,
     num_input_tokens_per_rank,  # [world_size]
@@ -260,7 +261,7 @@ def kernel_combine_token(
                          token_accum.to(send_buf.dtype.element_ty))
 
 
-@triton.jit(do_not_specialize=["nelems"])
+@triton_dist.jit(do_not_specialize=["nelems"])
 def copy_1d_tilewise_kernel(dst_ptr, src_ptr,  #
                             nelems,  #
                             BLOCK_SIZE: tl.constexpr,  #
@@ -282,7 +283,7 @@ def copy_1d_tilewise_kernel(dst_ptr, src_ptr,  #
             tl.store(dst_ptr + offs, data, mask=mask)
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
+@triton_dist.jit(do_not_specialize=["num_tokens"])
 def kernel_get_ag_splits_and_recv_offset(num_tokens,  # int
                                          send_reqs_for_nodes, send_reqs_recv_bufs,
                                          send_reqs_recv_bufs_copy,  # torch tensor, [nnodes, 2, max_tokens]
@@ -465,7 +466,7 @@ def kernel_get_ag_splits_and_recv_offset(num_tokens,  # int
             __syncthreads()
 
 
-@triton.jit(do_not_specialize=["length"])
+@triton_dist.jit(do_not_specialize=["length"])
 def kernel_bincount(
     n,
     input,
@@ -479,6 +480,77 @@ def kernel_bincount(
             val = ld(input + i)
             if val < length:
                 atomic_add(output + val, 1, scope="gpu", semantic="relaxed")
+
+
+@triton_dist.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
+def kernel_get_dispatch_send_reqs(
+    workspace,  # [NUM_SM * BLOCK_SIZE]
+    exp_indices,  # [num_tokens, topk]
+    send_reqs_for_nodes,  # [nnodes, 2, max_num_tokens], init with -1
+    num_tokens,
+    max_num_tokens,
+    topk: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    experts_per_rank: tl.constexpr,
+    local_world_size: tl.constexpr,
+):
+    expert_per_node = experts_per_rank * local_world_size
+
+    world_size = dl.num_ranks()
+    rank = dl.rank()
+    nnodes = world_size // local_world_size
+    cur_node_id = rank // local_world_size
+    total_experts = experts_per_rank * world_size
+    pid = tl.program_id(axis=0)
+    num_pid = tl.num_programs(axis=0)
+    tiles_per_node = tl.cdiv(num_tokens, BLOCK_SIZE)
+    num_tiles = tiles_per_node * nnodes
+    PADDED_TOPK: tl.constexpr = triton.next_power_of_2(topk)
+    offs_token = tl.arange(0, BLOCK_SIZE)
+    offs_topk = tl.arange(0, PADDED_TOPK)
+    thread_idx = tid(0)
+    for tile_id in range(pid, num_tiles, num_pid):
+        target_node_id = tile_id // tiles_per_node
+        tile_id_token = tile_id % tiles_per_node
+        # skip current node(no rdma request)
+        if target_node_id != cur_node_id:
+            offs = (offs_token[:, None] + tile_id_token * BLOCK_SIZE) * topk + offs_topk[None, :]
+            mask = (offs_token[:, None] + tile_id_token * BLOCK_SIZE < num_tokens) & (offs_topk[None, :] < topk)
+            # the `other` should be equal to or greater than total_experts
+            expert_idx = tl.load(exp_indices + offs, mask=mask, other=total_experts)
+            node_idx = expert_idx // expert_per_node
+            send_token_mask = tl.where(node_idx == target_node_id, 1,
+                                       0).to(exp_indices.dtype.element_ty)  # [BLOCK_SIZE, PADDED_TOPK]
+            send_token_mask = tl.sum(send_token_mask, axis=1)  # [BLOCK_SIZE, ]
+            send_token_mask = tl.where(send_token_mask > 0, 1, 0).to(exp_indices.dtype.element_ty)  # [BLOCK_SIZE, ]
+            tl.store(workspace + pid * BLOCK_SIZE + offs_token, send_token_mask)
+            __syncthreads()
+
+            if thread_idx == 0:
+                num_tokens_cur_tile = min(num_tokens - tile_id_token * BLOCK_SIZE, BLOCK_SIZE)
+                token_start = -1
+                token_end = 0
+                has_start = False
+                token_mask_base_ptr = workspace + pid * BLOCK_SIZE
+                send_reqs_base_ptr = send_reqs_for_nodes + target_node_id * 2 * max_num_tokens
+                cnt = 0
+                for i in range(num_tokens_cur_tile):
+                    token_mask = ld(token_mask_base_ptr + i)
+                    if token_mask == 0:
+                        if has_start:
+                            has_start = False
+                            token_end = i + tile_id_token * BLOCK_SIZE
+                            st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt + max_num_tokens, token_end)
+                            cnt += 1
+                    else:
+                        if not has_start:
+                            has_start = True
+                            token_start = i + tile_id_token * BLOCK_SIZE
+                            st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt, token_start)
+                if has_start:
+                    st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt + max_num_tokens,
+                       num_tokens_cur_tile + tile_id_token * BLOCK_SIZE)
+            __syncthreads()
 
 
 ########################################

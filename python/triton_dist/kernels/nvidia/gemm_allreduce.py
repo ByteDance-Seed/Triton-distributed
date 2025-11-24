@@ -27,6 +27,7 @@ import dataclasses
 from typing import List
 import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.kernels.allreduce import OverlappingAllReduceMethod, get_auto_all_reduce_method
 import triton_dist.language as dl
 from triton_dist.utils import (nvshmem_barrier_all_on_stream, nvshmem_create_tensor, nvshmem_free_tensor_sync,
@@ -135,7 +136,7 @@ def create_ll_gemm_ar_context(rank, world_size, local_world_size, max_M, N, dtyp
     return LLGemmARContext(ctxs=ctxs, num_phases=num_phases, phase=0)
 
 
-@triton.jit(do_not_specialize=[])
+@triton_dist.jit(do_not_specialize=[])
 def consumer_all_reduce_kernel(
     symm_input_ptr,
     symm_ar_out_ptr,
@@ -222,7 +223,7 @@ def consumer_all_reduce_kernel(
             st(peer_gemm_barrier_ptr + tile_id, 0, scope="sys", semantic="relaxed")
 
 
-@triton.jit(do_not_specialize=[])
+@triton_dist.jit(do_not_specialize=[])
 def consumer_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, ar_out_ptr,  #
                                           gemm_barrier_ptr, M, N: tl.constexpr,  #
                                           BLOCK_SIZE_M: tl.constexpr,  #
@@ -286,7 +287,7 @@ def consumer_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, ar_ou
             tl.store(ar_out_ptr + row_offset + column_offset, c, mask=mask)
 
 
-@triton.jit(do_not_specialize=[])
+@triton_dist.jit(do_not_specialize=[])
 def consumer_ring_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, ar_out_ptr,  #
                                                gemm_barrier_ptr, M, N: tl.constexpr,  #
                                                BLOCK_SIZE_M: tl.constexpr,  #
@@ -346,7 +347,7 @@ def consumer_ring_all_reduce_load_store_kernel(symm_input_ptr, symm_ar_out_ptr, 
             tl.store(dst_ptr, data, mask=mask)
 
 
-@triton.jit(do_not_specialize=["nelems"])
+@triton_dist.jit(do_not_specialize=["nelems"])
 def copy_1d_tilewise_kernel(src_ptr, dst_ptr,  #
                             nelems,  #
                             BLOCK_SIZE: tl.constexpr,  #
@@ -368,7 +369,7 @@ def copy_1d_tilewise_kernel(src_ptr, dst_ptr,  #
             tl.store(dst_ptr + offs, data, mask=mask)
 
 
-@triton.jit
+@triton_dist.jit
 def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     group_id = tile_id // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -378,7 +379,7 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     return pid_m, pid_n
 
 
-@triton.jit(do_not_specialize=[])
+@triton_dist.jit(do_not_specialize=[])
 def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr, tile_barrier_ptr,  #
                                   M, N, K,  #
                                   stride_am, stride_ak,  #
@@ -475,7 +476,7 @@ def kernel_persistent_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr, tile_ba
                         st(gemm_barrier_ptr + barrier_id, 1, scope="gpu", semantic="release")
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                                       M, N, K,  #
                                       stride_am, stride_ak,  #
@@ -551,7 +552,7 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                 st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
 
 
-@triton.jit(do_not_specialize=[])
+@triton_dist.jit(do_not_specialize=[])
 def kernel_fused_gemm_allreduce(a_ptr, b_ptr, c_ptr,  #
                                 symm_ar_out_ptr, ar_out_ptr,  #
                                 gemm_barrier_ptr, multi_st_barrier_ptr, grid_barrier_ptr, tile_barrier_ptr,  #

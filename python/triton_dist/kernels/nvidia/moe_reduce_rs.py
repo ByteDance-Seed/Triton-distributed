@@ -31,6 +31,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
+import triton_dist
 from triton_dist.language.extra.language_extra import __syncthreads, atomic_add, tid, st
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid, barrier_all_intra_node_atomic_cas_block
 from triton_dist.language.extra import libshmem_device
@@ -544,7 +545,7 @@ def moe_gather_rs_grouped_gemm(
     return C
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def reduce_topk_reduce_scatter_a2a_intra_node_kernel(
     input_ptr,  # of shape [ntokens * topk, N] with stride [stride_m, stride_n]
     # output
@@ -618,7 +619,7 @@ def reduce_topk_reduce_scatter_a2a_intra_node_kernel(
         barrier_all_intra_node_atomic_cas_block(rank, rank, num_ranks, symm_barrier_ptr)
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def reduce_topk_reduce_scatter_ring_intra_node_kernel(
     input_ptr,  # of shape [ntokens * topk, N] with stride [stride_m, stride_n]
     expert_weight_ptr,  # not used actually. accumulate in Grouped GEMM

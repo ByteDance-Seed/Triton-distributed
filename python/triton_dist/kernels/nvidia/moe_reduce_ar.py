@@ -29,6 +29,7 @@ import warnings
 import torch
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra.language_extra import __syncthreads, atomic_add, tid, st, ld
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid
@@ -558,7 +559,7 @@ def moe_gather_ar_grouped_gemm(
     return C
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def reduce_topk_allreduce_kernel(
     grouped_gemm_out_ptr,  # [ntokens*topk, N]
     symm_reduce_buffer,  # [ntokens, N] - local reduction buffer

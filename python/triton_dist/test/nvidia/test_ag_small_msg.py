@@ -30,6 +30,7 @@ import triton
 import triton_dist.language as dl
 import triton.language as tl
 import nvshmem.core
+import triton_dist
 from triton_dist.profiler_utils import perf_func
 from triton_dist.utils import dist_print, initialize_distributed, nvshmem_free_tensor_sync, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, requires_p2p_native_atomic, supports_p2p_native_atomic
 from triton_dist.language.extra.language_extra import atomic_cas, tid
@@ -64,7 +65,7 @@ def kernel_ag_intra_node_nvlink_small_msg_split_msg(
             )
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_ag_intra_node_nvlink_small_msg_split_rank(
     rank,
     num_ranks: tl.constexpr,

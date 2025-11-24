@@ -25,6 +25,7 @@
 import triton
 import torch
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
 from typing import Optional
@@ -142,7 +143,7 @@ def barrier_all_ipc_kernel_v2(rank, num_ranks, comm_buf_base_ptrs):
     __syncthreads()
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def barrier_all_kernel(rank, num_ranks, comm_buf_ptr):
     for i in range(num_ranks):
         remote_base_ptr = dl.symm_at(comm_buf_ptr, i)
@@ -157,7 +158,7 @@ def barrier_all_kernel(rank, num_ranks, comm_buf_ptr):
     tl.debug_barrier()
 
 
-@triton.jit
+@triton_dist.jit
 def barrier_all_with_ctx_kernel(ctx, rank, num_ranks, comm_buf_ptr):
     libshmem_device.set_rocshmem_ctx(ctx)
     barrier_all_kernel(rank, num_ranks, comm_buf_ptr)

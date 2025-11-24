@@ -23,9 +23,9 @@
 #
 ################################################################################
 import torch
-import triton
 import triton.language as tl
 import triton_dist.language as dl
+import triton_dist
 import nvshmem.core
 from triton_dist.profiler_utils import perf_func
 from triton_dist.test.utils import assert_allclose
@@ -35,7 +35,7 @@ import os
 
 
 # all gather(pull mode)
-@triton.jit
+@triton_dist.jit
 def all_gather_kernel(
     ag_ptr,
     n_elements,

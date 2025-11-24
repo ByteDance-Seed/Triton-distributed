@@ -27,6 +27,7 @@ import dataclasses
 from typing import List
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 import pyrocshmem
 from triton_dist.language.extra import libshmem_device
@@ -107,7 +108,7 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M):
     return pid_m, pid_n
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_persistent_gemm_notify_ar(
     a_ptr,
     b_ptr,
@@ -174,7 +175,7 @@ def kernel_persistent_gemm_notify_ar(
             st(remote_signal_ptr + signal_offset, 1, semantic="release", scope="system")
 
 
-@triton.jit
+@triton_dist.jit
 def consumer_all_reduce_kernel(symm_buf_ptr, tile_signal_ptr, ctx,  # rocshmem context
                                M, N, stride_cm, stride_cn, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
                                GROUP_SIZE_M: tl.constexpr, NUM_COMM_SMS: tl.constexpr):

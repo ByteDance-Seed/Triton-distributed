@@ -31,8 +31,8 @@ import nvshmem.core
 import torch
 import torch.distributed
 
-import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.language.extra.cuda.language_extra import (__syncthreads, load_v4_u32, multimem_st_b32, multimem_st_v2,
                                                             multimem_st_v4, ntid, st, tid, multimem_st_p_b32)
 from triton_dist.language.extra import libshmem_device
@@ -65,7 +65,7 @@ def conditional_execution(condition_func):
 
 def test_nvshmem_basic():
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_basic(output):
         thread_idx = tid(axis=0)
         if thread_idx == 0:
@@ -102,7 +102,7 @@ def test_nvshmem_basic():
 
 def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmemx_getmem(ptr, bytes_per_rank, scope: tl.constexpr, nbi: tl.constexpr):
         mype = libshmem_device.my_pe()
         pid = tl.program_id(axis=0)
@@ -198,7 +198,7 @@ def test_nvshmemx_getmem_with_scope(N, dtype: torch.dtype = torch.int8):
 
 def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmemx_putmem(
         ptr,
         elems_per_rank,
@@ -300,7 +300,7 @@ def test_nvshmemx_putmem_with_scope(N, dtype: torch.dtype = torch.int8):
 
 def test_nvshmem_signal():
 
-    @triton.jit
+    @triton_dist.jit
     def _pingpong(t, iters):
         # pingpong for rank 0-1, 2-3, ...
         mype = libshmem_device.my_pe()
@@ -344,7 +344,7 @@ def test_nvshmem_signal():
 
 def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmemx_putmem_signal(ptr, signal, bytes_per_rank, scope: tl.constexpr, nbi: tl.constexpr):
         mype = libshmem_device.my_pe()
         pid = tl.program_id(axis=0)
@@ -469,7 +469,7 @@ def test_nvshmemx_putmem_signal_with_scope(N, dtype: torch.dtype = torch.int8):
 def test_nvshmem_barrier_sync_quiet_fence():
     """only test runs, no result checked"""
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_barrier_sync_quiet_fence():
         pid = tl.program_id(axis=0)
         thread_idx = tid(axis=0)
@@ -488,7 +488,7 @@ def test_nvshmem_barrier_sync_quiet_fence():
         libshmem_device.quiet()
         libshmem_device.fence()
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_barrier_sync_quiet_fence_with_team(team):
         pid = tl.program_id(axis=0)
         thread_idx = tid(axis=0)
@@ -514,7 +514,7 @@ def test_nvshmem_barrier_sync_quiet_fence():
 
 def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_broadcast(dst, src, nbytes, scope: tl.constexpr):
         thread_idx = tid(axis=0)
         wid = thread_idx // 32
@@ -565,7 +565,7 @@ def test_nvshmem_broadcast(N, dtype: torch.dtype = torch.int8):
 
 def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_fcollect(dst, src, nbytes, scope: tl.constexpr):
         thread_idx = tid(axis=0)
         wid = thread_idx // 32
@@ -633,7 +633,7 @@ def test_nvshmem_fcollect(N, dtype: torch.dtype = torch.int8):
 @conditional_execution(is_nvshmem_multimem_supported)
 def test_nvshmem_multimem_st(N):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_multimem_st_v4(symm_ptr, nbytes):
         """ TODO(houqi.1993) it's expected that multimem.st.v3.fp32 is supported. but actually no. ptxas won't compile:
         https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-multimem """
@@ -647,7 +647,7 @@ def test_nvshmem_multimem_st(N):
             val0, val1, val2, val3 = load_v4_u32(symm_ptr + n * step)
             multimem_st_v4(mc_ptr + n * step, val0, val1, val2, val3)
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_multimem_st_v2(symm_ptr, nbytes):
         thread_idx = tid(axis=0)
         block_dim = ntid(axis=0)
@@ -660,7 +660,7 @@ def test_nvshmem_multimem_st(N):
             multimem_st_v2(mc_ptr + n * step, val0, val1)
             multimem_st_v2(mc_ptr + n * step + step // 2, val2, val3)
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_multimem_st_b32(symm_ptr, nbytes):
         thread_idx = tid(axis=0)
         block_dim = ntid(axis=0)
@@ -676,7 +676,7 @@ def test_nvshmem_multimem_st(N):
             multimem_st_b32(mc_ptr + n * 16 + 8, val2)
             multimem_st_b32(mc_ptr + n * 16 + 12, val3)
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmem_multimem_st_p_b32(symm_ptr, val):
         thread_idx = tid(axis=0)
         pid = tl.program_id(0)
@@ -715,7 +715,7 @@ def test_nvshmem_multimem_st(N):
 @conditional_execution(has_nvshmemi_bc_built)
 def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmemi_putmem_rma_kernel(
         ptr,
         elems_per_rank,
@@ -818,7 +818,7 @@ def test_nvshmemi_putmem_rma(N, dtype: torch.dtype = torch.int8):
 @conditional_execution(has_nvshmemi_bc_built)
 def test_nvshmemi_putmem_rma_signal_with_scope(N, dtype: torch.dtype = torch.int8):
 
-    @triton.jit
+    @triton_dist.jit
     def _nvshmemi_putmem_rma_signal_kernel(ptr, signal, bytes_per_rank, scope: tl.constexpr, nbi: tl.constexpr):
         mype = libshmem_device.my_pe()
         pid = tl.program_id(axis=0)

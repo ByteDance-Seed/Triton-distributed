@@ -49,6 +49,7 @@ from cuda import cudart
 
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.kernels.common_ops import set_signal, wait_eq
 from triton_dist.kernels.nvidia.allgather_gemm import create_ag_gemm_context
@@ -265,7 +266,7 @@ def inter_node_allgather(local_tensor: torch.Tensor,
 # Let's declare a function to perform internode communication.
 
 
-@triton.jit
+@triton_dist.jit
 def nvshmem_device_producer_p2p_put_block_kernel(
     ag_buffer_ptr,  # *Pointer* to allgather output vector. The rank-th index has been loaded with local tensor
     signal_buffer_ptr,  # *Pointer* to signal barrier.

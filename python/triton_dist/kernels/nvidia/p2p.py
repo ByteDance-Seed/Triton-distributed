@@ -22,14 +22,14 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as tdl
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.language_extra import tid, __syncthreads
 
 
-@triton.jit
+@triton_dist.jit
 def p2p_set_signal(
     signal_ptr,
     remote_pe,
@@ -43,7 +43,7 @@ def p2p_set_signal(
     __syncthreads()
 
 
-@triton.jit
+@triton_dist.jit
 def p2p_wait_signal(
     signal_ptr,
     remote_pe,
@@ -62,7 +62,7 @@ def p2p_wait_signal(
     __syncthreads()
 
 
-@triton.jit
+@triton_dist.jit
 def p2p_copy_kernel(
     src_ptr,
     src_pe,
@@ -85,7 +85,7 @@ def p2p_copy_kernel(
     )
 
 
-@triton.jit
+@triton_dist.jit
 def p2p_put_kernel(
     src_ptr,
     dst_ptr,
@@ -115,7 +115,7 @@ def p2p_put_kernel(
     )
 
 
-@triton.jit
+@triton_dist.jit
 def p2p_copy_remote_to_local_kernel(
     src_ptr,
     src_pe,

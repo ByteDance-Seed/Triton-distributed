@@ -32,6 +32,7 @@ from typing import Optional
 
 import itertools
 
+import triton_dist
 import triton_dist.language as tdl
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, _wait_eq_cuda
@@ -425,7 +426,7 @@ def matmul(a, b, c, gemm_barrier, gemm_config: triton.Config):
     return c
 
 
-@triton.jit(do_not_specialize=["rank", "sp_rank"])
+@triton_dist.jit(do_not_specialize=["rank", "sp_rank"])
 def kernel_all2all_pull_intra_node_nvl(
     gemm_out_ptr,
     gemm_barrier_ptr,

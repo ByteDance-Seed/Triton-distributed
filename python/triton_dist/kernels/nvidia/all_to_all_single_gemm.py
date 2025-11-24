@@ -26,6 +26,7 @@
 import torch
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from typing import Optional, List
 from dataclasses import dataclass
@@ -277,7 +278,7 @@ def create_all_to_all_single_gemm_context(max_m: int, n: int, k: int, rank: int,
     )
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "flag_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "flag_value"])
 def barrier_all_intra_node_kernel(
     local_rank,
     rank,

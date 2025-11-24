@@ -33,6 +33,7 @@ import triton_dist.language as dl
 from typing import Optional
 import itertools
 
+import triton_dist
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, supports_p2p_native_atomic, torch_stream_max_priority
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, _wait_eq_cuda
 from triton_dist.language.extra.language_extra import tid, __syncthreads, st
@@ -412,7 +413,7 @@ def matmul(sp_rank, sp_size, a, b, c, gemm_barrier, gemm_config: triton.Config):
     return c
 
 
-@triton.jit(do_not_specialize=["rank", "sp_rank"])
+@triton_dist.jit(do_not_specialize=["rank", "sp_rank"])
 def kernel_all2all_push_intra_node_nvl(
     attn_out_ptr,
     a2a_out_ptr,

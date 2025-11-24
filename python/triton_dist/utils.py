@@ -145,6 +145,10 @@ def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     # nvshmem.core.utils._configure_logging("DEBUG")
 
 
+def is_shmem_initialized() -> bool:
+    return _TRITON_DIST_WORLD is not None
+
+
 def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
     torch.cuda.synchronize()
     # NVSHMEM doesn't support fp8 dtypes, use int8 as storage
@@ -482,7 +486,11 @@ def get_rocshmem_version():
 
 
 def _get_rocshmem_libdevice():
-    return Path(triton.backends.__path__[0]) / "amd" / "lib" / "librocshmem_device.bc"
+    if os.getenv("ROCSHMEM_HOME") is not None:
+        rocshmem_lib_dir = Path(os.getenv("ROCSHMEM_HOME")) / "lib"
+    else:
+        rocshmem_lib_dir = Path(triton_dist.__path__[0]) / "tools" / "compile"
+    return rocshmem_lib_dir / "librocshmem_device.bc"
 
 
 def get_rocshmem_hash():

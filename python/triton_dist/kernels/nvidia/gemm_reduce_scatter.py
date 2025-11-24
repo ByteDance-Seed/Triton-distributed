@@ -28,6 +28,7 @@ from typing import List, Optional
 import torch
 
 import triton
+import triton_dist
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.language.extra.language_extra import (__syncthreads, atomic_add, tid, st)
@@ -117,7 +118,7 @@ def _gemm_rs_persistent_repr(proxy):
     return f"triton3x_sm{cap_major}{cap_minor}_gemm_rs_persistent_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_ntn{suffix}"
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_persistent_repr)
+@triton_dist.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_persistent_repr)
 def kernel_gemm_rs_producer_persistent(
     a_ptr,
     b_ptr,
@@ -268,7 +269,7 @@ def _gemm_rs_non_persistent_repr(proxy):
     return f"triton3x_sm{cap_major}{cap_minor}_gemm_rs_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_{a_trans}{b_trans}{c_trans}{suffix}"
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_non_persistent_repr)
+@triton_dist.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_non_persistent_repr)
 def kernel_gemm_rs_producer_non_persistent(
     # Pointers to matrices
     a_ptr,  # [M, K]_Ti

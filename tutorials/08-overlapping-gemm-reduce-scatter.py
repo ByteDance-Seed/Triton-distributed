@@ -50,6 +50,7 @@ import torch
 
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 # The implementation of reduce_scatter_2d_op is the same as that in 06-intern-node-reudce-scatter.py.
 from triton_dist.kernels.nvidia.reduce_scatter import (
@@ -129,7 +130,7 @@ def create_gemm_rs_context(max_M,
 
 
 ################### triton kernel ###################
-@triton.jit
+@triton_dist.jit
 def kernel_gemm_rs_producer_persistent(
     a_ptr,
     b_ptr,

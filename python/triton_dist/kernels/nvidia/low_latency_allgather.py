@@ -26,8 +26,8 @@ import torch
 from dataclasses import dataclass
 from typing import List
 
-import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.language.extra import libshmem_device
 
 from triton_dist.language.extra.cuda.language_extra import (
@@ -44,7 +44,7 @@ from triton_dist.language.extra.cuda.language_extra import (
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_pull_kernel(symm_ptr, bytes_per_rank, symm_flag, world_size, rank, signal_target):
     pid = tl.program_id(0)
     thread_idx = tid(0)
@@ -70,7 +70,7 @@ def _forward_pull_kernel(symm_ptr, bytes_per_rank, symm_flag, world_size, rank, 
         )
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_numa_2d_kernel(
     symm_ptr,
     bytes_per_rank,
@@ -131,7 +131,7 @@ def _forward_push_numa_2d_kernel(
         )  # write and tell peer remote that remote copy is done
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_numa_2d_ll_kernel(
     symm_ptr,
     bytes_per_rank,
@@ -213,7 +213,7 @@ def _forward_push_numa_2d_ll_kernel(
         )  # write and tell peer remote that remote copy is done
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_numa_2d_ll_multinode_kernel(
     symm_ptr,
     bytes_per_rank,
@@ -341,7 +341,7 @@ def _forward_push_numa_2d_ll_multinode_kernel(
             __syncthreads()
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_2d_kernel(symm_ptr, bytes_per_rank, symm_flag, NNODES, WORLD_SIZE, rank, signal_target):
     LOCAL_WORLD_SIZE = WORLD_SIZE // NNODES
     local_rank = rank % LOCAL_WORLD_SIZE
@@ -396,7 +396,7 @@ def _forward_push_2d_kernel(symm_ptr, bytes_per_rank, symm_flag, NNODES, WORLD_S
         )  # write and tell peer remote that remote copy is done
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_3d_kernel(
     symm_ptr,
     bytes_per_rank,
@@ -527,7 +527,7 @@ def _forward_push_3d_kernel(
             )
 
 
-@triton.jit
+@triton_dist.jit
 def _recv_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
     """split src/dest outside of _recv_ll. this function is designed for a threadblock
 
@@ -545,7 +545,7 @@ def _recv_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
         st_v2_u32(dest_ptr + n * 2, data1, data2)
 
 
-@triton.jit(do_not_specialize=["ll_flag"])
+@triton_dist.jit(do_not_specialize=["ll_flag"])
 def _pack_ll_block(dest_ptr, src_ptr, num_ints, ll_flag, BLOCK_SIZE: tl.constexpr):
     """split src/dest outside of _recv_ll. this function is designed for a threadblock
 
@@ -566,7 +566,7 @@ def _pack_ll_block(dest_ptr, src_ptr, num_ints, ll_flag, BLOCK_SIZE: tl.constexp
         tl.store(dest_ptr + dest_offset, dst, mask=dest_mask)
 
 
-@triton.jit
+@triton_dist.jit
 def _recv_ll_and_multimem_st_block(dest_ptr, src_ptr, num_ints, ll_flag):
     """split src/dest outside of _recv_ll. this function is designed for a threadblock
 
@@ -585,7 +585,7 @@ def _recv_ll_and_multimem_st_block(dest_ptr, src_ptr, num_ints, ll_flag):
         multimem_st_b64(dest_mc_ptr + n * 2, pack_b32_v2(data1, data2))
 
 
-@triton.jit(do_not_specialize=["ll_flag"])
+@triton_dist.jit(do_not_specialize=["ll_flag"])
 def _recv_ll_and_multimem_st_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
     """split src/dest outside of _recv_ll. this function is designed for a threadblock
 
@@ -605,7 +605,7 @@ def _recv_ll_and_multimem_st_ll_block(dest_ptr, src_ptr, num_ints, ll_flag):
         multimem_st_b64(dest_mc_ptr + n * 4 + 2, pack_b32_v2(data2, flag2))
 
 
-@triton.jit
+@triton_dist.jit
 def broadcast_naive_block(dst_ptr, src_ptr, nbytes):
     thread_idx = tid(axis=0)
     block_dim = ntid(axis=0)
@@ -619,7 +619,7 @@ def broadcast_naive_block(dst_ptr, src_ptr, nbytes):
         multimem_st_b64(dst_mc_ptr + n * 16 + 8, val1)
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_2d_ll_multimem_kernel(
     symm_ptr,
     bytes_per_rank,
@@ -696,7 +696,7 @@ def _forward_push_2d_ll_multimem_kernel(
         )  # magic number here
 
 
-@triton.jit(do_not_specialize=["rank", "signal_target"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_push_2d_ll_kernel(
     symm_ptr,
     bytes_per_rank,

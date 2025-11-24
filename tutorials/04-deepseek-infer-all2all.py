@@ -68,8 +68,9 @@ import random
 import argparse
 
 import nvshmem.core
+import triton_dist
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.language_extra import tid
 from triton_dist.utils import dist_print, initialize_distributed, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
@@ -89,7 +90,7 @@ WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     triton.Config(kwargs={'BM': BM}, num_warps=w) for BM in [16] for w in [16]
 ],
                  key=[])
-@triton.jit
+@triton_dist.jit
 def all_to_all_kernel(
     send_tensor,
     data_src,

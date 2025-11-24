@@ -26,6 +26,7 @@ import torch
 import triton
 import triton.language as tl
 
+import triton_dist
 from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import nvshmem_free_tensor_sync, nvshmem_create_tensor, nvshmem_barrier_all_on_stream
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block
@@ -38,7 +39,7 @@ def get_element_at(tensor: tl.tensor, idx: int):
     return tl.sum(tl.where(tl.arange(0, size) == idx, tensor, 0))
 
 
-@triton.jit
+@triton_dist.jit
 def all_to_all_single_2d_kernel(
     data_src_ptr,
     data_dst_ptr,
@@ -71,7 +72,7 @@ def all_to_all_single_2d_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank"])
 def cp_from_recv_buf(
     local_rank,
     rank,

@@ -29,6 +29,7 @@ from typing import List, Optional
 
 import torch
 import triton
+import triton_dist
 import triton.language as tl
 from cuda import cudart
 import nvshmem.bindings.nvshmem as pynvshmem
@@ -467,7 +468,7 @@ def reduce_scatter_ring_push_1d_intra_node_sm_rma(
 
 
 ################### triton kernel ###################
-@triton.jit
+@triton_dist.jit
 def kernel_inter_node_p2p_for_same_local_rank(offset, local_world_size, M_per_rank, N, input,  # [M, N]
                                               output,  # [M, N]
                                               ):

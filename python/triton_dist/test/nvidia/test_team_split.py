@@ -26,14 +26,14 @@ import os
 import torch
 import nvshmem
 import nvshmem.core
-import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.utils import initialize_distributed, finalize_distributed
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.cuda.language_extra import tid
 
 
-@triton.jit
+@triton_dist.jit
 def team_translate_pe_kernel(
     src_team: int,
     pe_in_src_team: int,

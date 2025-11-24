@@ -27,6 +27,7 @@ import triton
 import triton.language as tl
 
 from typing import List
+import triton_dist
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.cuda.language_extra import tid, atomic_add_per_warp, __syncthreads, membar, pack_b32_v2, ld, st
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream
@@ -55,7 +56,7 @@ FP8_MAX = tl.constexpr(torch.finfo(torch.float8_e4m3fn).max)
 FP8_MAX_INV = tl.constexpr(1 / 448.)
 
 
-@triton.jit
+@triton_dist.jit
 def dispatch_postprocess_kernel_v2_for_expert(
     target_expert_idx,
     recv_token_source_indices,  # [num_local_experts, world_size * max_m]
@@ -151,7 +152,7 @@ def dispatch_postprocess_kernel_v2_for_expert(
         dst_scale_base += BM * NUM_QUANT_GROUPS
 
 
-@triton.jit(do_not_specialize=["signal_val"])
+@triton_dist.jit(do_not_specialize=["signal_val"])
 def dispatch_kernel_v2(
     profiler_buf,
     send_tensor,
@@ -355,7 +356,7 @@ def dispatch_kernel_v2(
     profiler = profiler.record(is_start=False, task_type=3)
 
 
-@triton.jit(do_not_specialize=["num_combined_tokens", "signal_val"])
+@triton_dist.jit(do_not_specialize=["num_combined_tokens", "signal_val"])
 def combine_kernel_v2(
     profiler_buf,
     send_tokens,  # [num_experts_per_rank, world_size * max_m, hidden]

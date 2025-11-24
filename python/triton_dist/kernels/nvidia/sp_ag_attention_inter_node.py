@@ -33,6 +33,7 @@ import math
 from dataclasses import dataclass
 from cuda import cudart
 
+import triton_dist
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE, nvshmem_barrier_all_on_stream, nvshmem_create_tensor, nvshmem_create_tensors
@@ -111,7 +112,7 @@ def create_sp_ag_attention_context_inter_node(
 ##################################################
 
 
-@triton.jit(do_not_specialize=["rank", "signal_value", "batch_size"])
+@triton_dist.jit(do_not_specialize=["rank", "signal_value", "batch_size"])
 def all_gather_push_2d_kernel(
     buffer_ptr,
     bytes_per_token,
@@ -255,7 +256,7 @@ def cp_engine_producer_kv_all_gather(
     compute_stream.wait_stream(ag_stream)
 
 
-@triton.jit
+@triton_dist.jit
 def _flash_attn_forward_inner(
     acc,
     l_i,
@@ -324,7 +325,7 @@ def _flash_attn_forward_inner(
     return acc, l_i, m_i
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_consumer_flash_attn_forward(
     Q,  # [total_q_shard, q_head, head_dim]
     K,  # [total_kv, kv_head, head_dim]
