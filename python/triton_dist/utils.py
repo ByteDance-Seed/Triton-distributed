@@ -132,13 +132,14 @@ def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     assert _TRITON_DIST_WORLD is None, "TRITON_DIST_WORLD has already been initialized"
 
     _TRITON_DIST_WORLD = pg
+    torch.cuda.synchronize()
     # Extract rank, nranks from process group
     num_ranks = pg.size()
     rank_id = pg.rank()
 
     # Create an empty uniqueid for all ranks
     broadcast_objects = [nvshmem.core.get_unique_id(empty=rank_id != 0)]
-    torch.distributed.broadcast_object_list(broadcast_objects, src=0, group=pg)
+    torch.distributed.broadcast_object_list(broadcast_objects, src=torch.distributed.get_global_rank(pg, 0), group=pg)
     torch.distributed.barrier(group=pg)
     from cuda.core.experimental import Device
     nvshmem.core.init(device=Device(torch.cuda.current_device()), uid=broadcast_objects[0], rank=rank_id,
