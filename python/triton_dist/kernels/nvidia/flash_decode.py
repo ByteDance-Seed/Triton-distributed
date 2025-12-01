@@ -249,7 +249,7 @@ combine_kv_signature = ((
     ]) + ", ") +  # strides
                         ("%NUM_KV_SPLITS, "
                          "%BLOCK_DV, "
-                         "%Lv"))
+                         "%V_DIM"))
 
 combine_kv_signature_intra_rank = ((
     "*{input_dtype}:16, *{output_dtype}:16, "  # mid_o/o
@@ -261,7 +261,7 @@ combine_kv_signature_intra_rank = ((
     ]) + ", ") +  # strides
                                    ("%NUM_KV_SPLITS, "
                                     "%BLOCK_DV, "
-                                    "%Lv"))
+                                    "%V_DIM"))
 
 combine_kv_signature_inter_rank = ((
     "*{input_dtype}:16, *{output_dtype}:16, "  # mid_o/o
@@ -273,7 +273,7 @@ combine_kv_signature_inter_rank = ((
     ]) + ", ") +  # strides
                                    ("%NUM_KV_SPLITS, "
                                     "%BLOCK_DV, "
-                                    "%Lv"))
+                                    "%V_DIM"))
 
 _combine_kv_grid = ["batch", "q_heads", "1"]
 
@@ -281,7 +281,7 @@ _combine_kv_grid = ["batch", "q_heads", "1"]
 def get_triton_combine_kv_algo_info(split_kv, v_head_dim, block_dv=None):
     return {
         "NUM_KV_SPLITS": split_kv, "BLOCK_DV": triton.next_power_of_2(v_head_dim) if block_dv is None else block_dv,
-        "Lv": v_head_dim, "num_warps": 4, "num_stages": 2
+        "V_DIM": v_head_dim, "num_warps": 4, "num_stages": 2
     }
 
 
@@ -318,7 +318,7 @@ def kernel_gqa_fwd_batch_decode_combine_kv(
     stride_oh,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
-    Lv: tl.constexpr,
+    V_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -326,14 +326,14 @@ def kernel_gqa_fwd_batch_decode_combine_kv(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
 
     offs_d = tl.arange(0, BLOCK_DV)
-    mask_d = offs_d < Lv
+    mask_d = offs_d < V_DIM
 
     e_sum = 0.0
     e_max = -float("inf")
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
     offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
-    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
+    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + V_DIM
 
     for split_kv_id in range(0, NUM_KV_SPLITS):
         kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
@@ -403,7 +403,7 @@ def kernel_intra_rank_gqa_fwd_batch_decode_combine_kv(
     stride_oh,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
-    Lv: tl.constexpr,
+    V_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -411,14 +411,14 @@ def kernel_intra_rank_gqa_fwd_batch_decode_combine_kv(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
 
     offs_d = tl.arange(0, BLOCK_DV)
-    mask_d = offs_d < Lv
+    mask_d = offs_d < V_DIM
 
     e_sum = 0.0
     e_max = -float("inf")
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
     offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
-    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
+    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + V_DIM
 
     for split_kv_id in range(0, NUM_KV_SPLITS):
         kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
@@ -444,7 +444,7 @@ def kernel_intra_rank_gqa_fwd_batch_decode_combine_kv(
         mask=mask_d,
     )
     tl.store(
-        o + cur_batch * stride_obs + cur_head * stride_oh + Lv,
+        o + cur_batch * stride_obs + cur_head * stride_oh + V_DIM,
         e_max + tl.log(e_sum),
     )
 
@@ -492,7 +492,7 @@ def kernel_inter_rank_gqa_fwd_batch_decode_combine_kv(
     stride_oh,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
-    Lv: tl.constexpr,
+    V_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -500,14 +500,14 @@ def kernel_inter_rank_gqa_fwd_batch_decode_combine_kv(
     cur_batch_seq_len_ptr = B_Seqlens + cur_batch
 
     offs_d = tl.arange(0, BLOCK_DV)
-    mask_d = offs_d < Lv
+    mask_d = offs_d < V_DIM
 
     e_sum = 0.0
     e_max = -float("inf")
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
     offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
-    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
+    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + V_DIM
 
     for split_kv_id in range(0, NUM_KV_SPLITS):
         effective_kv_len = tl.load(cur_batch_seq_len_ptr + split_kv_id * batch)

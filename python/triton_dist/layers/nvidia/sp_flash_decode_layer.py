@@ -179,7 +179,7 @@ class SpGQAFlashDecodeAttention(torch.nn.Module):
                 final_output.stride(1),  # head
                 self.num_ranks,  # split_kv
                 512,  # BLOCK_DV
-                self.v_head_dim,  # Lv
+                self.v_head_dim,  # V_DIM
             )
 
         return final_output
