@@ -64,7 +64,7 @@ class SpGQAFlashDecodeAttention(torch.nn.Module):
         self.stages = stages
 
         # allgather
-        self.max_allgather_buffer_size = self.num_ranks * self.num_q_heads * self.v_head_dim * 8  # bytes
+        self.max_allgather_buffer_size = self.num_ranks * self.num_q_heads * (self.v_head_dim + 1) * 8  # bytes
         self.ag_layer = AllGatherLayer(self.num_nodes, self.num_ranks, self.rank,
                                        max_buffer_size=self.max_allgather_buffer_size, stages=self.stages)
         self.ag_buffer = nvshmem_create_tensor((
