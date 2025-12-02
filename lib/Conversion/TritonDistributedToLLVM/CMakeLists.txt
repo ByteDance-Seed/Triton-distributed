@@ -2,7 +2,7 @@ add_triton_library(TritonDistributedToLLVM
     NVIDIA/ConvertTritonDistributedToLLVM.cpp
     NVIDIA/DistributedOpToLLVM.cpp
     SIMTOpToLLVM.cpp
-    AMD/LibDeviceToLLVM.cpp
+    AMD/BuiltinFuncToLLVMExt.cpp
     AMD/DistributedOpToLLVM.cpp
     AMD/ConvertAMDDistributedToLLVM.cpp
 

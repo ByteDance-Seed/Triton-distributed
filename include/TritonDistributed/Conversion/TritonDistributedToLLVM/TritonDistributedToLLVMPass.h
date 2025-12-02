@@ -72,7 +72,7 @@ createConvertTritonDistributedToLLVMPass(int32_t computeCapability,
                                          int32_t ptxVersion);
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertLibDeviceToLLVMPass(bool ftz);
+createConvertBuiltinFuncToLLVMExtPass(bool ftz);
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertAMDDistributedToLLVMPass(StringRef targetArch, bool ftz);

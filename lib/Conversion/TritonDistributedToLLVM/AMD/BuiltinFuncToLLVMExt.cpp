@@ -10,7 +10,7 @@
 #include <cassert>
 
 namespace mlir::triton {
-#define GEN_PASS_DEF_CONVERTLIBDEVICETOLLVM
+#define GEN_PASS_DEF_CONVERTBUILTINFUNCTOLLVMEXT
 #include "TritonDistributed/Conversion/TritonDistributedToLLVM/Passes.h.inc"
 } // namespace mlir::triton
 
@@ -256,9 +256,10 @@ private:
   bool ftz;
 };
 
-struct ConvertLibDeviceToLLVM
-    : public triton::impl::ConvertLibDeviceToLLVMBase<ConvertLibDeviceToLLVM> {
-  explicit ConvertLibDeviceToLLVM(bool ftz) { this->ftz = ftz; }
+struct ConvertBuiltinFuncToLLVMExt
+    : public triton::impl::ConvertBuiltinFuncToLLVMExtBase<
+          ConvertBuiltinFuncToLLVMExt> {
+  explicit ConvertBuiltinFuncToLLVMExt(bool ftz) { this->ftz = ftz; }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -283,8 +284,8 @@ struct ConvertLibDeviceToLLVM
 namespace mlir::triton {
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertLibDeviceToLLVMPass(bool ftz) {
-  return std::make_unique<ConvertLibDeviceToLLVM>(ftz);
+createConvertBuiltinFuncToLLVMExtPass(bool ftz) {
+  return std::make_unique<ConvertBuiltinFuncToLLVMExt>(ftz);
 }
 
 } // namespace mlir::triton
