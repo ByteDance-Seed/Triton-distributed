@@ -6,93 +6,55 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export ROCSHMEM_INSTALL_DIR=${ROCSHMEM_INSTALL_DIR:-${SCRIPT_DIR}/../rocshmem_build/install}
 export ROCSHMEM_SRC=${ROCSHMEM_SRC:-${SCRIPT_DIR}/../../../3rdparty/rocshmem}
 export ROCM_PATH=${ROCM_PATH:-/opt/rocm}
-export OMPI_DIR=/opt/ompi_build/install/ompi
+export OMPI_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 
 pushd ${ROCSHMEM_INSTALL_DIR}/lib
 
+# TODO: backend is hardcoded in the bitcode
+DEFINES="-DENABLE_IBGDA_BITCODE"
 # TODO: arch is hardcoded
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -DENABLE_IPC_BITCODE \
- -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/rocshmem_gpu.cpp \
- -o rocshmem_gpu.bc
+ARCH=gfx942
+# Note that there may be issues if the ROCM llvm version doesn't match triton.
+ROCM_CXX=${ROCM_CXX:-${ROCM_PATH}/lib/llvm/bin/clang++}
+ROCM_LD=${ROCM_LD:-${ROCM_PATH}/lib/llvm/bin/llvm-link}
+ALL_BC=()
 
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/ipc/context_ipc_device.cpp \
- -o rocshmem_context_device.bc
+compile () {
+    local cpp_file="$1"
+    local filename=$(basename "$cpp_file")
+    local base=${filename%.*}
+    local base=${base#rocshmem_}
+    local bc_file="rocshmem_${base}.bc"
+    ALL_BC+=("${bc_file}")
+    ${ROCM_CXX} -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=${ARCH} -ggdb \
+        ${DEFINES} \
+        -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem \
+        -I${ROCSHMEM_INSTALL_DIR}/include \
+        -I${ROCSHMEM_INSTALL_DIR}/../ \
+        -I${ROCSHMEM_SRC}/src \
+        -I${OMPI_DIR}/include \
+        -I${ROCSHMEM_SRC}/src \
+        -c "${cpp_file}" \
+        -o "${bc_file}"
+}
 
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/ipc/backend_ipc.cpp \
- -o rocshmem_backend_ipc.bc
+compile ${ROCSHMEM_SRC}/src/rocshmem_gpu.cpp
+compile ${ROCSHMEM_SRC}/src/ipc/backend_ipc.cpp
+compile ${ROCSHMEM_SRC}/src/ipc/context_ipc_device.cpp
+compile ${ROCSHMEM_SRC}/src/ipc/context_ipc_device_coll.cpp
+compile ${ROCSHMEM_SRC}/src/ipc_policy.cpp
+compile ${ROCSHMEM_SRC}/src/gda/context_gda_device.cpp
+compile ${ROCSHMEM_SRC}/src/gda/backend_gda.cpp
+compile ${ROCSHMEM_SRC}/src/gda/queue_pair.cpp
+compile ${ROCSHMEM_SRC}/src/gda/ionic/queue_pair_ionic.cpp
+compile ${ROCSHMEM_SRC}/src/gda/mlx5/queue_pair_mlx5.cpp
+compile ${ROCSHMEM_SRC}/src/gda/mlx5/segment_builder.cpp
+compile ${ROCSHMEM_SRC}/src/gda/endian.cpp
+compile ${ROCSHMEM_SRC}/src/team.cpp
+compile ${ROCSHMEM_SRC}/src/sync/abql_block_mutex.cpp
+compile ${ROCSHMEM_SRC}/src/util.cpp
+compile ${SCRIPT_DIR}/../runtime/rocshmem_wrapper.cc
 
-
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/ipc/context_ipc_device_coll.cpp \
- -o rocshmem_context_ipc_device_coll.bc
-
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/ipc_policy.cpp \
- -o rocshmem_ipc_policy.bc
-
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/team.cpp \
- -o rocshmem_team.bc
-
- ${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only -std=c++20  -emit-llvm  --offload-arch=gfx942 \
- -I${ROCSHMEM_INSTALL_DIR}/include \
- -I${ROCSHMEM_INSTALL_DIR}/../ \
- -I${ROCSHMEM_SRC}/src \
- -I${OMPI_DIR}/include \
- -I${ROCSHMEM_SRC}/src \
- -c ${ROCSHMEM_SRC}/src/sync/abql_block_mutex.cpp \
- -o rocshmem_abql_block_mutex.bc
-
- 
-${ROCM_PATH}/lib/llvm/bin/clang++ -x hip --cuda-device-only \
- -std=c++20  -emit-llvm  --offload-arch=gfx942              \
- -I${ROCSHMEM_INSTALL_DIR}/include                          \
- -I${OMPI_DIR}/include                                      \
- -c ${SCRIPT_DIR}/../runtime/rocshmem_wrapper.cc            \
- -o rocshmem_wrapper.bc
- 
-${ROCM_PATH}/lib/llvm/bin/llvm-link                         \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_gpu.bc                \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_backend_ipc.bc        \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_context_device.bc     \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_context_ipc_device_coll.bc \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_ipc_policy.bc         \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_team.bc               \
- ${ROCSHMEM_INSTALL_DIR}/lib/rocshmem_abql_block_mutex.bc   \
- rocshmem_wrapper.bc -o librocshmem_device.bc 
+${ROCM_LD} "${ALL_BC[@]}" -o librocshmem_device.bc 
 
 popd

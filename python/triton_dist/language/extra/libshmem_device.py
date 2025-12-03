@@ -185,6 +185,10 @@ def signal_wait_until(sig_addr, cmp_, cmp_val):
     ...
 
 
+def ulong_put_signal(dest, source, nelems, sig_addr, signal, sig_op, pe):
+    ...
+
+
 # DON'T USE THIS. NVSHMEM 3.2.5 does not implement this
 def broadcastmem(team, dest, source, nelems, pe_root):
     ...
