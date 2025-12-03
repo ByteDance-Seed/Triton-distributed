@@ -5,7 +5,7 @@ DISTRIBUTED_DIR=$(dirname -- "$SCRIPT_DIR")
 TRITON_ROCSHMEM_DIR=${SCRIPT_DIR}/../shmem/rocshmem_bind/python
 PYROCSHMEM_DIR=${SCRIPT_DIR}/../shmem/rocshmem_bind/pyrocshmem
 ROCSHMEM_ROOT=${SCRIPT_DIR}/../shmem/rocshmem_bind/rocshmem_build/install
-MPI_ROOT=/opt/ompi_build/install/ompi
+MPI_ROOT="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${ROCSHMEM_ROOT}/lib:${MPI_ROOT}/lib
 
