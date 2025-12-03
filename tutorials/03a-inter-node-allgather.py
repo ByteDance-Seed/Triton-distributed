@@ -60,7 +60,8 @@ class AllGatherContext:
 
 @triton.jit(do_not_specialize=["rank", "signal_value"])
 def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag,
-                              WORLD_SIZE: tl.constexpr, rank, signal_value):
+                              WORLD_SIZE: tl.constexpr, rank, signal_value, ctx):
+    libshmem_device.set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     thread_idx = thread_idx(0)
     # there are WORLD_SIZE programs processing different data.
@@ -97,6 +98,7 @@ def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag,
 
 def all_gather_push_1d(ctx: AllGatherContext, symm_buffer: torch.Tensor):
     ctx.signal_value += 1
+    rctx = pyrocshmem.rocshmem_get_device_ctx()
     all_gather_push_1d_kernel[(ctx.num_ranks, )](
         symm_buffer,
         symm_buffer.nbytes // ctx.num_ranks,
@@ -104,6 +106,7 @@ def all_gather_push_1d(ctx: AllGatherContext, symm_buffer: torch.Tensor):
         ctx.num_ranks,
         ctx.rank,
         ctx.signal_value,
+        rctx
     )
     return symm_buffer
 
