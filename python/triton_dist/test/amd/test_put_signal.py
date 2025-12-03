@@ -1,4 +1,5 @@
 
+# This file mimics the C++ rocshmem test 3rdparty/rocshmem/examples/rocshmem_put_signal_test.cc in triton.
 import os
 import torch
 
@@ -18,11 +19,9 @@ def simple_put_signal_test(data, message, nelem, sig_addr, my_pe, dst_pe, ctx):
     if tid == 0 and pid == 0:
         if my_pe == 0:
             libshmem_device.ulong_put_signal(data, message, nelem, sig_addr, 1, libshmem_device.ROCSHMEM_SIGNAL_SET, dst_pe)
-            #libshmem_device.putmem_signal(data, message, nelem * torch.uint64.itemsize, sig_addr, 1, libshmem_device.ROCSHMEM_SIGNAL_SET, dst_pe)
         else:
             libshmem_device.signal_wait_until(sig_addr, libshmem_device.ROCSHMEM_CMP_EQ, 1)
             libshmem_device.ulong_put_signal(data, data, nelem, sig_addr, 1, libshmem_device.ROCSHMEM_SIGNAL_SET, dst_pe)
-            #libshmem_device.putmem_signal(data, data, nelem * torch.uint64.itemsize, sig_addr, 1, libshmem_device.ROCSHMEM_SIGNAL_SET, dst_pe)
 
     __syncthreads()
 
