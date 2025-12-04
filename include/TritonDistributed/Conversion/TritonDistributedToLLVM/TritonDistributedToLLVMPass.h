@@ -41,11 +41,6 @@ template <typename T> class OperationPass;
 namespace triton {
 
 namespace NVIDIA {
-void populateSIMTOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
-                                  const TargetInfo &targetInfo,
-                                  RewritePatternSet &patterns,
-                                  PatternBenefit benefit);
-
 void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          RewritePatternSet &patterns,
                                          PatternBenefit benefit,
@@ -61,7 +56,16 @@ void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          const TargetInfo &targetInfo,
                                          std::string ROCSHMEMLibname = "",
                                          std::string ROCSHMEMLibpath = "");
+
+void populateROCDLBlockDimPattern(LLVMTypeConverter &typeConverter,
+                                  RewritePatternSet &patterns,
+                                  PatternBenefit benefit);
 } // namespace AMD
+
+void populateSIMTOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                  const TargetInfoBase &targetInfo,
+                                  RewritePatternSet &patterns,
+                                  PatternBenefit benefit);
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonDistributedToLLVMPass();

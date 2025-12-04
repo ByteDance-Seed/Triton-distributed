@@ -105,8 +105,8 @@ struct ConvertTritonDistributedToLLVM
     mlir::triton::NVIDIA::populateDistributedOpToLLVMPatterns(
         typeConverter, patterns, benefit, targetInfo);
     // SIMT ops
-    mlir::triton::NVIDIA::populateSIMTOpToLLVMPatterns(
-        typeConverter, targetInfo, patterns, benefit);
+    mlir::triton::populateSIMTOpToLLVMPatterns(typeConverter, targetInfo,
+                                               patterns, benefit);
     // pattern of TritonDistributed need to be legalized to llvm through the
     // following pattern
     mlir::triton::populateControlFlowOpToLLVMPattern(typeConverter, patterns,

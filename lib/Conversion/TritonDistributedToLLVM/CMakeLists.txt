@@ -5,6 +5,7 @@ add_triton_library(TritonDistributedToLLVM
     AMD/BuiltinFuncToLLVMExt.cpp
     AMD/DistributedOpToLLVM.cpp
     AMD/ConvertAMDDistributedToLLVM.cpp
+    AMD/ROCDLBlockDimPattern.cpp
 
     DEPENDS
     TritonDistributedToLLVMConversionPassIncGen
