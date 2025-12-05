@@ -186,6 +186,7 @@ def parse_args():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--has_weight", action="store_true")
     parser.add_argument("--with-scatter-indices", action="store_true")
+    parser.add_argument("--use_aot", action="store_true", help="use aot kernel")
     return parser.parse_args()
 
 
@@ -428,7 +429,7 @@ if __name__ == "__main__":
     input_dtype = DTYPE_MAP[args.dtype]
     weight_dtype = DTYPE_MAP[args.weight_dtype]
     triton_a2a_op = EPAll2AllLayer(EP_GROUP, args.M, args.N, args.topk, RANK, args.G, LOCAL_WORLD_SIZE, WORLD_SIZE,
-                                   input_dtype, weight_dtype=weight_dtype, num_sm=args.sm_margin)
+                                   input_dtype, weight_dtype=weight_dtype, num_sm=args.sm_margin, use_aot=args.use_aot)
 
     def _make_data(token_num):
         exp_indices = generate_random_exp_indices(token_num, args.G, args.topk, args.drop_ratio)

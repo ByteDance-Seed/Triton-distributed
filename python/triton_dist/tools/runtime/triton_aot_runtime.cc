@@ -26,6 +26,9 @@
 #include <map>
 #include <mutex>
 
+#include <nvshmem.h>
+#include <nvshmemx.h>
+
 #ifdef __cplusplus
 #define TRITON_DIST_EXTERN extern "C" __attribute__((visibility("hidden")))
 #else
@@ -193,7 +196,23 @@ TRITON_DIST_EXTERN CUresult CUDALaunchKernel(
   CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
   CUfunction func;
   CHECK_RTN_RETURN(f->GetOrLoad(context, &func));
-  return cuLaunchKernel(func, gridDimX, gridDimY, gridDimZ, blockDimX,
-                        blockDimY, blockDimZ, sharedMemBytes, hStream,
-                        kernelParams, extra);
+  CHECK_RTN_RETURN(cuLaunchKernel(func, gridDimX, gridDimY, gridDimZ, blockDimX,
+                                  blockDimY, blockDimZ, sharedMemBytes, hStream,
+                                  kernelParams, extra));
+  return CUDA_SUCCESS;
+}
+
+TRITON_DIST_EXTERN CUresult NVSHMEMModuleInit(CUDAModuleHandle hmod) {
+  CUmodule mod;
+  CUcontext context;
+  CHECK_RTN_RETURN(cuCtxGetCurrent(&context));
+  CHECK_RTN_RETURN(hmod->GetOrLoad(context, mod));
+  int init_err = nvshmemx_cumodule_init(mod);
+  if (init_err == 0) {
+    return CUDA_SUCCESS;
+  } else {
+    fprintf(stderr, "nvshmem cumodule init failed: (error code: %d)\n",
+            init_err);
+    return CUDA_ERROR_NOT_INITIALIZED;
+  }
 }

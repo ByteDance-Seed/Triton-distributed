@@ -7,6 +7,15 @@ ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_kkt_inv_ut_fused
 ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 ${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/gdn.py:chunk_fwd_kernel_o
 
+# ep a2a
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/ep_a2a.py:kernel_get_ag_splits_and_recv_offset
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/ep_a2a.py:kernel_bincount
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/ep_a2a.py:kernel_dispatch_token
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/ep_a2a.py:kernel_get_dispatch_send_reqs
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/ep_a2a.py:kernel_combine_token
+
+
 # this is for test
 ${SCRIPT_DIR}/../python/triton_dist/test/nvidia/test_compile_aot.py:test_aot_kernel
 ${SCRIPT_DIR}/../python/triton_dist/test/nvidia/test_compile_aot.py:matmul_kernel_descriptor_persistent
+${SCRIPT_DIR}/../python/triton_dist/kernels/nvidia/common_ops.py:barrier_all_intra_node_atomic_cas_block

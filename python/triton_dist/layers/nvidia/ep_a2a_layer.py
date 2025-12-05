@@ -29,8 +29,8 @@ import ctypes
 from typing import Union
 
 from triton_dist.kernels.nvidia.ep_a2a import (
-    kernel_combine_token,
-    kernel_dispatch_token,
+    ep_combine_token_inplace,
+    ep_dispatch_token_inplace,
     bincount,
     get_dispatch_send_reqs_for_target_node,
     get_ag_splits_and_recv_offset_for_dispatch,
@@ -62,11 +62,14 @@ class EPAll2AllLayer(torch.nn.Module):
         dtype=torch.bfloat16,
         weight_dtype=torch.float32,
         num_sm=20,
+        use_aot=False,
     ):
         super().__init__()
         self.offset_dtype = torch.int32
         self.ep_group = ep_group
         self.num_sm = num_sm
+
+        self.use_aot = use_aot
 
         self.max_tokens = max_tokens
         self.topk = topk
@@ -154,27 +157,19 @@ class EPAll2AllLayer(torch.nn.Module):
     def preprocess(self, input: torch.Tensor, exp_indices: torch.Tensor, full_scatter_indices: Union[torch.Tensor,
                                                                                                      None] = None):
         num_dispatch_token_cur_rank = exp_indices.shape[0]
-        token_node_idx = exp_indices // (self.experts_per_rank * self.local_world_size)
-
-        # TODO(zhengxuegui.0): use triton kernel to gen send requests. It takes 150us to generate a request for each node(4096 tokens top 8).
-        for traget_node_id in range(self.nnodes):
-            if traget_node_id == self.node_id:
-                continue
-            start_indices, end_indices = get_dispatch_send_reqs_for_target_node(token_node_idx, traget_node_id,
-                                                                                index_type=self.offset_dtype)
-            self.send_reqs_for_nodes[traget_node_id, 0, :start_indices.shape[0]].copy_(start_indices)
-            self.send_reqs_for_nodes[traget_node_id, 1, :end_indices.shape[0]].copy_(end_indices)
+        get_dispatch_send_reqs(exp_indices, self.send_reqs_for_nodes, self.experts_per_rank, self.local_world_size,
+                               self.num_sm, use_aot=self.use_aot)
 
         # assume that the expert indices of the drop token is num_tot_experts,
         # it will be counted in the `local_splits_buf[num_tot_experts]`
         _ = bincount(exp_indices.view(-1), length=self.local_splits_buf.shape[0], output=self.local_splits_buf,
-                     num_sm=self.num_sm)
+                     num_sm=self.num_sm, use_aot=self.use_aot)
         recv_buf_offset_per_expert, num_recv_tokens_per_rank, num_input_tokens_per_rank, token_dst_scatter_idx, send_reqs_recv_tensor, topk_indices_tensor = get_ag_splits_and_recv_offset_for_dispatch(
             self.send_reqs_for_nodes, self.send_reqs_recv_bufs, exp_indices, self.topk_indices_buf,
             self.expert_indices_signal_buf, self.local_splits_buf, self.full_splits_buf, self.splits_signal_buf,
             self.topk, self.local_world_size, self.world_size, self.max_tokens, self.experts_per_rank,
             full_scatter_indices=full_scatter_indices, cpu_default_val=self.cpu_default_val,
-            offset_dtype=self.offset_dtype, num_sm=self.num_sm)
+            offset_dtype=self.offset_dtype, num_sm=self.num_sm, use_aot=self.use_aot)
 
         ep_a2a_layout_desc = EPAllToAllLayoutDesc(num_dispatch_token_cur_rank=num_dispatch_token_cur_rank,
                                                   num_input_tokens_per_rank=num_input_tokens_per_rank,
@@ -197,7 +192,6 @@ class EPAll2AllLayer(torch.nn.Module):
         self.send_reqs_recv_bufs.fill_(0)
 
     def dispatch_token(self, recv_buf_offset_per_expert, ep_a2a_layout_desc: EPAllToAllLayoutDesc, has_weight=False):
-        grid = lambda meta: (self.num_sm, )
         assert self.topk_indices_buf.dtype == self.send_reqs_for_nodes.dtype
         token_dst_scatter_idx = ep_a2a_layout_desc.token_dst_scatter_idx
         if token_dst_scatter_idx is None:
@@ -213,28 +207,14 @@ class EPAll2AllLayer(torch.nn.Module):
             assert token_dst_scatter_idx.is_contiguous()
             with_scatter_indices = True
 
-        kernel_dispatch_token[grid](
-            self.send_reqs_for_nodes,
-            self.signal_buf,
-            self.counter,
-            recv_buf_offset_per_expert,
-            self.send_buf,
-            self.output_buf,
-            self.weight_send_buf,
-            self.weight_recv_buf,
-            ep_a2a_layout_desc.topk_indices_tensor,
-            token_dst_scatter_idx,
-            ep_a2a_layout_desc.num_input_tokens_per_rank,
-            self.max_tokens,
-            self.topk,
-            self.hidden,
-            self.dtype.itemsize * self.hidden,
-            self.experts_per_rank,
-            self.local_world_size,
-            HAS_WEIGHT=has_weight,
-            WITH_SCATTER_INDICES=with_scatter_indices,
-            num_warps=32,
-        )
+        ep_dispatch_token_inplace(self.send_reqs_for_nodes, self.signal_buf, recv_buf_offset_per_expert, self.send_buf,
+                                  self.output_buf,  # output
+                                  self.weight_send_buf, self.weight_recv_buf, ep_a2a_layout_desc.topk_indices_tensor,
+                                  token_dst_scatter_idx, ep_a2a_layout_desc.num_input_tokens_per_rank, self.max_tokens,
+                                  self.topk, self.hidden, bytes_per_token=self.dtype.itemsize * self.hidden,
+                                  experts_per_rank=self.experts_per_rank, local_world_size=self.local_world_size,
+                                  has_weight=has_weight, with_scatter_indices=with_scatter_indices, num_sms=self.num_sm,
+                                  use_aot=self.use_aot)
 
         if not with_scatter_indices:
             ep_a2a_layout_desc.token_dst_scatter_idx = token_dst_scatter_idx
@@ -305,26 +285,24 @@ class EPAll2AllLayer(torch.nn.Module):
         return copy_out, copy_weight, ep_a2a_layout_desc
 
     def combine_token_intra_node_and_send(self, input: torch.Tensor, ep_a2a_layout_desc: EPAllToAllLayoutDesc):
-        grid = lambda meta: (self.num_sm, )
-        BLOCK_SIZE = 1 << self.hidden.bit_length()
         counter_workspace = torch.zeros((self.nnodes, ), dtype=torch.int32, device=torch.cuda.current_device())
-        kernel_combine_token[grid](
+        ep_combine_token_inplace(
             counter_workspace,
             ep_a2a_layout_desc.num_input_tokens_per_rank,
             ep_a2a_layout_desc.send_reqs_recv_tensor,
             self.intra_node_reduce_buf,
             input,
-            self.send_buf,
+            self.send_buf,  # output
             ep_a2a_layout_desc.topk_indices_tensor,
             ep_a2a_layout_desc.token_dst_scatter_idx,
             self.max_tokens,
             self.topk,
             self.hidden,
-            input.dtype.itemsize * self.hidden,
-            self.experts_per_rank,
-            self.local_world_size,
-            BLOCK_SIZE,
-            num_warps=32,
+            bytes_per_token=input.dtype.itemsize * self.hidden,
+            experts_per_rank=self.experts_per_rank,
+            local_world_size=self.local_world_size,
+            num_sms=self.num_sm,
+            use_aot=self.use_aot,
         )
         return self.send_buf
 

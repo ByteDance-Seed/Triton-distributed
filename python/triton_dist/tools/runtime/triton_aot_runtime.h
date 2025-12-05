@@ -51,6 +51,8 @@ CUresult CUDAFuncSetAttribute(CUDAFunctionHandle func,
 
 CUresult CUDAFuncSetCacheConfig(CUDAFunctionHandle func, CUfunc_cache config);
 
+CUresult NVSHMEMModuleInit(CUDAModuleHandle hmod);
+
 #ifdef __cplusplus
 }
 #endif

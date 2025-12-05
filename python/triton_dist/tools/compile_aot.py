@@ -38,6 +38,7 @@ import triton.backends
 import triton.language as tl
 from packaging.version import Version
 from triton.tools.link import HeaderParser, KernelLinkerMeta
+from triton_dist.utils import get_nvshmem_home
 
 if Version(triton.__version__) < Version("3.0.0"):
     raise RuntimeError("AOT compilation requires triton>=3.0.0")
@@ -215,9 +216,10 @@ def _compile_kernel(
         materialize_c_params,
         dump_c_code,
     )
+    from triton_dist.jit import get_shmem_extern_lib
 
     src, hints = make_ast_source(func, signature)
-    opts = {"num_warps": num_warps, "num_stages": num_stages}
+    opts = {"num_warps": num_warps, "num_stages": num_stages, "extern_libs": get_shmem_extern_lib()}
     ccinfo = triton.compile(src, options=opts)  # this may trigger cache
     params, func_kernel_suffix = materialize_c_params(
         func,
@@ -421,7 +423,13 @@ def make_kernel_with_algo_info_param(
         algo_info = _get_algo_info(c_kernel_name_with_algo_info, c_kernel_name)
         algo_info_value = _make_triton_algo_info_with_schema(algo_info, schema)
         src += f"  if ({make_algo_info_condition(algo_info_variable_name, algo_info_value)}) {{\n"
-        src += f"    return {c_kernel_name_with_algo_info}(stream, {', '.join(meta.arg_names)});\n"
+        src += f"    CUresult result = {c_kernel_name_with_algo_info}(stream, {', '.join(meta.arg_names)});\n"
+        src += '''
+    if (result != CUDA_SUCCESS) {
+        fprintf(stderr, "Kernel parameters may not match the corresponding hints.: (code: %d)\\n", result);
+    }
+    return result;
+'''
         src += "  }\n"
     # TODO(houqi.1993) not supported code here
     params = " ".join([f"{key} = %d" for (key, dtype) in schema])
@@ -736,7 +744,13 @@ def gen_cmakelists(workspace: Path, libname: str, with_runtime: bool = False):
         _copy_if_changed(workspace / "triton_aot_runtime.cc", aot_runtime_path() / "triton_aot_runtime.cc")
         _copy_if_changed(workspace / "triton_aot_runtime.h", aot_runtime_path() / "triton_aot_runtime.h")
 
-    include_dirs = [os.path.join(triton.__path__[0], "backends/nvidia/include")]
+    cuda_home = os.getenv("CUDA_HOME", "/usr/local/cuda")
+    nvshmem_home = get_nvshmem_home()
+    include_dirs = [
+        os.path.join(triton.__path__[0], "backends/nvidia/include"),
+        os.path.join(cuda_home, "include"),
+        os.path.join(nvshmem_home, "include")
+    ]
     content = CMAKE_TEMPLATE.format(
         LIBNAME=libname,
         CCFLAGS=" ".join([f"-I{x}" for x in include_dirs]),
@@ -811,6 +825,9 @@ if __name__ == "__main__":
     else:
         workspace.mkdir(parents=True, exist_ok=True)
     context = {}
+    # TODO(zhengxuegui.0): fix `get_nvshmem_home` in compiler
+    if os.getenv("NVSHMEM_HOME", None) is None:
+        os.environ["NVSHMEM_HOME"] = str(get_nvshmem_home())
     for kernel_ in args.kernels:
         kernel_path, kernel_name = kernel_.split(":")
         logging.info(f"loading kernel `{kernel_name}` from {kernel_path}")

@@ -41,7 +41,7 @@ fi
 
 export NVSHMEM_DISABLE_CUDA_VMM=1 # moving from cpp to shell
 export NVSHMEM_BOOTSTRAP=UID
-
+export NVSHMEM_HOME=${NVSHMEM_HOME}
 export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=eth0
 
 export TRITON_CACHE_DIR=${SCRIPT_DIR}/triton_cache

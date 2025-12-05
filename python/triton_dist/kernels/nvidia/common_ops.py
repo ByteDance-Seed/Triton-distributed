@@ -36,7 +36,9 @@ from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE
 import triton_dist.language as dl
 from triton_dist.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st,
                                                             tid)
-from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor)
+from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor,
+                               nvshmem_free_tensor_sync)
+from triton_dist.tools import aot_compile_spaces
 
 
 @triton.jit
@@ -140,6 +142,14 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
         unsafe_barrier_on_this_grid(ptr)
 
 
+@aot_compile_spaces({
+    "barrier_all_intra_node_atomic_cas_block_i32": {
+        "signature": "i32, i32, i32, *i32", "grid": ["1", "1", "1"], "triton_algo_infos": [{
+            "num_warps": 4,
+            "num_stages": 2,
+        }]
+    }
+})
 @triton_dist.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
 def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, symm_flag_ptr):
     """ NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
@@ -228,6 +238,10 @@ class BarrierAllContext:
             self.symm_barrier = nvshmem_create_tensor((self.num_local_ranks, ), torch.int32)
             self.symm_barrier.fill_(0)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+
+    def finalize(self):
+        if self.is_intra_node:
+            nvshmem_free_tensor_sync(self.symm_barrier)
 
 
 def barrier_all_on_stream(ctx: BarrierAllContext, stream: Optional[torch.cuda.Stream] = None):

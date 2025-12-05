@@ -65,6 +65,10 @@ void load_{kernel_name}() {{
     int shared = {shared};
     CUDA_CHECK(CUDAModuleLoadData(&{kernel_name}_mod, bin));
     CUDA_CHECK(CUDAModuleGetFunction(&{kernel_name}_func, {kernel_name}_mod, "{triton_kernel_name}"));
+
+    if ({use_nvshmem})
+      NVSHMEMModuleInit({kernel_name}_mod);
+
     // set dynamic shared memory if necessary
     int shared_optin;
     CUDA_CHECK(cuDeviceGetAttribute(&shared_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, dev));
