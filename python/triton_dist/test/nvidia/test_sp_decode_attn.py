@@ -198,6 +198,7 @@ def test_triton_decode_with_paged_kv(args) -> None:
         torch.testing.assert_close(output, ref_output, atol=0.05, rtol=1e-2), \
             f"{torch.max(torch.abs(output - ref_output))}"
     dist_print("Pass!", allowed_ranks=[0])
+    ths_op.finalize()
 
 
 @register_test("perf")
@@ -268,6 +269,7 @@ def perf_decode(args):
         torch.distributed.barrier(args.default_group)
         dist_print(f"rank: {args.rank} KV len={kv_lens_per_rank[0]} Performance is {time_ms} ms", allowed_ranks="all",
                    need_sync=True)
+        ths_op.finalize()
 
 
 if __name__ == "__main__":
