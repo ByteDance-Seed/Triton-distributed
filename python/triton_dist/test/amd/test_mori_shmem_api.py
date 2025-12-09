@@ -24,10 +24,17 @@
 ################################################################################
 
 import os
+import sys
 import time
 import shutil
 import torch
 import torch.distributed as dist
+
+_test_dir = os.path.dirname(os.path.abspath(__file__))
+_workspace_root = os.path.abspath(os.path.join(_test_dir, "../../../.."))
+_triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
+if os.path.exists(_triton_python_path):
+    sys.path.insert(0, _triton_python_path)
 
 
 class TorchDistContext:
@@ -212,7 +219,81 @@ def test_mori_shmem_uniqueid_init():
     )
 
 
+def _test_mori_shmem_device_kernel(rank, world_size, master_port):
+    """Test libmori_shmem_device Python bindings in Triton kernel"""
+    
+    # Enable LLIR dump for debugging
+    # os.environ['LLIR_ENABLE_DUMP'] = '1'
+    
+    with TorchDistContext(rank=rank, world_size=world_size, master_port=str(master_port)):
+        import triton
+        import triton.language as tl
+        from triton.language.extra.hip import libmori_shmem_device
+        import mori.shmem as mori_shmem
+        
+        # Initialize mori shmem
+        mori_shmem.shmem_torch_process_group_init("default")
+        
+        my_pe = mori_shmem.shmem_mype()
+        n_pes = mori_shmem.shmem_npes()
+        
+        assert my_pe == rank, f"PE mismatch: expected {rank}, got {my_pe}"
+        assert n_pes == world_size, f"nPEs mismatch: expected {world_size}, got {n_pes}"
+        
+        # Define Triton kernel that uses libmori_shmem_device
+        @triton.jit
+        def test_kernel(output_pe, output_npes):
+            # Call mori shmem device functions from kernel
+            pe = libmori_shmem_device.mori_shmem_my_pe()
+            npes = libmori_shmem_device.mori_shmem_n_pes()
+            
+            # Store results
+            tl.store(output_pe, pe)
+            tl.store(output_npes, npes)
+        
+        # Allocate output tensors on GPU
+        output_pe = torch.zeros(1, dtype=torch.int32, device=f'cuda:{rank}')
+        output_npes = torch.zeros(1, dtype=torch.int32, device=f'cuda:{rank}')
+        
+        # Launch kernel
+        test_kernel[(1,)](output_pe, output_npes)
+        
+        # Synchronize and check results
+        torch.cuda.synchronize()
+        
+        kernel_pe = output_pe.item()
+        kernel_npes = output_npes.item()
+        
+        assert kernel_pe == rank, f"Kernel PE mismatch: expected {rank}, got {kernel_pe}"
+        assert kernel_npes == world_size, f"Kernel nPEs mismatch: expected {world_size}, got {kernel_npes}"
+        
+        # Barrier before finalize
+        mori_shmem.shmem_barrier_all()
+        
+        # Finalize
+        mori_shmem.shmem_finalize()
+        
+        if rank == 0:
+            print(f"libmori_shmem_device kernel test passed with {world_size} processes")
+            print(f"  - Kernel correctly returned PE={kernel_pe}, nPEs={kernel_npes}")
+
+
+def test_mori_shmem_device_kernel():
+    """Test libmori_shmem_device Python bindings in Triton kernel"""
+    
+    world_size = int(os.environ.get('WORLD_SIZE', 8))
+    master_port = int(os.environ.get('MASTER_PORT', 29502))
+    
+    torch.multiprocessing.spawn(
+        _test_mori_shmem_device_kernel,
+        args=(world_size, master_port),
+        nprocs=world_size,
+        join=True,
+    )
+
+
 if __name__ == "__main__":
-    test_mori_shmem_torch_init()
+    # test_mori_shmem_torch_init()
     test_mori_shmem_uniqueid_init()
+    test_mori_shmem_device_kernel()
     print("All tests passed!")
