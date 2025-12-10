@@ -3,7 +3,8 @@
 	url = https://github.com/ROCm/rocSHMEM.git
 [submodule "3rdparty/triton"]
 	path = 3rdparty/triton
-	url = https://github.com/ByteDance-Seed/triton.git
+	url = https://github.com/jhchouuu/triton.git
+	branch = mori_shmem_support
 [submodule "3rdparty/mori"]
 	path = 3rdparty/mori
 	url = https://github.com/ROCm/mori.git
