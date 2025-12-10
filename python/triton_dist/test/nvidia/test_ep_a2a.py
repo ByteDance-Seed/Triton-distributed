@@ -36,6 +36,7 @@ import random
 import os
 
 from triton_dist.layers.nvidia import EPAll2AllLayer
+from triton_dist.test.utils import assert_allclose
 
 EP_GROUP = None
 RANK = int(os.environ.get("RANK", 0))
@@ -179,7 +180,7 @@ def parse_args():
     parser.add_argument("--bench_iters", default=1, type=int, help="perf iterations")
     parser.add_argument("--drop_ratio", default=0.1, type=float, help="the token drop ratio")
     parser.add_argument("--rounds", default=1, type=int, help="random data round")
-    parser.add_argument("--sm_margin", default=16, type=int, help="sm margin")
+    parser.add_argument("--sm_margin", default=64, type=int, help="sm margin")
     parser.add_argument("--dtype", default="bfloat16", help="data type", choices=list(DTYPE_MAP.keys()))
     parser.add_argument("--weight_dtype", default="float32", help="weight type", choices=list(DTYPE_MAP.keys()))
     parser.add_argument("--profile", action="store_true")
@@ -187,6 +188,7 @@ def parse_args():
     parser.add_argument("--has_weight", action="store_true")
     parser.add_argument("--with-scatter-indices", action="store_true")
     parser.add_argument("--use_aot", action="store_true", help="use aot kernel")
+    parser.add_argument("--enable-local-combine", action="store_true")
     return parser.parse_args()
 
 
@@ -429,7 +431,8 @@ if __name__ == "__main__":
     input_dtype = DTYPE_MAP[args.dtype]
     weight_dtype = DTYPE_MAP[args.weight_dtype]
     triton_a2a_op = EPAll2AllLayer(EP_GROUP, args.M, args.N, args.topk, RANK, args.G, LOCAL_WORLD_SIZE, WORLD_SIZE,
-                                   input_dtype, weight_dtype=weight_dtype, num_sm=args.sm_margin, use_aot=args.use_aot)
+                                   input_dtype, weight_dtype=weight_dtype, num_sm=args.sm_margin,
+                                   enable_local_combine=args.enable_local_combine, use_aot=args.use_aot)
 
     def _make_data(token_num):
         exp_indices = generate_random_exp_indices(token_num, args.G, args.topk, args.drop_ratio)
@@ -474,6 +477,7 @@ if __name__ == "__main__":
                     input, exp_indices, weight=weight, full_scatter_indices=full_scatter_indices)
                 dispatch_out_list.append((dispatch_out, dispatch_weight))
                 # torch.cuda.synchronize()
+                #  weighted sum may cause numerical difference if enable_local_combine
                 if args.has_weight:
                     triton_combine_input = (dispatch_weight.reshape(-1, 1) * dispatch_out).to(input_dtype)
                 else:
@@ -524,7 +528,7 @@ if __name__ == "__main__":
                     )
                 try:
                     if not shape_only:
-                        torch.testing.assert_close(torch_combine_out, triton_combine_out, atol=1e-2, rtol=1e-2)
+                        assert_allclose(torch_combine_out, triton_combine_out, atol=1e-2, rtol=1e-2)
                     else:
                         assert torch_combine_out.shape == triton_combine_out.shape, f"torch_combine_out.shape = {torch_combine_out.shape}, triton_combine_out.shape = {triton_combine_out.shape}"
                 except Exception as e:
@@ -579,13 +583,13 @@ if __name__ == "__main__":
             os.makedirs(prof_dir, exist_ok=True)
             ctx.export_chrome_trace(f"{prof_dir}/trace_rank{EP_GROUP.rank()}.json.gz")
 
+        print(f"RANK {RANK}: triton dispatch perf = {triton_perf}ms, triton_combine_perf = {triton_combine_perf}ms")
+
         _check(sorted_triton_dispatch_out, sorted_ref_dispatch_out)
 
         torch.cuda.synchronize()
         torch.distributed.barrier()
-        torch.testing.assert_close(ref_combine_out, combined_out, rtol=1e-2, atol=1e-2)
-
-        print(f"RANK {RANK}: triton dispatch perf = {triton_perf}ms, triton_combine_perf = {triton_combine_perf}ms")
+        assert_allclose(ref_combine_out, combined_out, rtol=1e-2, atol=1e-2)
 
     triton_a2a_op.finalize()
     finalize_distributed()
