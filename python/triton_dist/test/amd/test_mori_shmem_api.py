@@ -292,8 +292,71 @@ def test_mori_shmem_device_kernel():
     )
 
 
+def _test_mori_ring_put(rank, world_size, master_port):
+    """Test mori_shmem_int_p with ring communication pattern"""
+    
+    with TorchDistContext(rank=rank, world_size=world_size, master_port=str(master_port)):
+        import triton
+        from triton.language.extra.hip import libmori_shmem_device
+        import mori.shmem as mori_shmem
+        
+        # Initialize mori shmem
+        mori_shmem.shmem_torch_process_group_init("default")
+        
+        # Define ring put kernel
+        @triton.jit
+        def ring_put(ptr):
+            mype = libmori_shmem_device.mori_shmem_my_pe()
+            npes = libmori_shmem_device.mori_shmem_n_pes()
+            peer = (mype + 1) % npes
+            libmori_shmem_device.mori_shmem_int_p(ptr, mype, peer)
+        
+        shmem_ptr = mori_shmem.shmem_malloc(32)
+        
+        import ctypes
+        ptr = ctypes.cast(shmem_ptr, ctypes.POINTER(ctypes.c_int32))
+        for i in range(8):
+            ptr[i] = -1
+        
+        mori_shmem.shmem_barrier_all()
+        
+        ring_put[(1,)](shmem_ptr)
+        
+        mori_shmem.shmem_barrier_all()
+        torch.cuda.synchronize()
+        
+        actual = ptr[0]
+        # Verify: should receive from previous PE in ring
+        expected = (rank - 1 + world_size) % world_size
+        
+        assert actual == expected, f"Ring put failed on rank {rank}: received={actual}, expected={expected}"
+        
+        if rank == 0:
+            print(f"Ring put test passed with {world_size} processes")
+            print(f"  - All PEs correctly received data from previous PE in ring")
+        
+        # Cleanup
+        mori_shmem.shmem_free(shmem_ptr)
+        mori_shmem.shmem_finalize()
+
+
+def test_mori_ring_put():
+    """Test mori_shmem_int_p with ring communication pattern"""
+    
+    world_size = int(os.environ.get('WORLD_SIZE', 8))
+    master_port = int(os.environ.get('MASTER_PORT', 29503))
+    
+    torch.multiprocessing.spawn(
+        _test_mori_ring_put,
+        args=(world_size, master_port),
+        nprocs=world_size,
+        join=True,
+    )
+
+
 if __name__ == "__main__":
     # test_mori_shmem_torch_init()
     test_mori_shmem_uniqueid_init()
     test_mori_shmem_device_kernel()
+    test_mori_ring_put()
     print("All tests passed!")

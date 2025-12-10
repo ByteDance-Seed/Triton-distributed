@@ -31,3 +31,7 @@ def mori_shmem_my_pe():
 
 def mori_shmem_n_pes():
     ...
+
+
+def mori_shmem_int_p(dest, value, pe):
+    ...
