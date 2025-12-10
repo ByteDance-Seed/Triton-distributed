@@ -242,11 +242,17 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
 
 def get_triton_dist_world():
     global _TRITON_DIST_WORLD
+    if not _TRITON_DIST_WORLD:
+        warnings.warn("Using triton_dist but it has not been initialized. "
+                      "This will result in Undefined Behavior.")
     return _TRITON_DIST_WORLD
 
 
 def get_triton_dist_local_world_size():
     global _TRITON_DIST_LOCAL_WORLD_SIZE
+    if not _TRITON_DIST_LOCAL_WORLD_SIZE:
+        warnings.warn("Using triton_dist but it has not been initialized. "
+                      "This will result in Undefined Behavior.")
     return _TRITON_DIST_LOCAL_WORLD_SIZE
 
 
