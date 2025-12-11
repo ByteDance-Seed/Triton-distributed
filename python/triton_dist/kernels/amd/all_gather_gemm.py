@@ -32,12 +32,13 @@ import triton_dist.language as dl
 import triton_dist.tune
 from triton.runtime.driver import driver
 
+import triton_dist
 from triton_dist.language.extra.language_extra import st
 from hip import hip
 from triton_dist.utils import HIP_CHECK, launch_cooperative_grid_options
 from typing import Optional, List
 import pyrocshmem
-from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel, barrier_on_this_grid
+from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel_v2, barrier_on_this_grid
 
 
 def _get_default_num_xcds():
@@ -413,7 +414,7 @@ def matmul_get_configs():
     return configs
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def local_copy_and_barrier_all_ipc_kernel(
     rank,
     local_buf_ptr,
@@ -469,7 +470,8 @@ def local_copy_and_barrier_all_ipc_kernel(
 
     barrier_on_this_grid(sync_grid_buf_ptr, use_cooperative=False)
     if sm_id == 0:
-        barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs)
+        barrier_all_ipc_kernel_v2(rank, num_ranks, comm_buf_base_ptrs)
+        # barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs)
 
 
 @triton.jit
@@ -1179,4 +1181,5 @@ def allgather(A: torch.Tensor, ctx):
         cp_engine_producer_all_gather_full_mesh_push_multi_stream(ctx.rank, ctx.num_ranks, A, ctx.workspace_tensors,
                                                                   ctx.one, ctx.M_PER_CHUNK, [current_stream],
                                                                   ctx.barrier_tensors)
-    barrier_all_ipc_kernel[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)
+
+    barrier_all_ipc_kernel_v2[(1, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr)

@@ -107,7 +107,7 @@ def load_grid_ws_abi_address():
 
 @triton.jit
 def cooperative_barrier_on_this_grid():
-    """ triton implementation of cooperative_group::thid_grid().sync()
+    """ triton implementation of cooperative_group::this_grid().sync()
     WARNING: use with care. better launch triton with launch_cooperative_grid=True to throw an explicit error instead of hang without notice.
     """
     ptr = load_grid_ws_abi_address() + 1
@@ -152,7 +152,8 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
 })
 @triton_dist.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
 def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, symm_flag_ptr):
-    """ NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
+    """
+    NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
     """
     with dl.simt_exec_region() as (thread_idx, block_size):
         local_rank_offset = rank - local_rank
@@ -181,7 +182,8 @@ def _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, local_world_
 
 @triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_flags, target_value):
-    """ symm_flags is expected to:
+    """
+        symm_flags is expected to:
         1. of int32 dtype
         2. has at least num_ranks * 2 elements
         3. of symmetric pointer
@@ -197,7 +199,8 @@ def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_fl
 @triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, target_value,
                                       use_cooperative: tl.constexpr):
-    """ symm_flags is expected to:
+    """
+        symm_flags is expected to:
         1. of int32 dtype
         2. has at least num_ranks * 2 + 1 elements
         3. of symmetric pointer

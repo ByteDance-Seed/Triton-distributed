@@ -27,7 +27,7 @@ import torch
 import torch.distributed
 import pyrocshmem
 from triton_dist.utils import initialize_distributed, finalize_distributed, sleep_async
-from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel, barrier_all_ipc_kernel_v2
+from triton_dist.kernels.amd.common_ops import barrier_all_kernel, barrier_all_kernel_v2
 from triton_dist.profiler_utils import group_profile, perf_func
 
 if __name__ == "__main__":
@@ -38,35 +38,36 @@ if __name__ == "__main__":
 
     profile = False
     dtype = torch.float16
-    signals = pyrocshmem.rocshmem_create_tensor_list_intra_node([WORLD_SIZE], torch.int32)
-    signals_ptr = torch.tensor([t.data_ptr() for t in signals]).cuda()
-    signals[LOCAL_RANK].fill_(0)
+
+    comm = pyrocshmem.rocshmem_create_tensor((WORLD_SIZE, ), torch.int32)
+    comm.fill_(0)
     torch.distributed.barrier(group=TP_GROUP)
     torch.cuda.synchronize()
 
     with group_profile("barrier", do_prof=profile, group=TP_GROUP):
-        barrier_all_ipc_kernel[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, signals_ptr)
+        barrier_all_kernel[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, comm)
         torch.cuda.synchronize()
         print("barrier all passed")
-        print(signals[LOCAL_RANK])
+        print(comm)
         torch.distributed.barrier(group=TP_GROUP)
 
-        barrier_all_ipc_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, signals_ptr)
+        barrier_all_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, comm)
+
         torch.cuda.synchronize()
         print("barrier all v2 passed")
-        print(signals[LOCAL_RANK])
+        print(comm)
         torch.distributed.barrier(group=TP_GROUP)
 
     sleep_async(10)
-    fn = lambda: barrier_all_ipc_kernel[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, signals_ptr)
+    fn = lambda: barrier_all_kernel[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, comm)
     _, duration_ms = perf_func(fn, iters=10, warmup_iters=5)
     print(f"barrier_all {duration_ms * 1000:0.2f} us/iter")
 
-    barrier_all_ipc_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, signals_ptr)
+    barrier_all_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, comm)
     torch.cuda.synchronize()
 
     sleep_async(10)
-    fn = lambda: barrier_all_ipc_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, signals_ptr)
+    fn = lambda: barrier_all_kernel_v2[(1, )](LOCAL_RANK, LOCAL_WORLD_SIZE, comm)
     _, duration_ms = perf_func(fn, iters=10, warmup_iters=5)
     print(f"barrier_all v2 {duration_ms * 1000:0.2f} us/iter")
 
@@ -74,5 +75,5 @@ if __name__ == "__main__":
     # without explicit cleanup, rocshmem barrier_all collective operation
     # is called during python shutdown when some ranks may already have exited,
     # which may cause segfaults.
-    del signals
+    del comm
     finalize_distributed()

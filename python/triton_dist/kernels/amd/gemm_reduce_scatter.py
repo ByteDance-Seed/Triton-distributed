@@ -29,8 +29,9 @@ import triton.language as tl
 from typing import List
 
 import pyrocshmem
-from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
+import triton_dist
 import triton_dist.tune
+from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 from triton.runtime.driver import driver
 
 SIGNAL_DTYPE = torch.int32
@@ -364,13 +365,13 @@ def gemm_rs_intra_node_op(A: torch.Tensor, B: torch.Tensor, output_dtype: torch.
     assert A.dtype == B.dtype
     M_per_rank = M // num_ranks
     current_stream = torch.cuda.current_stream()
-    barrier_all_on_stream(rank, num_ranks, sync_bufs, current_stream)
+    barrier_all_on_stream(current_stream)
 
     output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
     matmul_fuse_scatter(A, B, scatter_bufs_ptr, rank, num_ranks, gemm_config=gemm_config)
     scatter_out = scatter_bufs[rank][:M]
 
-    barrier_all_on_stream(rank, num_ranks, sync_bufs, current_stream)
+    barrier_all_on_stream(current_stream)
     output = ring_reduce_after_scatter(rank, num_ranks, scatter_out, current_stream)
     return output
 

@@ -57,3 +57,5 @@ def test_barrier_on_this_grid():
 
 
 test_barrier_on_this_grid()
+
+## TODO: add other barrier tests

@@ -27,12 +27,11 @@ import torch
 import triton.language as tl
 import triton_dist
 import triton_dist.language as dl
-from triton_dist.language.extra import libshmem_device
 from typing import Optional
 
 from triton_dist.language.extra.hip.language_extra import load, atomic_add, sync_grid, atomic_cas, tid, __syncthreads
 from hip import hip
-from triton_dist.utils import HIP_CHECK
+from triton_dist.utils import HIP_CHECK, rocshmem_barrier_all_on_stream
 
 
 @triton.jit
@@ -101,7 +100,7 @@ def load_grid_ws_abi_address():
 
 @triton.jit
 def cooperative_barrier_on_this_grid():
-    """ triton implementation of cooperative_group::thid_grid().sync()
+    """ triton implementation of cooperative_group::this_grid().sync()
     WARNING: use with care. better launch triton with launch_cooperative_grid=True to throw an explicit error instead of hang without notice.
     """
     sync_grid()  # use __ockl_grid_sync
@@ -116,6 +115,21 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
 
 
 @triton.jit(do_not_specialize=["rank"])
+def barrier_all_ipc_kernel_v2(rank, num_ranks, comm_buf_base_ptrs):
+    if tid(0) < num_ranks:
+        remote_base_ptr = tl.load(comm_buf_base_ptrs + tid(0)).to(tl.pointer_type(tl.int32))
+        while atomic_cas(remote_base_ptr + rank, 0, 1, scope="system", semantic="release") != 0:
+            pass
+
+    if tid(0) < num_ranks:
+        local_base_ptr = tl.load(comm_buf_base_ptrs + rank).to(tl.pointer_type(tl.int32))
+        while atomic_cas(local_base_ptr + tid(0), 1, 0, scope="system", semantic="acquire") != 1:
+            pass
+
+    __syncthreads()
+
+
+@triton.jit(do_not_specialize=["rank"])
 def barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs):
     for i in range(num_ranks):
         remote_base_ptr = tl.load(comm_buf_base_ptrs + i).to(tl.pointer_type(tl.int32))
@@ -127,23 +141,25 @@ def barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs):
         while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
             pass
 
-
-@triton.jit(do_not_specialize=["rank"])
-def barrier_all_ipc_kernel_v2(rank, num_ranks, comm_buf_base_ptrs):
-    if tid(0) < num_ranks:
-        remote_base_ptr = tl.load(comm_buf_base_ptrs + tid(0)).to(tl.pointer_type(tl.int32))
-        while atomic_cas(remote_base_ptr + rank, 0, 1, semantic="release", scope="system") != 0:
-            pass
-    __syncthreads()
-
-    if tid(0) < num_ranks:
-        local_base_ptr = tl.load(comm_buf_base_ptrs + rank).to(tl.pointer_type(tl.int32))
-        while atomic_cas(local_base_ptr + tid(0), 1, 0, semantic="acquire", scope="system") != 1:
-            pass
     __syncthreads()
 
 
-@triton_dist.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank", "num_ranks"])
+def barrier_all_kernel_v2(rank, num_ranks, comm_buf_ptr):
+    if tid(0) < num_ranks:
+        remote_base_ptr = dl.symm_at(comm_buf_ptr, tid(0))
+        while atomic_cas(remote_base_ptr + rank, 0, 1, scope="system", semantic="release") != 0:
+            pass
+
+    if tid(0) < num_ranks:
+        local_base_ptr = dl.symm_at(comm_buf_ptr, rank)
+        while atomic_cas(local_base_ptr + tid(0), 1, 0, scope="system", semantic="acquire") != 1:
+            pass
+
+    __syncthreads()
+
+
+@triton_dist.jit(do_not_specialize=["rank", "num_ranks"])
 def barrier_all_kernel(rank, num_ranks, comm_buf_ptr):
     for i in range(num_ranks):
         remote_base_ptr = dl.symm_at(comm_buf_ptr, i)
@@ -155,34 +171,14 @@ def barrier_all_kernel(rank, num_ranks, comm_buf_ptr):
         while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
             pass
 
-    tl.debug_barrier()
+    __syncthreads()
 
 
-@triton_dist.jit
-def barrier_all_with_ctx_kernel(ctx, rank, num_ranks, comm_buf_ptr):
-    libshmem_device.set_rocshmem_ctx(ctx)
-    barrier_all_kernel(rank, num_ranks, comm_buf_ptr)
-
-
-def barrier_all_on_stream(
-    rank,
-    num_ranks,
-    sync_bufs_ptr: torch.Tensor,
-    stream: torch.cuda.Stream,
-):
-    with torch.cuda.stream(stream):
-        barrier_all_ipc_kernel[(1, )](rank, num_ranks, sync_bufs_ptr)
-
-
-def barrier_all_with_ctx_on_stream(
-    ctx,
-    rank,
-    num_ranks,
-    comm_buf: torch.Tensor,
-    stream: torch.cuda.Stream,
-):
-    with torch.cuda.stream(stream):
-        barrier_all_with_ctx_kernel[(1, )](ctx, rank, num_ranks, comm_buf)
+def barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+    '''
+    call rocshmem barrier api
+    '''
+    return rocshmem_barrier_all_on_stream(stream)
 
 
 def _wait_eq_hip(signal_tensor: torch.Tensor, val: int, stream: Optional[torch.cuda.Stream] = None):

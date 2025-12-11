@@ -28,12 +28,13 @@ from typing import List
 import triton
 import triton.language as tl
 import triton_dist
+import triton_dist.tune
 import triton_dist.language as dl
 import pyrocshmem
-from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.language_extra import st
-import triton_dist.tune
+
 from triton.runtime.driver import driver
+from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel
 
 
 @dataclasses.dataclass
@@ -52,6 +53,7 @@ class GemmARContext:
         return self.symm_gemm_out_buf.reshape(-1)[:M * N].reshape(M, N)
 
 
+## TODO: get rid of rocshmem_create_tensor_list_intra_node
 def create_gemm_ar_context(ar_stream: torch.cuda.Stream, rank, world_size, max_M, N, dtype, MIN_BLOCK_SIZE_M=64,
                            MIN_BLOCK_SIZE_N=64):
     comm_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([world_size], torch.int32)
@@ -85,17 +87,7 @@ def reset_signal_and_barrier_all_kernel(
         tl.store(tile_signal_ptr + i, 0)
 
     if sm_id == 0:
-        for i in range(num_ranks):
-            remote_base_ptr = tl.load(comm_buf_base_ptrs + i).to(tl.pointer_type(tl.int32))
-            while tl.atomic_cas(remote_base_ptr + rank, 0, 1, scope="sys", sem="release") != 0:
-                pass
-
-        for i in range(num_ranks):
-            local_base_ptr = tl.load(comm_buf_base_ptrs + rank).to(tl.pointer_type(tl.int32))
-            while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
-                pass
-
-        tl.debug_barrier()
+        barrier_all_ipc_kernel(rank, num_ranks, comm_buf_base_ptrs)
 
 
 @triton.jit
@@ -114,7 +106,6 @@ def kernel_persistent_gemm_notify_ar(
     b_ptr,
     c_ptr,  # Input/Output pointers
     tile_signal_ptr,  # Tile completion signals
-    ctx,  # rocshmem context
     M,
     N,
     K,  # Matrix dimensions
@@ -130,7 +121,6 @@ def kernel_persistent_gemm_notify_ar(
     GROUP_SIZE_M: tl.constexpr,
     NUM_GEMM_SMS: tl.constexpr,
 ):
-    libshmem_device.set_rocshmem_ctx(ctx)
     rank = dl.rank()
     world_size = dl.num_ranks()
 
@@ -176,10 +166,8 @@ def kernel_persistent_gemm_notify_ar(
 
 
 @triton_dist.jit
-def consumer_all_reduce_kernel(symm_buf_ptr, tile_signal_ptr, ctx,  # rocshmem context
-                               M, N, stride_cm, stride_cn, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                               GROUP_SIZE_M: tl.constexpr, NUM_COMM_SMS: tl.constexpr):
-    libshmem_device.set_rocshmem_ctx(ctx)
+def consumer_all_reduce_kernel(symm_buf_ptr, tile_signal_ptr, M, N, stride_cm, stride_cn, BLOCK_SIZE_M: tl.constexpr,
+                               BLOCK_SIZE_N: tl.constexpr, GROUP_SIZE_M: tl.constexpr, NUM_COMM_SMS: tl.constexpr):
     rank = dl.rank()
     world_size = dl.num_ranks()
     pid = tl.program_id(0)
@@ -326,7 +314,6 @@ def gemm_allreduce_op(ctx: GemmARContext, A: torch.Tensor, B: torch.Tensor, gemm
     current_stream = torch.cuda.current_stream()
     ar_stream = ctx.ar_stream
     ar_stream.wait_stream(current_stream)
-    rocshmem_ctx = pyrocshmem.rocshmem_get_device_ctx()
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
     M, K = A.shape
     N, K = B.shape
@@ -335,12 +322,11 @@ def gemm_allreduce_op(ctx: GemmARContext, A: torch.Tensor, B: torch.Tensor, gemm
     BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
     GROUP_SIZE_M = gemm_config.kwargs["GROUP_SIZE_M"]
-    kernel_persistent_gemm_notify_ar[(NUM_GEMM_SMS, )](A, B, symm_c, tile_signal, rocshmem_ctx, M, N, K, A.stride(0),
-                                                       A.stride(1), B.stride(0), B.stride(1), symm_c.stride(0),
-                                                       symm_c.stride(1), NUM_GEMM_SMS=NUM_GEMM_SMS,
-                                                       **gemm_config.all_kwargs())
+    kernel_persistent_gemm_notify_ar[(NUM_GEMM_SMS, )](A, B, symm_c, tile_signal, M, N, K, A.stride(0), A.stride(1),
+                                                       B.stride(0), B.stride(1), symm_c.stride(0), symm_c.stride(1),
+                                                       NUM_GEMM_SMS=NUM_GEMM_SMS, **gemm_config.all_kwargs())
     with torch.cuda.stream(ar_stream):
-        consumer_all_reduce(symm_c, tile_signal, rocshmem_ctx, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+        consumer_all_reduce(symm_c, tile_signal, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
                             GROUP_SIZE_M=GROUP_SIZE_M, NUM_COMM_SMS=NUM_COMM_SMS)
     current_stream.wait_stream(ar_stream)
     reset_signal_and_barrier_all_kernel[(num_sms, )](ctx.rank, ctx.num_ranks, ctx.comm_buf_ptr, tile_signal,
@@ -348,10 +334,8 @@ def gemm_allreduce_op(ctx: GemmARContext, A: torch.Tensor, B: torch.Tensor, gemm
     return symm_c
 
 
-def consumer_all_reduce(symm_buf, tile_signal, rocshmem_ctx, BLOCK_SIZE_M=16, BLOCK_SIZE_N=64, GROUP_SIZE_M=1,
-                        NUM_COMM_SMS=16):
+def consumer_all_reduce(symm_buf, tile_signal, BLOCK_SIZE_M=16, BLOCK_SIZE_N=64, GROUP_SIZE_M=1, NUM_COMM_SMS=16):
     M, N = symm_buf.shape
-    consumer_all_reduce_kernel[(NUM_COMM_SMS, )](symm_buf, tile_signal, rocshmem_ctx, M, N, symm_buf.stride(0),
-                                                 symm_buf.stride(1), BLOCK_SIZE_M=BLOCK_SIZE_M,
-                                                 BLOCK_SIZE_N=BLOCK_SIZE_N, GROUP_SIZE_M=GROUP_SIZE_M,
-                                                 NUM_COMM_SMS=NUM_COMM_SMS, num_warps=16)
+    consumer_all_reduce_kernel[(NUM_COMM_SMS, )](symm_buf, tile_signal, M, N, symm_buf.stride(0), symm_buf.stride(1),
+                                                 BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                                 GROUP_SIZE_M=GROUP_SIZE_M, NUM_COMM_SMS=NUM_COMM_SMS, num_warps=16)

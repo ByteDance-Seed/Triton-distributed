@@ -27,16 +27,14 @@ import torch
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
-from triton_dist.kernels.amd.common_ops import barrier_all_with_ctx_on_stream
+from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 import pyrocshmem
-from triton_dist.language.extra.hip.language_extra import tid, st, __syncthreads
-from triton_dist.language.extra import libshmem_device
 import triton_dist
+from triton_dist.language.extra.hip.language_extra import tid, st, __syncthreads
 
 
 @triton_dist.jit
 def producer_consumer_kernel(
-    ctx,
     rank: tl.constexpr,
     num_ranks: tl.constexpr,
     input_ptr,
@@ -49,7 +47,6 @@ def producer_consumer_kernel(
     NUM_PRODUCER_SMS: tl.constexpr,
     NUM_CONSUMER_SMS: tl.constexpr,
 ):
-    libshmem_device.set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     # This kernel issues async-tasks to two group of blocks
     if pid < NUM_PRODUCER_SMS:
@@ -120,16 +117,12 @@ def main(TP_GROUP):
     rank = TP_GROUP.rank()
     num_ranks = TP_GROUP.size()
 
-    ctx = pyrocshmem.rocshmem_get_device_ctx()
     # The created tensor is by-default on current cuda device
     queue = pyrocshmem.rocshmem_create_tensor((QUEUE_SIZE * BLOCK_SIZE, ), torch.float32)
     queue.fill_(-1)
     # Currently we use `store.release.u32` to impl notify signal, dl.notify requires 64bit unsigned signal type,
     signal = pyrocshmem.rocshmem_create_tensor((QUEUE_SIZE, ), torch.int32)
     signal.fill_(0)  # The initial value of signal should be 0s
-
-    comm = pyrocshmem.rocshmem_create_tensor((num_ranks, ), torch.int32)
-    comm.fill_(0)
 
     # You need a barrier all to make sure the above initialization
     # is visible to all the other ranks.
@@ -150,10 +143,9 @@ def main(TP_GROUP):
         # by using flipping barriers. We will cover this optimization in future tutorial.
         # TODO: tutorial for flipping barriers.
         signal.fill_(0)
-        barrier_all_with_ctx_on_stream(ctx, rank, num_ranks, comm, stream)
+        barrier_all_on_stream(stream)
 
         producer_consumer_kernel[(20, )](  # use 20 SMs
-            ctx,
             rank,
             num_ranks,
             input_data,

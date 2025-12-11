@@ -54,8 +54,7 @@ from triton_dist.utils import (
     dist_print,
 )
 from triton_dist.kernels.amd import create_gemm_rs_intra_node_context
-from triton_dist.kernels.amd.common_ops import (
-    barrier_all_on_stream, )
+from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 
 assert triton.runtime.driver.active.get_current_target().backend == "hip"
 
@@ -317,8 +316,7 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         M_per_rank = M // ctx.num_ranks
 
         current_stream = torch.cuda.current_stream()
-        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr,
-                              current_stream)
+        barrier_all_on_stream(current_stream)
 
         output = torch.empty((M_per_rank, N),
                              dtype=output_dtype,
@@ -349,8 +347,7 @@ class triton_gemm_rs_intra_node(torch.nn.Module):
         scatter_out = ctx.scatter_bufs[ctx.rank][:M]
 
         # barrier all to wait for gemm finish
-        barrier_all_on_stream(ctx.rank, ctx.num_ranks, ctx.sync_bufs_ptr,
-                              current_stream)
+        barrier_all_on_stream(current_stream)
 
         # consumer reduction
         output = ring_reduce_after_scatter(ctx.rank, ctx.num_ranks,

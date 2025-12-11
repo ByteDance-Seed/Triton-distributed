@@ -217,7 +217,7 @@ if __name__ == "__main__":
     torch.testing.assert_close(torch_output, dist_triton_output, atol=atol, rtol=rtol)
     torch.cuda.synchronize()
 
-    dist_print(f"#{RANK} dist-triton {dist_triton_perf:0.3f} ms/iter" \
+    dist_print(f"#{RANK} dist-triton {dist_triton_perf:0.3f} ms/iter " \
             f"torch {torch_perf:0.3f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
     # Explicitly delete rocSHMEM-backed tensors before finalization

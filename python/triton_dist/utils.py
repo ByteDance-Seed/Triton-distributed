@@ -212,6 +212,11 @@ def nvshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
     nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=TorchStreamWrapper(stream))
 
 
+def rocshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+    stream = stream.cuda_stream or torch.cuda.current_stream().cuda_stream
+    pyrocshmem.rocshmem_barrier_all_on_stream(stream)
+
+
 def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.distributed.ProcessGroup:
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -347,8 +352,9 @@ def HIP_CHECK(call_result):
     result = call_result[1:]
     if len(result) == 1:
         result = result[0]
-    if isinstance(err, hip.hipError_t) and err != hip.hipError_t.hipSuccess:
-        raise RuntimeError(str(err))
+    if isinstance(err, hip.hipError_t):
+        if err != hip.hipError_t.hipSuccess:
+            raise RuntimeError(f"HIP Error: {str(err)}")
     return result
 
 
