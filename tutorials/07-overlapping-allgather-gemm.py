@@ -35,7 +35,7 @@ In doing so, you will learn about:
 * Optimizing the internode communication with 2D Allgather.
 
     # To run this tutorial
-    source ./scripts/sentenv.sh
+    source ./scripts/setenv.sh
     bash ./scripts/launch.sh ./tutorials/07-overlapping-allgather-gemm.py
 
 """

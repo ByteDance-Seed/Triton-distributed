@@ -55,7 +55,7 @@ At the core of our implementation are low-level primitives that manage the commu
 .. code-block:: bash
 
     # To run this tutorial
-    source ./scripts/sentenv.sh
+    source ./scripts/setenv.sh
     bash ./scripts/launch.sh tutorials/04-deepseek-infer-all2all.py
 
 """
@@ -650,5 +650,5 @@ if __name__ == "__main__":
     torch.distributed.destroy_process_group()
 
 # To run this tutorial
-# source ./scripts/sentenv.sh
+# source ./scripts/setenv.sh
 # bash ./scripts/launch.sh tutorials/04-deepseek-infer-all2all.py

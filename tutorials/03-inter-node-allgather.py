@@ -30,7 +30,7 @@ In this tutorial, you will write a low latency all gather kernel using using Tri
 .. code-block:: bash
 
     # To run this tutorial
-    source ./scripts/sentenv.sh
+    source ./scripts/setenv.sh
     bash ./scripts/launch.sh tutorials/03-inter-node-allgather.py
 
 """
@@ -229,7 +229,7 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
         warmup_iters=5,
         iters=10,
     )
-    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1)
+    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE
     print(
         f"[NCCL] RANK = {RANK}, {nbytes // 1024} KB, Latency {duration_per_iter_ms * 1000:0.2f} us, Bus bandwith = {gbps:0.2f} GB/S"
     )
@@ -243,7 +243,7 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
         iters=10,
     )
 
-    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1)
+    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE
     print(
         f"[Triton] RANK = {RANK}, {nbytes // 1024} KB, Latency {duration_per_iter_ms * 1000:0.2f} us, Bus bandwith = {gbps:0.2f} GB/S"
     )
@@ -264,7 +264,7 @@ nbytes = 8 * 1024  # total bytes for AllGather
 # used to avoid data corupt when all_gather kernels are in different phases.
 symm_ag_buffer = nvshmem_create_tensor((2, nbytes), torch.int8)
 
-# keep some veriables here
+# keep some variables here
 ctx = AllGatherContext(
     rank=TP_GROUP.rank(),
     node=RANK // LOCAL_WORLD_SIZE,

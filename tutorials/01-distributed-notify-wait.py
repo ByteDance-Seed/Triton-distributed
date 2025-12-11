@@ -41,7 +41,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    source ./scripts/sentenv.sh
+    source ./scripts/setenv.sh
     bash ./scripts/launch.sh tutorials/01-distributed-notify-wait.py
 
 """

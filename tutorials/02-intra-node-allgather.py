@@ -37,7 +37,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    source ./scripts/sentenv.sh
+    source ./scripts/setenv.sh
     bash ./scripts/launch.sh tutorials/02-intra-node-allgather.py
 
 """
