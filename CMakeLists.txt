@@ -25,6 +25,7 @@ option(USE_TRITON_DISTRIBUTED_AOT "Build the Triton Distributed with AOT" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+option(TRITON_USE_MACA "Use MACA" OFF)
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -91,6 +92,9 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
 
+if (TRITON_USE_MACA)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_MACA -DUSE_BUILTIN -Wno-unused-result -Wno-attributes")
+endif()
 
 # #########
 # LLVM
@@ -161,6 +165,9 @@ include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablege
 # backend
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
+if (TRITON_USE_MACA)
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/metax/include)
+endif()
 
 # link_directories(${LLVM_LIBRARY_DIR})
 add_subdirectory(3rdparty/triton/include)

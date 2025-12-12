@@ -21,8 +21,9 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 ################################################################################
-from triton_dist.utils import is_cuda, is_hip
+from triton_dist.utils import is_cuda, is_hip, is_maca
 
 if is_cuda():
     from .nvidia.common_ops import _wait_eq_cuda as wait_eq
@@ -30,6 +31,9 @@ if is_cuda():
 elif is_hip():
     from .amd.common_ops import _wait_eq_hip as wait_eq
     from .amd.common_ops import _set_signal_hip as set_signal
+elif is_maca():
+    from .metax.common_ops import _wait_eq_maca as wait_eq
+    from .metax.common_ops import _set_signal_maca as set_signal
 else:
     raise Exception("only support cuda and hip")
 

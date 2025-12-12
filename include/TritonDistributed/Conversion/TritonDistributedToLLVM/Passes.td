@@ -1,5 +1,6 @@
 //
 // Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+// 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 //
 #ifndef TRITONDISTRIBUTED_LLVM_CONVERSION_PASSES
 #define TRITONDISTRIBUTED_LLVM_CONVERSION_PASSES
@@ -78,5 +79,32 @@ def ConvertAMDDistributedToLLVM : Pass<"convert-amd-distributed-to-llvm", "mlir:
                "flush denorms for math functions">,
     ];
 }
+
+// METAX Backend
+#ifdef USE_MACA
+def ConvertMETAXDistributedToLLVM : Pass<"convert-metax-distributed-to-llvm", "mlir::ModuleOp"> {
+    let summary = "Convert TritonDistributed to LLVM";
+    let description = [{
+        The `convert-metax-distributed-to-llvm` pass performs lowering of
+        the distributed op for METAX backend.
+    }];
+    let constructor = "mlir::triton::createConvertMETAXDistributedToLLVMPass(/*computeCapability=*/80)";
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::math::MathDialect",
+                             "mlir::gpu::GPUDialect",
+                             "mlir::scf::SCFDialect",
+                             "mlir::LLVM::LLVMDialect",
+                             "mlir::triton::TritonDialect",
+                             "mlir::triton::gpu::TritonGPUDialect",
+                             "triton::distributed::DistributedDialect"];
+
+    let options = [
+        Option<"computeCapability", "compute-capability",
+               "int32_t", /*default*/"80",
+               "device compute capability">
+    ];
+}
+#endif
 
 #endif // TRITONDISTRIBUTED_LLVM_CONVERSION_PASSES

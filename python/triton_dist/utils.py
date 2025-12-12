@@ -21,6 +21,7 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 ################################################################################
 
 import datetime
@@ -49,12 +50,16 @@ import torch
 
 
 def is_cuda():
-    if torch.cuda.is_available() and (torch.version.hip is None):
+    if torch.cuda.is_available() and (torch.version.hip is None) and (getattr(torch.version,"maca", None) is None):
         return True
 
 
 def is_hip():
     if torch.cuda.is_available() and (torch.version.hip is not None):
+        return True
+
+def is_maca():
+    if torch.cuda.is_available() and (getattr(torch.version,"maca", None) is not None):
         return True
 
 
@@ -66,6 +71,9 @@ if is_cuda():
     from nvshmem.core.utils import _get_device
 elif is_hip():
     from hip import hip
+elif is_maca():
+    from maca import maca, macart
+    import pymxshmem
 else:
     pass
 
@@ -338,6 +346,12 @@ def HIP_CHECK(call_result):
         raise RuntimeError(str(err))
     return result
 
+def MACA_CHECK(err):
+    if isinstance(err, macart.mcError_t):
+        if err != macart.mcError_t.mcSuccess:
+            raise RuntimeError(f"MACA Error: {err}: {macart.mcGetErrorString(err)}")
+    else:
+        raise RuntimeError(f"Unknown error type: {err}")    
 
 def load_json(json_file):
     with open(json_file, "r", encoding="utf-8", errors="replace") as file:
