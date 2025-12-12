@@ -49,7 +49,7 @@ function download_and_copy() {
 export ROCSHMEM_DIR=${PROJECT_ROOT}/rocshmem_build/install
 export ROCSHMEM_INSTALL_DIR=${ROCSHMEM_DIR}
 export ROCSHMEM_HEADER=${ROCSHMEM_INSTALL_DIR}/include/rocshmem
-export OPENMPI_UCX_INSTALL_DIR="/opt/ompi_build/install/ompi"
+export OPENMPI_UCX_INSTALL_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 export ROCM_INSTALL_DIR="/opt/rocm"
 
 export PATH="${OPENMPI_UCX_INSTALL_DIR}/bin:$PATH"

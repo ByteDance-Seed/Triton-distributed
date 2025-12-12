@@ -133,32 +133,19 @@ def rocshmem_create_tensor_list_intra_node(shape: Sequence[int],
     return [symm_rocshmem_tensor(t, i) for i in range(rocshmem_n_pes())]
 
 
-def broadcast_cpu(tensor: torch.Tensor, src: int,
-                  group: torch.distributed.ProcessGroup):
-    if not tensor.is_cuda:
-        tensor_gpu = tensor.cuda()
-        torch.distributed.broadcast(tensor_gpu, src=src, group=group)
-        tensor.copy_(tensor_gpu)
-    else:
-        torch.distributed.broadcast(tensor, src=src, group=group)
-    torch.cuda.synchronize()
-
-
 def init_rocshmem_by_uniqueid(group: torch.distributed.ProcessGroup):
     rank, nranks = group.rank(), group.size()
+
     if rank == 0:
-        buffer: bytes = bytearray(rocshmem_get_uniqueid())  # noqa: F405
-        unique_id: torch.Tensor = torch.frombuffer(
-            buffer, dtype=torch.uint8).cpu().clone()
+        uid = rocshmem_get_uniqueid()
+        bcast_obj = [uid]
     else:
-        unique_id: torch.Tensor = torch.empty(128,
-                                              dtype=torch.uint8,
-                                              device="cpu")
+        bcast_obj = [None]
 
-    broadcast_cpu(tensor=unique_id, group=group, src=0)
+    torch.distributed.broadcast_object_list(bcast_obj, src=0, group=group)
+    torch.distributed.barrier(group=group)
 
-    unique_id = unique_id.numpy().tobytes()
-    rocshmem_init_attr(rank, nranks, unique_id)
+    rocshmem_init_attr(rank, nranks, bcast_obj[0])
     # rocshmem_barrier_all() ##
     torch.distributed.barrier(group=group)
     torch.cuda.synchronize()

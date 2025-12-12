@@ -12,7 +12,7 @@ pushd ${ROCSHMEM_SRC_DIR}
 
 ROCSHMEM_BUILD_DIR=${PROJECT_ROOT}/rocshmem_build
 ROCSHMEM_INSTALL_DIR=${ROCSHMEM_BUILD_DIR}/install
-OMPI_INSTALL_DIR="/opt/ompi_build"
+OMPI_INSTALL_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}"
 
 # build ompi, ucx
 if [ ! -e "${OMPI_INSTALL_DIR}" ]; then

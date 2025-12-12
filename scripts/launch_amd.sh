@@ -5,7 +5,7 @@ DISTRIBUTED_DIR=$(dirname -- "$SCRIPT_DIR")
 TRITON_ROCSHMEM_DIR=${SCRIPT_DIR}/../shmem/rocshmem_bind/python
 PYROCSHMEM_DIR=${SCRIPT_DIR}/../shmem/rocshmem_bind/pyrocshmem
 ROCSHMEM_ROOT=${SCRIPT_DIR}/../shmem/rocshmem_bind/rocshmem_build/install
-MPI_ROOT=/opt/ompi_build/install/ompi
+MPI_ROOT="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${ROCSHMEM_ROOT}/lib:${MPI_ROOT}/lib
 
@@ -19,6 +19,7 @@ esac
 
 export TRITON_CACHE_DIR=triton_cache
 export ROCSHMEM_HOME=${ROCSHMEM_ROOT}
+export ROCSHMEM_BACKEND=${ROCSHMEM_BACKEND:=IPC}
 
 ## AMD env vars
 export TRITON_HIP_USE_BLOCK_PINGPONG=1 # for gemm perf
@@ -40,7 +41,6 @@ else
 fi
 
 additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
-
 CMD="torchrun \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
