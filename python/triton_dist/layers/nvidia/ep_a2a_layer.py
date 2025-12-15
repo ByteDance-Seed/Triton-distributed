@@ -33,7 +33,7 @@ from triton_dist.kernels.nvidia.ep_a2a import (
     ep_combine_token_inplace,
     ep_dispatch_token_inplace,
     bincount,
-    get_dispatch_send_reqs_for_target_node,
+    get_dispatch_send_reqs,
     get_ag_splits_and_recv_offset_for_dispatch,
 )
 from triton_dist.kernels.nvidia.ep_a2a_intra_node import (

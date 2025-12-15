@@ -34,7 +34,7 @@ import triton.language as tl
 import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton_dist.profiler_utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import get_torch_prof_ctx, perf_func
 from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
@@ -176,7 +176,7 @@ def test_rocshmem_memcpy():
     npes = pyrocshmem.rocshmem_n_pes()
     peer = (mype + 1) % npes
 
-    nelems_per_rank = 1024*1024
+    nelems_per_rank = 1024 * 1024
 
     comm_buffs = pyrocshmem.rocshmem_create_tensor_list_intra_node([nelems_per_rank], torch.int32)
     comm_buffs[mype].fill_(0)
@@ -186,7 +186,7 @@ def test_rocshmem_memcpy():
     one = torch.arange(nelems_per_rank, dtype=torch.int32, device=torch.cuda.current_device())
     cur_stream = torch.cuda.current_stream()
     ag_streams = [torch.cuda.Stream(priority=-1) for i in range(npes)]
-    
+
     torch.cuda.synchronize()
     pyrocshmem.rocshmem_barrier_all_on_stream(cur_stream.cuda_stream)
 
@@ -210,7 +210,7 @@ def test_rocshmem_memcpy():
             HIP_CHECK(cp_res)
 
     pyrocshmem.rocshmem_barrier_all_on_stream(cur_stream.cuda_stream)
-    
+
     torch.cuda.synchronize()
 
     try:
@@ -230,10 +230,11 @@ def parse_args():
 
     return parser.parse_args()
 
+
 if __name__ == "__main__":
     # init
     args = parse_args()
-    nbytes = 1024*1024 * 4
+    nbytes = 1024 * 1024 * 4
 
     TP_GROUP = initialize_distributed()
 
@@ -247,7 +248,7 @@ if __name__ == "__main__":
 
     with ctx:
         perf = perf_func(partial(test_rocshmem_memcpy), iters=10, warmup_iters=5)
-   
+
     torch.cuda.synchronize()
     torch.distributed.barrier()
 

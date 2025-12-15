@@ -89,9 +89,6 @@ def rocshmem_int_p(ptr: np.intp, src: np.int32, dst: np.int32) -> None:
 def rocshmem_barrier_all():
     ...
 
-def rocshmem_barrier_all_on_stream(stream: np.intp):
-    ...
-
 
 def rocshmem_barrier_all_on_stream(stream: np.intp):
     ...
