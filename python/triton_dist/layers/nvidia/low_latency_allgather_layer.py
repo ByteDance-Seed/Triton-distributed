@@ -43,8 +43,12 @@ class AllGatherLayer:
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     def finalize(self):
-        nvshmem_free_tensor_sync(self.symm_signal)
-        nvshmem_free_tensor_sync(self.symm_ll_buffers)
+        if self.symm_signal is not None:
+            nvshmem_free_tensor_sync(self.symm_signal)
+        if self.symm_ll_buffers is not None:
+            nvshmem_free_tensor_sync(self.symm_ll_buffers)
+        self.symm_signal = None
+        self.symm_ll_buffers = None
 
     def forward_pull(self, symm_buffer: torch.Tensor):
         _forward_pull_kernel[(self.num_ranks, )](
