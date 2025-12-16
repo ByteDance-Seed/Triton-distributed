@@ -27,3 +27,4 @@
 import torch  # noqa: F401
 # yapf: enable
 from . import language  # noqa: F401
+from .jit import jit  # noqa: F401

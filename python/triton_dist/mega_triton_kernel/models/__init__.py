@@ -23,9 +23,9 @@
 #
 ################################################################################
 from .model_builder import ModelBuilder
-from .qwen3 import Qwen3Model
+from .dense import DenseModel
 
 __all__ = [
     "ModelBuilder",
-    "Qwen3Model",
+    "DenseModel",
 ]

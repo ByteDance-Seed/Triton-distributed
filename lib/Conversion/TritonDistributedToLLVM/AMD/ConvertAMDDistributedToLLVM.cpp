@@ -74,8 +74,15 @@ public:
     addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addIllegalDialect<triton::distributed::DistributedDialect>();
+    addIllegalDialect<triton::simt::SIMTDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<triton::amdgpu::InstructionSchedHint>();
+
+    addDynamicallyLegalOp<ROCDL::BlockDimXOp, ROCDL::BlockDimYOp,
+                          ROCDL::BlockDimZOp>([](Operation *op) {
+      Type retTy = op->getResult(0).getType();
+      return retTy.isInteger(64);
+    });
   }
 };
 
@@ -160,6 +167,13 @@ struct ConvertAMDDistributedToLLVM
     // Distributed ops
     mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
         typeConverter, patterns, commonBenefit, targetInfo);
+
+    // SIMT ops
+    mlir::triton::populateSIMTOpToLLVMPatterns(typeConverter, targetInfo,
+                                               patterns, commonBenefit);
+
+    mlir::triton::AMD::populateROCDLBlockDimPattern(typeConverter, patterns,
+                                                    commonBenefit);
 
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns)))) {
       return signalPassFailure();

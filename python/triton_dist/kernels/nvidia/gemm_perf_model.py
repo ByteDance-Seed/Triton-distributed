@@ -27,25 +27,13 @@ from typing import Optional
 
 import torch
 import triton
-from triton.testing import get_max_simd_tflops, nvsmi
+from triton.testing import get_max_simd_tflops
 import logging
+from triton_dist.utils import get_max_gpu_clock_rate_in_khz
 
 
 def is_fp8_dtype(dtype: torch.dtype):
     return dtype.itemsize == 1 and dtype.is_floating_point
-
-
-# this is much a copy of https://github.com/triton-lang/kernels/blob/main/kernels/matmul_perf_model.py
-@functools.lru_cache()
-def get_clock_rate_in_khz():
-    try:
-        return nvsmi(["clocks.max.sm"])[0] * 1e3
-    except FileNotFoundError:
-        import pynvml
-
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        return pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM) * 1e3
 
 
 @functools.lru_cache()
@@ -110,7 +98,7 @@ def get_tensorcore_tflops_by_calc(device, num_ctas, num_warps, dtype):
     total_warps = num_ctas * min(num_warps, 4)
     num_subcores = get_device_multi_processor_count(device) * 4  # on recent GPUs
     tflops = (min(num_subcores, total_warps) / num_subcores *
-              get_max_tensorcore_tflops(dtype, get_clock_rate_in_khz(), device))
+              get_max_tensorcore_tflops(dtype, get_max_gpu_clock_rate_in_khz(device), device))
     return tflops
 
 
@@ -119,7 +107,7 @@ def get_simd_tflops(device, num_ctas, num_warps, dtype):
     total_warps = num_ctas * min(num_warps, 4)
     num_subcores = get_device_multi_processor_count(device) * 4  # on recent GPUs
     tflops = (min(num_subcores, total_warps) / num_subcores *
-              get_max_simd_tflops(dtype, get_clock_rate_in_khz(), device))
+              get_max_simd_tflops(dtype, get_max_gpu_clock_rate_in_khz(device), device))
     return tflops
 
 

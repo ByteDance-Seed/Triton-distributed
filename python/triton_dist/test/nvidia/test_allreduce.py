@@ -34,8 +34,9 @@ import sys
 import torch.distributed as dist
 from triton_dist.kernels.allreduce import AllReduceMethod, get_allreduce_methods, to_allreduce_method
 from triton_dist.kernels.nvidia.allreduce import (create_allreduce_ctx, all_reduce)
-from triton_dist.utils import (assert_allclose, group_profile, initialize_distributed, finalize_distributed,
-                               is_nvshmem_multimem_supported, perf_func, sleep_async)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (initialize_distributed, finalize_distributed, is_nvshmem_multimem_supported, sleep_async)
 
 DATA_SIZES = [
     128,  # 128B

@@ -22,16 +22,16 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import tid, __syncthreads
+import triton_dist
+from triton_dist.language.extra.language_extra import tid, __syncthreads
 from .task_context import TaskBaseInfo, Scoreboard
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import (st_v4_b32, multimem_ld_reduce_v4)
+from triton_dist.language.extra.cuda.language_extra import (st_v4_b32, multimem_ld_reduce_v4)
 from triton.language.extra.cuda.utils import num_warps
 
 
-@triton.jit
+@triton_dist.jit
 def allreduce_one_shot_multimem_intra_node_kernel(pid, num_pid, symm_in_ptr, out_ptr, elems):
     symm_in_ptr = tl.cast(symm_in_ptr, out_ptr.dtype)
 
@@ -46,7 +46,7 @@ def allreduce_one_shot_multimem_intra_node_kernel(pid, num_pid, symm_in_ptr, out
     __syncthreads()
 
 
-@triton.jit
+@triton_dist.jit
 def allreduce_task_compute(
     task_base_info: TaskBaseInfo,
     scoreboard: Scoreboard,

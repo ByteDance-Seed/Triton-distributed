@@ -20,8 +20,47 @@ target_link_libraries(triton_distributed PUBLIC pybind11::headers Python3::Modul
 target_include_directories(triton_distributed PUBLIC ".")
 target_include_directories(triton_distributed PUBLIC "../triton_aot_generated")
 
+set(NVSHMEM_HOME "")
+function(set_nvshmem_home)
+  # 1. Check if NVSHMEM_HOME environment variable is set
+  if(DEFINED ENV{NVSHMEM_HOME})
+      set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}" PARENT_SCOPE)
+      message(STATUS "Found NVSHMEM_HOME from environment variable: $ENV{NVSHMEM_HOME}")
+      return()
+  endif()
+
+  # 2. Try to find from Python command
+  find_program(PYTHON_EXECUTABLE python3)
+  execute_process(
+    COMMAND ${PYTHON_EXECUTABLE} -c
+              "import nvidia.nvshmem, pathlib; print(pathlib.Path(nvidia.nvshmem.__path__[0]))"
+      OUTPUT_VARIABLE PYTHON_NVSHMEM_PATH
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+
+  if(PYTHON_NVSHMEM_PATH AND NOT PYTHON_NVSHMEM_PATH STREQUAL "")
+      set(NVSHMEM_HOME "${PYTHON_NVSHMEM_PATH}" PARENT_SCOPE)
+      message(STATUS "Found NVSHMEM_HOME from Python nvidia-nvshmem-cu12: ${PYTHON_NVSHMEM_PATH}")
+      return()
+  endif()
+  # not found
+  message(WARNING "NVSHMEM_HOME could not be determined.")
+
+endfunction()
+
+
 if(USE_TRITON_DISTRIBUTED_AOT)
+  set_nvshmem_home()
+  find_library(NVSHMEM_HOST_LIB
+    NAMES libnvshmem_host.so.3 nvshmem_host
+    PATHS ${NVSHMEM_HOME}/lib
+  )
   target_link_libraries(triton_distributed PUBLIC triton_distributed_kernel)
+  target_link_libraries(triton_distributed PUBLIC ${NVSHMEM_HOST_LIB} PRIVATE -lnvshmem_device)
+  target_include_directories(triton_distributed PUBLIC ${NVSHMEM_HOME}/include)
+  target_link_directories(triton_distributed PUBLIC "${NVSHMEM_HOME}/lib")
+
   # Get the link directory of triton_distributed
   get_target_property(ORIGINAL_LINK_DIRS triton_distributed LINK_DIRECTORIES)
 

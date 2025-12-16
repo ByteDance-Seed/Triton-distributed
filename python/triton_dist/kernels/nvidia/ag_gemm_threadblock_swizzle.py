@@ -24,16 +24,16 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     laneid,
     __shfl_up_sync_i32,
     __shfl_down_sync_i32,
     __shfl_sync_i32,
-    ffs,
     __ballot_sync,
     st,
     tid,
 )
+from triton.language.extra.libdevice import ffs
 
 
 @triton.jit
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     import logging
     import numpy as np
     import torch
-    from triton_dist.utils import perf_func
+    from triton_dist.profiler_utils import perf_func
 
     import argparse
 

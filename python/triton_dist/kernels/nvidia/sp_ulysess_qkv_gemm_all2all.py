@@ -32,10 +32,11 @@ from typing import Optional
 
 import itertools
 
+import triton_dist
 import triton_dist.language as tdl
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, _wait_eq_cuda
-from triton.language.extra.cuda.language_extra import tid, __syncthreads, st
+from triton_dist.language.extra.language_extra import tid, __syncthreads, st
 
 
 def _kernel_producer_gemm_persistent_repr(proxy):
@@ -300,9 +301,6 @@ def matmul_descriptor_persistent(a, b, bias, c, gemm_barrier, gemm_config: trito
     M, K = a.shape
     N, K = b.shape
 
-    # c = torch.empty((M, N), device=a.device, dtype=dtype)
-    # NUM_GEMM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
         return torch.empty(size, device="cuda", dtype=torch.int8)
@@ -328,7 +326,107 @@ def matmul_descriptor_persistent(a, b, bias, c, gemm_barrier, gemm_config: trito
     return c
 
 
-@triton.jit(do_not_specialize=["rank", "sp_rank"])
+def _kernel_producer_gemm_repr(proxy):
+    constexprs = proxy.constants
+    cap_major, cap_minor = torch.cuda.get_device_capability()
+    a_dtype = proxy.signature["a_ptr"].lstrip("*")
+    b_dtype = proxy.signature["b_ptr"].lstrip("*")
+    c_dtype = proxy.signature["c_ptr"].lstrip("*")
+    BM, BN, BK = constexprs["BLOCK_SIZE_M"], constexprs["BLOCK_SIZE_N"], constexprs["BLOCK_SIZE_K"]
+
+    return f"cutlass_triton3x_sm{cap_major}{cap_minor}_a2a_producer_gemm_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_ntn"
+
+
+@triton.jit(launch_metadata=_matmul_launch_metadata, repr=_kernel_producer_gemm_repr)
+def matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,  #
+    gemm_barrier_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,  #
+    stride_am,
+    stride_ak,  #
+    stride_bn,
+    stride_bk,  #
+    stride_cm,
+    stride_cn,  #
+    BLOCK_SIZE_M: tl.constexpr,  #
+    BLOCK_SIZE_N: tl.constexpr,  #
+    BLOCK_SIZE_K: tl.constexpr,  #
+    GROUP_SIZE_M: tl.constexpr,  #
+    NUM_GEMM_SMS: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    start_m = pid_m * BLOCK_SIZE_M
+    start_n = pid_n * BLOCK_SIZE_N
+
+    offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = start_n + tl.arange(0, BLOCK_SIZE_N)
+    offs_am = tl.where(offs_am < M, offs_am, 0)
+    offs_bn = tl.where(offs_bn < N, offs_bn, 0)
+
+    offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        accumulator = tl.dot(a, b.T, accumulator)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    c = accumulator.to(c_ptr.dtype.element_ty)
+
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+    __syncthreads()
+    thread_idx = tid(0)
+    gemm_barrier_idx = pid_m * num_pid_n + pid_n
+    if thread_idx == 0:
+        st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
+
+
+def matmul(a, b, c, gemm_barrier, gemm_config: triton.Config):
+    # Check constraints.
+    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
+    assert a.dtype == b.dtype, "Incompatible dtypes"
+    M, K = a.shape
+    N, _ = b.shape
+
+    # 1D launch kernel where each block gets its own program.
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+    matmul_kernel[grid](
+        a, b, c,  #
+        gemm_barrier, M, N, K,  #
+        a.stride(0), a.stride(1),  #
+        b.stride(0), b.stride(1),  #
+        c.stride(0), c.stride(1),  #
+        **gemm_config.all_kwargs(),  #
+    )
+    return c
+
+
+@triton_dist.jit(do_not_specialize=["rank", "sp_rank"])
 def kernel_all2all_pull_intra_node_nvl(
     gemm_out_ptr,
     gemm_barrier_ptr,
@@ -449,7 +547,8 @@ class SpUlysessQKVGemmAll2AllKernel:
     def __init__(self, world_group: torch.distributed.ProcessGroup, nnodes: int, sp_size: int, max_batch_size: int,
                  max_seq_len: int, hidden_size: int, head_dim: int,
                  qkv_out_features: int,  # qkv_out_features can be different from 3 * hidden_size
-                 input_dtype=torch.bfloat16, output_dtype=torch.bfloat16, gqa: int = 1, max_num_comm_buf: int = 1):
+                 input_dtype=torch.bfloat16, output_dtype=torch.bfloat16, gqa: int = 1, max_num_comm_buf: int = 1,
+                 use_persistent: bool = False):
         self.world_group = world_group
         self.nnodes = nnodes
         self.sp_size = sp_size
@@ -478,19 +577,33 @@ class SpUlysessQKVGemmAll2AllKernel:
         self.world_size = self.world_group.size()
         self.local_world_size = self.world_size // nnodes
         self.local_rank = self.rank % self.local_world_size
+        self.use_persistent = use_persistent
 
         assert self.sp_size <= self.local_world_size, f"sp_size={self.sp_size} exceeds limit {self.local_world_size}"
         assert self.local_world_size % self.sp_size == 0, f"local_world_size={self.local_world_size} is not divisible by sp_size={self.sp_size}"
 
         # GEMM config
-        self.BLOCK_SIZE_M = 128
-        self.BLOCK_SIZE_N = 256
-        self.BLOCK_SIZE_K = 64
-        self.GROUP_SIZE_M = 8
-        self.max_gemm_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-        self.num_warps = 8
-        self.num_stages = 3
-        self.warp_specialize = False
+        if self.use_persistent:
+            self.BLOCK_SIZE_M = 128
+            self.BLOCK_SIZE_N = 256
+            self.BLOCK_SIZE_K = 64
+            self.GROUP_SIZE_M = 8
+            self.max_gemm_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
+            self.num_warps = 8
+            self.num_stages = 3
+            self.warp_specialize = False
+
+            if self.max_gemm_sms < 100:
+                self.BLOCK_SIZE_N = 128
+                self.BLOCK_SIZE_K = 32
+        else:
+            self.BLOCK_SIZE_M = 128
+            self.BLOCK_SIZE_N = 128
+            self.BLOCK_SIZE_K = 32
+            self.GROUP_SIZE_M = 8
+            self.max_gemm_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
+            self.num_warps = 4
+            self.num_stages = 4
 
         self.init_output_buffer()
         self.init_group_sync_barrier()
@@ -643,12 +756,18 @@ class SpUlysessQKVGemmAll2AllKernel:
         #   self._gemm_barrier_buffer,
         #   gemm_config
         # )
-        matmul_descriptor_persistent(attention_input.view(bs * local_seq_len,
-                                                          hidden), weight, bias, self._gemm_output_buffer,
-                                     self._gemm_barrier_buffer, gemm_config, warp_specialize=self.warp_specialize)
+        gemm_out = self._gemm_output_buffer.view(-1)[:bs * local_seq_len * self.qkv_out_features].view(
+            bs * local_seq_len, -1)
+        if self.use_persistent:
+            matmul_descriptor_persistent(attention_input.view(bs * local_seq_len, hidden), weight, bias, gemm_out,
+                                         self._gemm_barrier_buffer, gemm_config, warp_specialize=self.warp_specialize)
+        else:
+            assert bias is None
+            matmul(attention_input.view(bs * local_seq_len, hidden), weight.view(-1, hidden), gemm_out,
+                   self._gemm_barrier_buffer, gemm_config)
         self._a2a_stream.wait_event(self._ready_event)
 
-        if os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", -1) != 1:
+        if (os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", -1) != 1) and (not self.use_persistent):
             _wait_eq_cuda(self._gemm_barrier_buffer, 1, self._a2a_stream)
 
         total_seq_len = self._cum_seq_len_cpu_tuple[self.sp_size]

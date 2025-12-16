@@ -35,8 +35,6 @@ from build_helpers import create_symlink_rel, get_base_dir, get_cmake_dir, copy_
 
 from setuptools.command.build_ext import build_ext
 
-# softlink_apply_patches()
-
 try:
     from setuptools.command.editable_wheel import editable_wheel
 except ImportError:
@@ -48,6 +46,31 @@ except ImportError:
 def is_git_repo():
     """Return True if this file resides in a git repository"""
     return (Path(__file__).parent / ".git").is_dir()
+
+
+# --- Hardware Detection Functions (using subprocess) ---
+# These functions check for the presence of NVIDIA (CUDA) or AMD (HIP/ROCm)
+# drivers and command-line tools.
+
+
+def _is_cuda_platform():
+    """Checks if 'nvidia-smi' is available on the system's PATH."""
+    if shutil.which("nvidia-smi"):
+        print("--- CUDA platform detected (nvidia-smi found) ---")
+        return True
+    else:
+        print("--- CUDA platform NOT detected ---")
+        return False
+
+
+def _is_hip_platform():
+    """Checks if 'rocm-smi' is available on the system's PATH."""
+    if shutil.which("rocm-smi"):
+        print("--- HIP/ROCm platform detected (rocm-smi found) ---")
+        return True
+    else:
+        print("--- HIP/ROCm platform NOT detected ---")
+        return False
 
 
 @dataclass
@@ -101,24 +124,8 @@ class BackendInstaller:
         install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
                                    "backends", backend_name)
 
-        # TritonDistributed backends
-        # dist_root_dir = os.path.join(get_base_dir(), "backends")
         dist_backend_path = None
         dist_language_dir = None
-        # if backend_name in os.listdir(dist_root_dir):
-        #     dist_backend_src_dir = os.path.join(dist_root_dir, backend_name)
-
-        #     for dir in os.listdir(dist_backend_src_dir):
-        #         assert dir in ["backend", "language"], "only support backend/language extension"
-
-        #     if os.path.exists(os.path.join(dist_backend_src_dir, "backend")):
-        #         dist_backend_path = os.path.join(dist_backend_src_dir, "backend")
-        #         for file in os.listdir(dist_backend_path):
-        #             assert os.path.exists(os.path.join(backend_path,
-        #                                                file)), f"${file} does not exist in ${backend_path}"
-        #     dist_language_dir = os.path.join(dist_backend_src_dir, "language")
-        #     if not os.path.exists(dist_language_dir):
-        #         dist_language_dir = None
 
         return Backend(name=backend_name, src_dir=backend_src_dir, backend_dir=backend_path, language_dir=language_dir,
                        tools_dir=tools_dir, install_dir=install_dir, is_external=is_external,
@@ -353,6 +360,8 @@ def get_thirdparty_packages(packages: list):
 
 
 def download_and_copy(name, src_func, dst_path, variable, version, url_func):
+    if _is_hip_platform():
+        return
     if is_offline_build():
         return
     triton_cache_path = get_triton_cache_path()
@@ -413,6 +422,9 @@ class CMakeExtension(Extension):
         self.path = path
 
 
+# ---- SHMEM ----
+
+
 def build_rocshmem():
     rocshmem_bind_dir = os.path.join(get_base_dir(), "shmem", "rocshmem_bind")
     rocshmem_dir = os.path.join(get_base_dir(), "3rdparty", "rocshmem")
@@ -425,31 +437,6 @@ def build_rocshmem():
     ROCM_ARCH = "gfx942"  # hard-code for now
     extra_args = ["--arch", ROCM_ARCH] if ROCM_ARCH != "" else []
     subprocess.check_call(["bash", f"{rocshmem_bind_dir}/build.sh"] + extra_args)
-
-
-# --- Hardware Detection Functions (using subprocess) ---
-# These functions check for the presence of NVIDIA (CUDA) or AMD (HIP/ROCm)
-# drivers and command-line tools.
-
-
-def _is_cuda_platform():
-    """Checks if 'nvidia-smi' is available on the system's PATH."""
-    if shutil.which("nvidia-smi"):
-        print("--- CUDA platform detected (nvidia-smi found) ---")
-        return True
-    else:
-        print("--- CUDA platform NOT detected ---")
-        return False
-
-
-def _is_hip_platform():
-    """Checks if 'rocm-smi' is available on the system's PATH."""
-    if shutil.which("rocm-smi"):
-        print("--- HIP/ROCm platform detected (rocm-smi found) ---")
-        return True
-    else:
-        print("--- HIP/ROCm platform NOT detected ---")
-        return False
 
 
 def build_shmem():
@@ -757,23 +744,6 @@ def add_link_to_backends(external_only, materialization=False):
                 install_dir = os.path.join(extra_dir, x)
                 update_symlink(install_dir, src_dir)
 
-    # use TritonDistributed backend to override the exsiting backend in triton
-    # for backend in backends:
-    #     if external_only and not backend.is_external:
-    #         continue
-    #     if backend.dist_backend_dir is not None:
-    #         _force_update_symlink_recursive(backend.install_dir, backend.dist_backend_dir)
-
-    #     if backend.dist_language_dir:
-    #         # Link the contents of each backend's `language` directory into
-    #         # `triton.language.extra`.
-    #         extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
-    #                                  "language", "extra")
-    #         for x in os.listdir(backend.dist_language_dir):
-    #             src_dir = os.path.join(backend.dist_language_dir, x)
-    #             install_dir = os.path.join(extra_dir, x)
-    #             _force_update_symlink_recursive(install_dir, src_dir)
-
 
 def add_link_to_proton():
     proton_dir = os.path.abspath(
@@ -989,7 +959,7 @@ DEPS_NVIDIA = [
     "cuda-python>=12.0",
     "nvidia-nvshmem-cu12>=3.3.9",
     "Cython>=0.29.24",
-    "nvshmem4py-cu12>=0.1.0",
+    "nvshmem4py-cu12>=0.1.2",
 ] if _is_cuda_platform() else []
 DEPS_HIP = ["hip-python"] if _is_hip_platform() else []
 DEPS = DEPS_NVIDIA + DEPS_HIP

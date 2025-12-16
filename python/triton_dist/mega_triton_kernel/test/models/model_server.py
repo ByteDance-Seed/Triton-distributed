@@ -31,7 +31,7 @@ import json
 import traceback
 
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.mega_triton_kernel.models import Qwen3Model
+from triton_dist.mega_triton_kernel.models import DenseModel
 
 from triton_dist.models import ModelConfig
 from triton_dist.models.engine import AutoTokenizer
@@ -214,7 +214,7 @@ def main():
     tokenizer.chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<think>\n' }}{% endif %}"
 
     # Initialize model
-    qwen3 = Qwen3Model(1, model_config, builder)  # Batch size set to 1
+    qwen3 = DenseModel(1, model_config, builder)  # Batch size set to 1
 
     if RANK == 0:
         # Create server socket

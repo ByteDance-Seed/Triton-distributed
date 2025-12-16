@@ -24,8 +24,9 @@
 ################################################################################
 
 from .distributed_ops import wait, consume_token, rank, num_ranks, symm_at, notify
-from .simt_ops import simt_exec_region, extract, insert
+from .simt_ops import simt_exec_region, extract, insert, vector, make_vector, zeros_vector
 from .core import extern_call
+from .extra.language_extra import ld_vector, st_vector
 
 __all__ = [
     # distributed ops
@@ -39,6 +40,11 @@ __all__ = [
     "simt_exec_region",
     "extract",
     "insert",
+    "vector",
+    "make_vector",
+    "zeros_vector",
+    "ld_vector",
+    "st_vector",
     # core
     "extern_call",
 ]

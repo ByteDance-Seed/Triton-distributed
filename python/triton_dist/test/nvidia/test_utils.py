@@ -26,12 +26,10 @@
 import triton
 import torch
 import triton.language as tl
-from triton_dist.utils import cuda_occupancy_max_activate_blocks_per_multiprocessor, initialize_distributed
+from triton_dist.utils import cuda_occupancy_max_activate_blocks_per_multiprocessor
 import argparse
 import os
 import sys
-import nvshmem
-import nvshmem.core
 
 ALL_TESTS = {}
 
@@ -183,23 +181,9 @@ def test_max_occupancy(args):
 
 
 if __name__ == "__main__":
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-    TP_GROUP = initialize_distributed()
-
     args = get_args()
-    args.default_group = TP_GROUP
-    args.rank = RANK
-    args.num_ranks = WORLD_SIZE
-    args.local_rank = LOCAL_RANK
-    args.local_num_ranks = LOCAL_WORLD_SIZE
     if args.list:
         help()
         sys.exit()
     func = ALL_TESTS[args.case]
     func(args)
-
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group()

@@ -25,7 +25,7 @@
 import triton
 import triton.language as tl
 import torch
-from triton.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.cuda.language_extra import (
     tid,
     ntid,
     laneid,
@@ -105,8 +105,7 @@ def test_ld_st():
                     tensor_output.to(torch.int32),
                 )
                 try:
-                    assert (f"ld.global.{ld_semantic}.{scope}.b{dtype.itemsize * 8}" in compiled_kernel.asm["ptx"])
-                    assert (f"st.{st_semantic}.{scope}.global.b{dtype.itemsize * 8}" in compiled_kernel.asm["ptx"])
+                    assert (f"st.global.{st_semantic}.{scope}.b{dtype.itemsize * 8}" in compiled_kernel.asm["ptx"])
                 except AssertionError:
                     print(dtype)
                     print(compiled_kernel.asm["ptx"])

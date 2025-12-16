@@ -33,6 +33,7 @@ import math
 from dataclasses import dataclass
 from cuda import cudart
 
+import triton_dist
 from triton_dist.utils import CUDA_CHECK, nvshmem_create_tensors, nvshmem_free_tensor_sync
 from triton_dist.kernels.nvidia.common_ops import barrier_all_on_stream, BarrierAllContext
 
@@ -183,7 +184,7 @@ def cp_engine_producer_kv_all_gather(
     compute_stream.wait_stream(ag_stream)
 
 
-@triton.jit
+@triton_dist.jit
 def _flash_attn_forward_inner(
     acc,
     l_i,
@@ -252,7 +253,7 @@ def _flash_attn_forward_inner(
     return acc, l_i, m_i
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_consumer_flash_attn_forward(
     Q,  # [total_q_shard, q_head, head_dim]
     K,  # [total_kv, kv_head, head_dim]

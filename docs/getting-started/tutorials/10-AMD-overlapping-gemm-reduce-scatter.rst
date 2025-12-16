@@ -188,7 +188,6 @@ GEMM RS Class
             K: int,
             input_dtype: torch.dtype,
             output_dtype: torch.dtype,
-            transpose_weight: bool = False,
             fuse_scatter: bool = True,
         ):
             self.tp_group = tp_group
@@ -199,7 +198,6 @@ GEMM RS Class
             self.K = K
             self.input_dtype = input_dtype
             self.output_dtype = output_dtype
-            self.transpose_weight = transpose_weight
             self.fuse_scatter = fuse_scatter
 
             # Use the auxiliary functions provided by Triton-distributed to construct the context required for GEMM-RS.
@@ -215,24 +213,17 @@ GEMM RS Class
                 self.world_size,
                 self.tp_group,
                 self.fuse_scatter,
-                self.transpose_weight,
             )
 
         def forward(self, input: torch.Tensor,  # [M, local_K]
                     weight: torch.Tensor,  # [N, local_K]
-                    transpose_weight: bool = False,  # indicates whether weight already transposed
                     ):
 
             ctx = self.ctx
             M, local_K = input.shape
-            if not transpose_weight:
-                N, K = weight.shape
-                stride_bk, stride_bn = weight.stride(1), weight.stride(0)
-                assert K == local_K
-            else:
-                K, N = weight.shape
-                stride_bk, stride_bn = weight.stride(0), weight.stride(1)
-                assert K == local_K
+            N, K = weight.shape
+            stride_bk, stride_bn = weight.stride(1), weight.stride(0)
+            assert K == local_K
             M_per_rank = M // ctx.num_ranks
 
             current_stream = torch.cuda.current_stream()
@@ -279,16 +270,13 @@ Benchmark
     def torch_gemm_rs(
         input: torch.Tensor,  # [M, local_k]
         weight: torch.Tensor,  # [N, local_K]
-        transpose_weight: bool,
         bias: Optional[torch.Tensor],
         TP_GROUP,
     ):
         M, local_K = input.shape
         world_size = TP_GROUP.size()
-        if not transpose_weight:
-            weight = weight.T
-        N = weight.shape[1]
-        output = torch.matmul(input, weight)
+        N, _ = weight.shape
+        output = torch.matmul(input, weight.T)
         if bias:
             output = output + bias
         rs_output = torch.empty((M // world_size, N), dtype=output.dtype, device=input.device)

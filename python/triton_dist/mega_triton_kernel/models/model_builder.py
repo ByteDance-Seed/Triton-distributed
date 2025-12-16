@@ -29,7 +29,7 @@ import os
 import nvshmem
 import nvshmem.core
 
-from ..core.code_generator import CodeGenerator
+from ..core.code_generator import CodeGenerator, CodeGenOptions
 from ..core.registry import registry
 from ..core.task_base import TaskBase, DeviceProp, TaskDependency, TaskIDManager, MAX_NUM_TENSOR_DIMS
 from ..core.builder import TaskBuilderBase
@@ -86,7 +86,7 @@ def check_alignment(tensors):
 class ModelBuilder:
 
     def __init__(self, rank=0, world_size=1, local_world_size=1, num_warps=4, enable_profiling=False,
-                 enable_dep_opt=True):
+                 enable_dep_opt=True, enable_runtime_scheduler=False):
         self.reset()
         self._registry = registry
         self._code_generator = CodeGenerator()
@@ -121,6 +121,9 @@ class ModelBuilder:
         self.logger = logger
         self._enable_profiling = enable_profiling
         self._enable_dep_opt = enable_dep_opt
+        self._enable_runtime_scheduler = enable_runtime_scheduler
+        self._codegen_options = CodeGenOptions(enable_profiling=enable_profiling,
+                                               enable_runtime_scheduler=enable_runtime_scheduler)
         self.task_types_to_str = None
         self._graph = Graph()
 
@@ -342,7 +345,7 @@ class ModelBuilder:
                                          block_tables: torch.Tensor, kv_lens: torch.Tensor, q_rms_weight: torch.Tensor,
                                          k_rms_weight: torch.Tensor, cos_cache: torch.Tensor, sin_cache: torch.Tensor,
                                          q_norm_rope: torch.Tensor, q_rms_eps: float = 1e-6, k_rms_eps: float = 1e-6,
-                                         rope_theta: int = 1000000, layer_id=0):
+                                         rope_theta: int = 1000000, skip_q_norm=False, skip_k_norm=False, layer_id=0):
         """
             this op assume that kv_lens has been update (kv_lens = history_kv_len + seq_len(qkv.shape[1]))
             inplace update new kv to key_cache/value_cache
@@ -373,7 +376,10 @@ class ModelBuilder:
         assert qkv.shape[0] == kv_lens.shape[0]
         assert cos_cache.shape[0] == sin_cache.shape[0]
         assert cos_cache.shape[0] == qkv.shape[0] or cos_cache.shape[0] == 1
-        extra_params = {"q_rms_eps": q_rms_eps, "k_rms_eps": k_rms_eps, "rope_theta": rope_theta}
+        extra_params = {
+            "q_rms_eps": q_rms_eps, "k_rms_eps": k_rms_eps, "rope_theta": rope_theta, "skip_q_norm": skip_q_norm,
+            "skip_k_norm": skip_k_norm
+        }
         self._convert_op("qk_norm_rope_update_kvcache", layer_id,
                          [[qkv, block_tables, kv_lens, q_rms_weight, k_rms_weight, cos_cache, sin_cache],
                           [key_cache, value_cache, q_norm_rope]], extra_params)
@@ -511,12 +517,16 @@ class ModelBuilder:
             megakernel_tasks = self._graph.to_tasks()
         else:
             megakernel_tasks = self.megakernel_tasks
+        if self._enable_runtime_scheduler:
+            num_sms = 1
+        else:
+            num_sms = self.device_prop.NUM_SMS
         self.wq_tensor, self.num_tasks_tensor, self.scoreboard, self.task_deps_tensor = enque_tasks(
-            self.device_prop.NUM_SMS, megakernel_tasks, "round_robin")
+            num_sms, megakernel_tasks, "round_robin", enable_dependency_opt=not self._enable_runtime_scheduler)
         self.scoreboard = torch.zeros((self.max_layer_id + 1, self.max_task_id + 1, self.MAX_NUM_TILES_PER_OP),
                                       dtype=torch.int32, device=torch.cuda.current_device())
 
-        src, task_types_to_str = self._code_generator.generate_code(self.megakernel_tasks, self._enable_profiling)
+        src, task_types_to_str = self._code_generator.generate_code(self.megakernel_tasks, self._codegen_options)
         self.logger.log(src, level="debug")
         with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as tmp:
             tmp.write(src.encode('utf-8'))
@@ -528,7 +538,7 @@ class ModelBuilder:
         spec.loader.exec_module(module)
         self._gen_kernel = module.MEGA_TRITON_KERNEL
         self.task_types_to_str = task_types_to_str
-        max_num_profile_slots = (self.wq_tensor.shape[0] + 4) * self.wq_tensor.shape[1] * 4
+        max_num_profile_slots = (self.wq_tensor.shape[0] + 4) * self.device_prop.NUM_SMS * 4
         self.logger.log(f"max_num_profile_slots = {max_num_profile_slots}", level="debug")
         if self._enable_profiling:
             self.profile_buf = alloc_profiler_buffer(max_num_profile_slots)
@@ -546,11 +556,15 @@ class ModelBuilder:
 
     def run(self):
         grid = lambda META: (self.device_prop.NUM_SMS, )
+        work_queue_start = torch.empty((1, ), dtype=torch.int32, device=torch.cuda.current_device())
+        if self._enable_runtime_scheduler:
+            work_queue_start.fill_(0)
         if self._enable_profiling:
             assert self.profile_buf is not None
             reset_profiler_buffer(self.profile_buf)
             self._gen_kernel[grid](
                 self.profile_buf,
+                work_queue_start,
                 self.wq_tensor,
                 self.num_tasks_tensor,
                 self.scoreboard,
@@ -565,6 +579,7 @@ class ModelBuilder:
             )
         else:
             self._gen_kernel[grid](
+                work_queue_start,
                 self.wq_tensor,
                 self.num_tasks_tensor,
                 self.scoreboard,

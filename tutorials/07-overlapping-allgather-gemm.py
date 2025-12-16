@@ -49,6 +49,7 @@ from cuda import cudart
 
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.kernels.common_ops import set_signal, wait_eq
 from triton_dist.kernels.nvidia.allgather_gemm import create_ag_gemm_context
@@ -265,7 +266,7 @@ def inter_node_allgather(local_tensor: torch.Tensor,
 # Let's declare a function to perform internode communication.
 
 
-@triton.jit
+@triton_dist.jit
 def nvshmem_device_producer_p2p_put_block_kernel(
     ag_buffer_ptr,  # *Pointer* to allgather output vector. The rank-th index has been loaded with local tensor
     signal_buffer_ptr,  # *Pointer* to signal barrier.
@@ -481,10 +482,10 @@ if __name__ == "__main__":
     N_per_rank = N // WORLD_SIZE
 
     A = torch.randn([M_per_rank, K], dtype=dtype, device="cuda")
-    B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda")
+    B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda").T
 
     ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
-    golden = torch_ag_gemm(TP_GROUP, A, B.T, ag_buffer)
+    golden = torch_ag_gemm(TP_GROUP, A, B, ag_buffer)
 
     # We can use a context to wrap all the tensors used at runtime.
     # We rely on NVSHMEM to allocate the symmetric memory for communication
@@ -524,6 +525,6 @@ if __name__ == "__main__":
     assert torch.allclose(golden, C, atol=1e-3, rtol=1e-3)
     print("Pass!")
 
-    ctx.finailize()
+    ctx.finalize()
     nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

@@ -34,7 +34,8 @@ import numpy as np
 import torch
 import torch.distributed
 
-from triton_dist.utils import assert_allclose, bitwise_equal, initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
+from triton_dist.test.utils import assert_allclose, bitwise_equal
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
 
 from triton_dist.kernels.nvidia.sp_ulysess_qkv_gemm_all2all import SpUlysessQKVGemmAll2AllKernel
 
@@ -44,7 +45,8 @@ gemm_a2a_op = None
 def triton_dist_init(world_group: torch.distributed.ProcessGroup, nnodes: int, sp_size: int, max_batch_size: int,
                      max_seq_len: int, hidden_size: int, head_dim: int,
                      qkv_out_features: int,  # qkv_out_features can be different from 3 * hidden_size
-                     input_dtype=torch.bfloat16, output_dtype=torch.bfloat16, gqa: int = 1, max_num_comm_buf: int = 1):
+                     input_dtype=torch.bfloat16, output_dtype=torch.bfloat16, gqa: int = 1, max_num_comm_buf: int = 1,
+                     use_persistent: bool = False):
     global gemm_a2a_op
     if gemm_a2a_op is None:
         gemm_a2a_op = SpUlysessQKVGemmAll2AllKernel(
@@ -60,6 +62,7 @@ def triton_dist_init(world_group: torch.distributed.ProcessGroup, nnodes: int, s
             output_dtype=output_dtype,
             gqa=gqa,
             max_num_comm_buf=max_num_comm_buf,
+            use_persistent=use_persistent,
         )
     nvshmem_barrier_all_on_stream()
 
@@ -470,6 +473,7 @@ def parse_args():
     parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--has_bias", default=False, action="store_true", help="whether have bias")
+    parser.add_argument("--no_persistent", default=False, action="store_true", help="whether disable persistent")
     parser.add_argument(
         "--transpose_weight",
         dest="transpose_weight",
@@ -529,20 +533,12 @@ if __name__ == "__main__":
 
     dtype = DTYPE_MAP[args.dtype]
 
-    triton_dist_init(
-        world_group=TP_GROUP,
-        nnodes=WORLD_SIZE // LOCAL_WORLD_SIZE,
-        sp_size=args.sp_size,
-        max_batch_size=args.bs,
-        max_seq_len=args.seq_len,
-        hidden_size=args.hidden_dim,
-        head_dim=args.head_dim,
-        qkv_out_features=args.out_features,  # qkv_out_features can be different from 3 * hidden_size
-        input_dtype=dtype,
-        output_dtype=dtype,
-        gqa=args.gqa,
-        max_num_comm_buf=3,
-    )
+    triton_dist_init(world_group=TP_GROUP, nnodes=WORLD_SIZE // LOCAL_WORLD_SIZE, sp_size=args.sp_size,
+                     max_batch_size=args.bs, max_seq_len=args.seq_len, hidden_size=args.hidden_dim,
+                     head_dim=args.head_dim,
+                     qkv_out_features=args.out_features,  # qkv_out_features can be different from 3 * hidden_size
+                     input_dtype=dtype, output_dtype=dtype, gqa=args.gqa, max_num_comm_buf=3,
+                     use_persistent=not args.no_persistent)
 
     if args.transpose_weight:
         raise NotImplementedError("gemm-all2all-intra-node only support RCR layout.")

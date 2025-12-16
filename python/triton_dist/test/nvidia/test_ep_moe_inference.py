@@ -30,7 +30,6 @@ import torch.distributed as dist
 
 import triton
 import triton.language as tl
-import numpy as np
 import random
 
 from triton_dist.utils import finalize_distributed, initialize_distributed
@@ -68,22 +67,6 @@ EP_GROUP = None
 RANK = int(os.environ.get("RANK", 0))
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-
-
-def init_seed(seed=0):
-    os.environ["NCCL_DEBUG"] = os.getenv("NCCL_DEBUG", "ERROR")
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.manual_seed(3 + seed)
-    torch.cuda.manual_seed_all(3 + seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + seed)
-    random.seed(3 + seed)
 
 
 def generate_random_exp_indices(token_num: int, total_num_experts: int, topk: int):

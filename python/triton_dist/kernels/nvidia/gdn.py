@@ -970,7 +970,7 @@ def chunk_gated_delta_rule_fwd(
 
 if __name__ == "__main__":
     import torch.nn.functional as F
-    from triton_dist.utils import perf_func
+    from triton_dist.profiler_utils import perf_func
     torch.manual_seed(0)
     torch.set_default_device("cuda")
 

@@ -43,6 +43,7 @@ import triton_dist.language as dl
 
 from typing import Optional, List
 import nvshmem.core
+import triton_dist
 from triton_dist.kernels.common_ops import wait_eq
 from triton_dist.kernels.nvidia.common_ops import BarrierAllContext, barrier_all_on_stream
 from triton_dist.kernels.nvidia.reduce_scatter import ring_reduce
@@ -229,7 +230,7 @@ def create_reduce_scater_2d_ctx(
 
 
 ################### triton kernel ###################
-@triton.jit
+@triton_dist.jit
 def kernel_inter_node_p2p_for_same_local_rank(
         offset,
         local_world_size,

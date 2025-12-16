@@ -34,8 +34,8 @@ from triton_dist.models.config import ModelConfig
 from triton_dist.models import AutoLLM
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import seed_everything, init_model_cpu
-from triton_dist.utils import (finalize_distributed, initialize_distributed, perf_func, dist_print, group_profile,
-                               nvshmem_barrier_all_on_stream)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.utils import (finalize_distributed, initialize_distributed, dist_print, nvshmem_barrier_all_on_stream)
 
 RANK = int(os.environ.get("RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))

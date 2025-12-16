@@ -52,7 +52,7 @@ Operation *CreateNVSHMEMOp(RewriterBase &rewriter, Operation *curOp,
                            StringRef libpath, ValueRange inputOperands,
                            Type retType) {
   auto loc = curOp->getLoc();
-  SmallVector<Value> llvmOpearands;
+  SmallVector<Value> llvmOperands;
 
   // generic(addrspace=0) address space is required by func in nvshmem bitcode.
   // if address space is inconsistent, always-inline will not work.
@@ -63,9 +63,9 @@ Operation *CreateNVSHMEMOp(RewriterBase &rewriter, Operation *curOp,
       Value ptrAfterCast = val;
       ptrAfterCast = rewriter.create<LLVM::AddrSpaceCastOp>(
           loc, LLVM::LLVMPointerType::get(rewriter.getContext()), val);
-      llvmOpearands.push_back(ptrAfterCast);
+      llvmOperands.push_back(ptrAfterCast);
     } else {
-      llvmOpearands.push_back(val);
+      llvmOperands.push_back(val);
     }
   }
 
@@ -77,12 +77,11 @@ Operation *CreateNVSHMEMOp(RewriterBase &rewriter, Operation *curOp,
     llvmRetType = LLVM::LLVMPointerType::get(rewriter.getContext());
   }
 
-  Type funcType =
-      mlir::triton::gpu::getFunctionType(llvmRetType, llvmOpearands);
+  Type funcType = mlir::triton::gpu::getFunctionType(llvmRetType, llvmOperands);
 
   LLVM::LLVMFuncOp funcOp = mlir::triton::gpu::appendOrGetExternFuncOp(
       rewriter, curOp, symbol, funcType, libname, libpath);
-  auto op = LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOpearands);
+  auto op = LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOperands);
   if (retType == llvmRetType)
     return op;
 
@@ -341,87 +340,6 @@ private:
   StringRef libpath;
 };
 
-class SymmAtOpConversion
-    : public ConvertOpToLLVMPattern<triton::distributed::SymmAtOp> {
-public:
-  SymmAtOpConversion(const LLVMTypeConverter &converter,
-                     const PatternBenefit &benefit, bool inlinePtx = false,
-                     StringRef libname = "", StringRef libpath = "")
-      : ConvertOpToLLVMPattern<triton::distributed::SymmAtOp>(converter,
-                                                              benefit),
-        inlinePtx(inlinePtx), libname(libname), libpath(libpath) {}
-
-  LogicalResult
-  matchAndRewrite(triton::distributed::SymmAtOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loc = op->getLoc();
-    ::mlir::triton::PTXBuilder ptxBuilder;
-    // inline ptx to aviod function call.
-    // we can remove it if `nvshmem_ptr` can be inlined in llvm
-    if (inlinePtx) {
-      const std::string nvshmemPtxPtx =
-          "{                                                        \n\t"s +
-          " .reg.b64 %nvshmem_ptr_wrapper_in_0;                     \n\t"s +
-          " .reg.b32 %nvshmem_ptr_wrapper_in_1;                     \n\t"s +
-          " .reg.b64 %nvshmem_ptr_wrapper_out_0;                    \n\t"s +
-          " mov.b64 %nvshmem_ptr_wrapper_in_0, $1;                  \n\t"s +
-          " mov.b32 %nvshmem_ptr_wrapper_in_1, $2;                  \n\t"s +
-          " {                                                       \n\t"s +
-          "   .reg .pred  %p<5>;                                    \n\t"s +
-          "   .reg .b32 %r<2>;                                      \n\t"s +
-          "   .reg .b64 %rd<14>;                                    \n\t"s +
-          "   mov.b64 %rd5, %nvshmem_ptr_wrapper_in_0;              \n\t"s +
-          "   mov.b32 %r1, %nvshmem_ptr_wrapper_in_1;               \n\t"s +
-          "   mov.u64 %rd13, 0;                                     \n\t"s +
-          "   ld.const.u64  %rd6, [nvshmemi_device_state_d+40];     \n\t"s +
-          "   sub.s64 %rd1, %rd5, %rd6;                             \n\t"s +
-          "   setp.gt.u64 %p1, %rd6, %rd5;                          \n\t"s +
-          "   ld.const.u64  %rd7, [nvshmemi_device_state_d+48];     \n\t"s +
-          "   setp.ge.u64 %p2, %rd1, %rd7;                          \n\t"s +
-          "   or.pred %p3, %p1, %p2;                                \n\t"s +
-          "   @%p3 bra  L__BB6_2;                                   \n\t"s +
-          "   ld.const.u64 %rd10, [nvshmemi_device_state_d+56];     \n\t"s +
-          "   mul.wide.s32 %rd11, %r1, 8;                           \n\t"s +
-          "   add.s64 %rd9, %rd10, %rd11;                           \n\t"s +
-          "   // begin inline asm                                   \n\t"s +
-          "   ld.global.nc.u64 %rd8, [%rd9];                        \n\t"s +
-          "   // end inline asm                                     \n\t"s +
-          "   setp.eq.s64 %p4, %rd8, 0;                             \n\t"s +
-          "   add.s64 %rd12, %rd8, %rd1;                            \n\t"s +
-          "   selp.b64 %rd13, %rd8, %rd12, %p4;                     \n\t"s +
-          " L__BB6_2:                                               \n\t"s +
-          "   mov.b64 %nvshmem_ptr_wrapper_out_0, %rd13;            \n\t"s +
-          " }                                                       \n\t"s +
-          " mov.b64 $0, %nvshmem_ptr_wrapper_out_0;                 \n\t"s +
-          "}                                                        \n\t";
-
-      auto &nvshmemPtr = *ptxBuilder.create<>(nvshmemPtxPtx);
-      nvshmemPtr({ptxBuilder.newOperand("=l"),
-                  ptxBuilder.newOperand(adaptor.getSymmAddr(), "l"),
-                  ptxBuilder.newOperand(adaptor.getRank(), "r")},
-                 /*onlyAttachMLIRArgs=*/true);
-
-      // addrspace = 1 means global memory
-      auto ptxResult = ptxBuilder.launch(
-          rewriter, loc, ptr_ty(rewriter.getContext(), /*addrspace=*/1));
-      rewriter.replaceOp(op, ptxResult);
-    } else {
-      Type retType =
-          this->getTypeConverter()->convertType(op->getResult(0).getType());
-      auto nvshmemOp = CreateNVSHMEMOp(rewriter, op, "nvshmem_ptr", libname,
-                                       libpath, adaptor.getOperands(), retType);
-      auto newResult = nvshmemOp->getResult(0);
-      rewriter.replaceOp(op, newResult);
-    }
-    return success();
-  }
-
-private:
-  bool inlinePtx;
-  StringRef libname;
-  StringRef libpath;
-};
-
 class ExternCallConversion
     : public ConvertOpToLLVMPattern<triton::distributed::ExternCallOp> {
 public:
@@ -446,11 +364,12 @@ public:
         op->getNumResults() == 0
             ? voidTy
             : this->getTypeConverter()->convertType(op->getResult(0).getType());
-    bool enable_ibgda =
-        mlir::triton::tools::getBoolEnv("NVSHMEM_IBGDA_SUPPORT");
+    // control whether to use NVSHMEM wrapper
+    bool use_nvshmem_wrapper =
+        mlir::triton::tools::getBoolEnv("TRITON_DIST_SHMEM_WRAPPER");
     std::string funcName = op.getSymbol().str();
     // currently nvshmem bitcode does not support ibgda, so use ptx wrapper
-    if (enable_ibgda)
+    if (use_nvshmem_wrapper)
       funcName += "_wrapper";
     StringRef libname = op.getLibname();
     StringRef libpath = op.getLibpath();

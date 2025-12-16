@@ -26,7 +26,7 @@ import os
 import argparse
 import torch
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import get_torch_prof_ctx
 from triton_dist.mega_triton_kernel.test.torch_impl_utils import ref_paged_attn
 
 

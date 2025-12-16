@@ -23,17 +23,19 @@
 #
 ################################################################################
 import torch
-import triton
 import triton.language as tl
 import triton_dist.language as dl
+import triton_dist
 import nvshmem.core
-from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, perf_func, nvshmem_create_tensor, sleep_async, assert_allclose
+from triton_dist.profiler_utils import perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor, sleep_async
 
 import os
 
 
 # all gather(pull mode)
-@triton.jit
+@triton_dist.jit
 def all_gather_kernel(
     ag_ptr,
     n_elements,

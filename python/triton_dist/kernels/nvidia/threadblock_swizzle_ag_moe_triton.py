@@ -33,7 +33,7 @@ import torch
 
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import __syncthreads, tid
+from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.kernels.nvidia.common_ops import next_power_of_2, bisect_right_kernel
 
 

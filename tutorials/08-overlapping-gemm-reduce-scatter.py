@@ -50,15 +50,17 @@ import torch
 
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 # The implementation of reduce_scatter_2d_op is the same as that in 06-intern-node-reudce-scatter.py.
 from triton_dist.kernels.nvidia.reduce_scatter import (
     ReduceScatter2DContext, create_reduce_scater_2d_ctx, reduce_scatter_2d_op)
+from triton_dist.profiler_utils import perf_func
 from triton_dist.utils import (dist_print, generate_data,
                                nvshmem_barrier_all_on_stream,
                                nvshmem_create_tensors,
-                               nvshmem_free_tensor_sync, perf_func,
-                               finalize_distributed, initialize_distributed)
+                               nvshmem_free_tensor_sync, finalize_distributed,
+                               initialize_distributed)
 
 
 # GEMM and reduce-scatter context. Stores comm info (dtype, nnodes, etc), symm buffers, and signals.
@@ -105,13 +107,8 @@ def create_gemm_rs_context(max_M,
                            BLOCK_K=64,
                            GROUP_M=8,
                            stages=3) -> GEMMReduceScatterTensorParallelContext:
-    rs_ctx = create_reduce_scater_2d_ctx(max_M,
-                                         N,
-                                         rank,
-                                         world_size,
-                                         local_world_size,
-                                         output_dtype,
-                                         overlap_with_gemm=True)
+    rs_ctx = create_reduce_scater_2d_ctx(max_M, N, rank, world_size,
+                                         local_world_size, output_dtype)
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     num_gemm_sms = NUM_SMS - rs_ctx.num_rs_sms
     gemm_out_bufs = nvshmem_create_tensors([max_M, N],
@@ -133,7 +130,7 @@ def create_gemm_rs_context(max_M,
 
 
 ################### triton kernel ###################
-@triton.jit
+@triton_dist.jit
 def kernel_gemm_rs_producer_persistent(
     a_ptr,
     b_ptr,

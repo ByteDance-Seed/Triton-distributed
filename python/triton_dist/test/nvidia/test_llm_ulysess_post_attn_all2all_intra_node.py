@@ -34,7 +34,8 @@ import numpy as np
 import torch
 import torch.distributed
 
-from triton_dist.utils import assert_allclose, bitwise_equal, initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
+from triton_dist.test.utils import assert_allclose, bitwise_equal
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
 
 from triton_dist.kernels.nvidia.sp_ulysess_o_all2all_gemm import SpUlysessOAll2AllGemmKernel
 

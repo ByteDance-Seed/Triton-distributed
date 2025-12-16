@@ -59,8 +59,7 @@ from triton_dist.utils import (
     dist_print,
 )
 from triton_dist.kernels.amd import create_ag_gemm_intra_node_context
-from triton_dist.kernels.amd.common_ops import (
-    barrier_all_on_stream, )
+from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
 
 assert triton.runtime.driver.active.get_current_target().backend == "hip"
 
@@ -381,8 +380,7 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
 
         # Barrier before the current AG-GEMM operation. This step is necessary when running multiple rounds of computations.
         torch.cuda.synchronize()
-        barrier_all_on_stream(self.rank, ctx.num_ranks, ctx.comm_buf_ptr,
-                              current_stream)
+        barrier_all_on_stream(current_stream)
 
         # Sync work streams.
         for ag_stream in ctx.ag_streams:
@@ -546,6 +544,11 @@ if __name__ == "__main__":
         )
         dist_print("❌ Triton and Torch differ")
 
+    # Explicitly delete rocSHMEM-backed tensors before finalization
+    # without explicit cleanup, rocshmem barrier_all collective operation
+    # is called during python shutdown when some ranks may already have exited,
+    # which may cause segfaults.
+    del dist_ag_gemm_op
     pyrocshmem.rocshmem_finalize()
     # After all, destroy distributed process group.
     destroy()

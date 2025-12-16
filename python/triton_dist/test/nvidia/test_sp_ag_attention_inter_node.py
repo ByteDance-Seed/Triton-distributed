@@ -30,8 +30,8 @@ from itertools import accumulate
 import torch
 import nvshmem.core
 from triton_dist.kernels.nvidia import (create_sp_ag_attention_context_inter_node, fused_sp_ag_attn_inter_node)
-from triton_dist.utils import (dist_print, get_torch_prof_ctx, initialize_distributed, perf_func,
-                               nvshmem_barrier_all_on_stream)
+from triton_dist.profiler_utils import get_torch_prof_ctx, perf_func
+from triton_dist.utils import (dist_print, initialize_distributed, nvshmem_barrier_all_on_stream)
 
 ##################################################
 

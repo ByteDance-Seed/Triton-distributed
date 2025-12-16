@@ -23,16 +23,16 @@
 #
 ################################################################################
 import torch
-import triton
 import triton.language as tl
 
 from typing import Optional
+import triton_dist
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.language_extra import tid
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, nvshmem_create_tensor
 
 
-@triton.jit
+@triton_dist.jit
 def all_to_all_kernel(
     data_src,
     data_dst,

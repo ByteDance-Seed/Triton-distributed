@@ -33,10 +33,11 @@ from cuda import cudart
 
 import triton
 import triton.language as tl
-from triton.language.extra.cuda import libnvshmem_device
+from triton_dist.language.extra.cuda import libnvshmem_device
+import triton_dist
 from triton_dist.kernels.allreduce import AllReduceMethod
-from triton.language.extra.cuda.language_extra import (__syncthreads, load_v2_b64, multimem_st_b64, ntid, pack_b32_v2,
-                                                       st_v4_b32, tid, multimem_ld_reduce_v4)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, load_v2_b64, multimem_st_b64, ntid,
+                                                            pack_b32_v2, st_v4_b32, tid, multimem_ld_reduce_v4)
 from triton.language.extra.cuda.utils import num_warps
 from triton_dist.kernels.nvidia.common_ops import barrier_all_intra_node_atomic_cas_block, barrier_all_intra_node_non_atomic_block, barrier_on_this_grid
 from triton_dist.kernels.nvidia.reduce_scatter import copy_continuous_kernel, kernel_ring_reduce_tma, kernel_ring_reduce_non_tma
@@ -211,7 +212,7 @@ def get_tree_parent_and_children(N, rank):
     return parent_a, left_child_a, right_child_a, parent_b, left_child_b, right_child_b
 
 
-@triton.jit(do_not_specialize=["rank", "world_size"])
+@triton_dist.jit(do_not_specialize=["rank", "world_size"])
 def allreduce_double_tree_intra_node_kernel(
     symm_input_ptr,
     symm_signal_ptr,
@@ -329,7 +330,7 @@ def allreduce_double_tree_intra_node_kernel(
                                       libshmem_device.NVSHMEM_SIGNAL_SET, tree_child1)
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def allreduce_one_shot_push_intra_node_kernel(
     input_ptr,
     output_ptr,
@@ -383,7 +384,7 @@ def allreduce_one_shot_push_intra_node_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def allreduce_one_shot_tma_push_intra_node_kernel(
     M,
     N,
@@ -443,7 +444,7 @@ def allreduce_one_shot_tma_push_intra_node_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def allreduce_two_shot_push_intra_node_kernel(
     input_ptr,
     symm_out_ptr,
@@ -524,7 +525,7 @@ def allreduce_two_shot_push_intra_node_kernel(
         copy_continuous_kernel(symm_out_ptr, out_ptr, n_elements, BLOCK_SIZE)
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def allreduce_two_shot_multimem_st_intra_node_kernel(
     input_ptr,
     symm_out_ptr,
@@ -598,7 +599,7 @@ def allreduce_two_shot_multimem_st_intra_node_kernel(
 
 
 @triton.heuristics({"HAS_ATOMIC_CAS": lambda args: supports_p2p_native_atomic()})
-@triton.jit(do_not_specialize=["rank", "phase"])
+@triton_dist.jit(do_not_specialize=["rank", "phase"])
 def allreduce_one_shot_multimem_intra_node_kernel(
     in_ptr,
     symm_in_ptr,
@@ -656,7 +657,7 @@ def allreduce_one_shot_multimem_intra_node_kernel(
         __syncthreads()
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton_dist.jit(do_not_specialize=["rank"])
 def allreduce_two_shot_multimem_intra_node_kernel(symm_ptr, grid_barrier_ptr, elems, rank, world_size,
                                                   use_cooperative: tl.constexpr):
     elems_per_rank = elems // world_size

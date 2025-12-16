@@ -79,10 +79,22 @@ class TPAttnBuilder:
         if hasattr(self_attn, "q_norm"):
             self.q_norm_eps = self_attn.q_norm.variance_epsilon
             self.q_norm_w = self_attn.q_norm.weight.detach().to("cuda", non_blocking=True)
+            self.skip_q_norm = False
+        else:
+            self.q_norm_eps = 1e-6
+            # fake weight
+            self.q_norm_w = torch.zeros((self.head_dim, ), dtype=torch.bfloat16, device=torch.cuda.current_device())
+            self.skip_q_norm = True
+
         if hasattr(self_attn, "k_norm"):
             self.k_norm_eps = self_attn.k_norm.variance_epsilon
             self.k_norm_w = self_attn.k_norm.weight.detach().to("cuda", non_blocking=True)
-        assert hasattr(self_attn, "q_norm") and hasattr(self_attn, "k_norm")
+            self.skip_k_norm = False
+        else:
+            self.k_norm_eps = 1e-6
+            # fake weight
+            self.k_norm_w = torch.zeros((self.head_dim, ), dtype=torch.bfloat16, device=torch.cuda.current_device())
+            self.skip_k_norm = True
 
         if verbose:
             print(f"[RANK {self.rank}] Attn initialized with parameters: qkv ({self.wqkv.shape}, o ({self.wo.shape}))")
@@ -110,7 +122,8 @@ class TPAttnBuilder:
         qkv_proj_out_bsnh = qkv_proj_out.reshape(batch_size, q_len, -1, self.head_dim)
         self._builder.make_qk_norm_rope_update_kvcache(qkv_proj_out_bsnh, key_cache, value_cache, block_tables, kv_lens,
                                                        self.q_norm_w, self.k_norm_w, cos_cache, sin_cache, q_norm_rope,
-                                                       self.q_norm_eps, self.k_norm_eps)
+                                                       self.q_norm_eps, self.k_norm_eps, skip_q_norm=self.skip_q_norm,
+                                                       skip_k_norm=self.skip_k_norm)
         self._builder.make_flash_decode(q_norm_rope, key_cache, value_cache, block_tables, kv_lens, attn_out,
                                         self.sm_scale, self.soft_cap)
         attn_out_2d = attn_out.reshape(num_tokens, self.q_size)

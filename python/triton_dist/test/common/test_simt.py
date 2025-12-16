@@ -26,6 +26,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
+from triton._internal_testing import is_hip
 
 
 @triton.jit
@@ -165,6 +166,10 @@ def test_simt_matmul():
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    if is_hip():
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K = 64, 128, 64
+    else:
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K = 128, 128, 64
     matmul_kernel[grid](
         a,
         b,
@@ -178,9 +183,9 @@ def test_simt_matmul():
         b.stride(1),  #
         c.stride(0),
         c.stride(1),  #
-        BLOCK_SIZE_M=128,
-        BLOCK_SIZE_N=128,
-        BLOCK_SIZE_K=64,
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
         GROUP_SIZE_M=1,
     )
 

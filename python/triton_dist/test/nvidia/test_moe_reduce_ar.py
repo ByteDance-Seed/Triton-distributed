@@ -29,7 +29,9 @@ import triton
 import torch
 from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.nvidia.moe_reduce_ar import run_moe_reduce_ar_triton_non_overlap, run_moe_reduce_ar, create_moe_ar_context
-from triton_dist.utils import dist_print, group_profile, perf_func, initialize_distributed, assert_allclose, sleep_async, finalize_distributed
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import dist_print, initialize_distributed, sleep_async, finalize_distributed
 
 
 def create_rand_tensor(rank, shape, dtype=torch.float16, device="cuda"):
@@ -120,6 +122,7 @@ class MoEReduceARTensorParallel(torch.nn.Module):
         w: torch.Tensor,
         chosen_experts: torch.Tensor,
         expert_weight: torch.Tensor,
+        persistent: bool = False,
     ):
         output = run_moe_reduce_ar(
             x,
@@ -128,6 +131,7 @@ class MoEReduceARTensorParallel(torch.nn.Module):
             expert_weight,
             ctx=self.ctx,
             n_chunks=4,
+            persistent=persistent,
         )
         return output
 
@@ -168,6 +172,10 @@ if __name__ == "__main__":
         moe_reduce_ar.moe_gather_ar_grouped_gemm_kernel = triton.autotune(configs=configs, key=["M", "N", "K"])(
             moe_reduce_ar.moe_gather_ar_grouped_gemm_kernel)
         run_moe_reduce_ar = contextual_autotune(is_dist=True)(run_moe_reduce_ar)
+        moe_reduce_ar.moe_grouped_gemm_persistent_kernel = triton.autotune(configs=configs, key=["M", "N", "K"])(
+            moe_reduce_ar.moe_grouped_gemm_persistent_kernel)
+        moe_reduce_ar.moe_gather_ar_grouped_gemm_persistent_kernel = triton.autotune(
+            configs=configs, key=["M", "N", "K"])(moe_reduce_ar.moe_gather_ar_grouped_gemm_persistent_kernel)
 
     tp_group = initialize_distributed(args.seed)
     RANK = tp_group.rank()
@@ -216,33 +224,55 @@ if __name__ == "__main__":
     func_torch = lambda: moe_reduce_ar_torch(intermediate_states, w, choosed_expert, expert_weight, tp_group)
     func_triton_non_overlap = lambda: run_moe_reduce_ar_triton_non_overlap(intermediate_states, w, choosed_expert,
                                                                            expert_weight)
-    func_triton = lambda: module.forward(intermediate_states, w, choosed_expert, expert_weight)
+    func_triton_non_overlap_persistent = lambda: run_moe_reduce_ar_triton_non_overlap(
+        intermediate_states, w, choosed_expert, expert_weight, persistent=True)
+    func_triton = lambda: module.forward(intermediate_states, w, choosed_expert, expert_weight, persistent=False)
+    func_triton_persistent = lambda: module.forward(intermediate_states, w, choosed_expert, expert_weight, persistent=
+                                                    True)
 
     # runs
     output_torch = func_torch()
     output_triton_non_overlap = func_triton_non_overlap()
+    output_triton_non_overlap_persistent = func_triton_non_overlap_persistent()
     output_triton = func_triton()
+    output_triton_persistent = func_triton_persistent()
 
     atol, rtol = THRESHOLD_MAP[dtype]
     assert_allclose(output_triton_non_overlap, output_torch, atol=atol, rtol=rtol)
+    assert_allclose(output_triton_non_overlap_persistent, output_torch, atol=atol, rtol=rtol)
     assert_allclose(output_triton, output_torch, atol=atol, rtol=rtol)
+    assert_allclose(output_triton_persistent, output_torch, atol=atol, rtol=rtol)
 
     sleep_async(200)  # in case CPU bound
     torch_output, duration_ms_torch = perf_func(func_torch, iters=iters, warmup_iters=warmup_iters)
 
     with group_profile("moe_ar_non_overlap", do_prof=args.profile, group=tp_group):
-        sleep_async(100)
+        sleep_async(200)
         output, duration_ms_triton_non_overlap = perf_func(func_triton_non_overlap, iters=iters,
                                                            warmup_iters=warmup_iters)
 
-    with group_profile("moe_ar", do_prof=args.profile, group=tp_group):
+    with group_profile("moe_ar_non_overlap_persistent", do_prof=args.profile, group=tp_group):
         sleep_async(100)
+        output, duration_ms_triton_non_overlap_persistent = perf_func(func_triton_non_overlap_persistent, iters=iters,
+                                                                      warmup_iters=warmup_iters)
+
+    with group_profile("moe_ar", do_prof=args.profile, group=tp_group):
+        sleep_async(200)
         output, duration_ms_triton = perf_func(func_triton, iters=iters, warmup_iters=warmup_iters)
+
+    with group_profile("moe_ar_persistent", do_prof=args.profile, group=tp_group):
+        sleep_async(100)
+        output, duration_ms_triton_persistent = perf_func(func_triton_persistent, iters=iters,
+                                                          warmup_iters=warmup_iters)
 
     dist_print(f"torch #{RANK} {duration_ms_torch:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"triton non-overlap #{RANK} {duration_ms_triton_non_overlap:0.2f} ms/iter", need_sync=True,
                allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton non-overlap persistent #{RANK} {duration_ms_triton_non_overlap_persistent:0.2f} ms/iter",
+               need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
     dist_print(f"triton #{RANK} {duration_ms_triton:0.2f} ms/iter", need_sync=True,
+               allowed_ranks=list(range(WORLD_SIZE)))
+    dist_print(f"triton persistent #{RANK} {duration_ms_triton_persistent:0.2f} ms/iter", need_sync=True,
                allowed_ranks=list(range(WORLD_SIZE)))
 
     module.ctx.finalize()

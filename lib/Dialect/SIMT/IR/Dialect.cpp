@@ -23,6 +23,7 @@
 
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
+#include "triton/Dialect/Triton/IR/Interfaces.h"
 
 // clang-format off
 #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
@@ -42,6 +43,7 @@ void mlir::triton::simt::SIMTDialect::initialize() {
 #define GET_OP_LIST
 #include "TritonDistributed/Dialect/SIMT/IR/Ops.cpp.inc"
       >();
+  addInterfaces<TritonInlinerInterface>();
 }
 
 #include "TritonDistributed/Dialect/SIMT/IR/SIMTEnums.cpp.inc"

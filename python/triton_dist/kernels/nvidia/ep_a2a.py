@@ -26,19 +26,59 @@
 import torch
 import triton
 import triton.language as tl
+import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld
+from triton_dist.language.extra.cuda.language_extra import tid, atomic_add, ld_acquire, __syncthreads, ld_b32, atomic_add_per_warp, st, ld, membar
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
 from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid)
-
+from triton_dist.language.extra.language_extra import threads_per_warp, num_warps
+from triton_dist.tools import aot_compile_spaces
+try:
+    from triton._C.libtriton_distributed import distributed as AOT_LIB
+except ImportError as e:
+    print("AOT lib not found, please follow the doc to build")
+    print(e)
+    AOT_LIB = None
 
 ########## triton kernels ##########
-@triton.jit
+kernel_dispatch_token_signature = ((
+    "*{offset_dtype}:16, "  # send_reqs_for_nodes,
+    "*{signal_dtype}, "  # signals_for_nodes,
+    "*{offset_dtype}:16, "  #recv_buf_offset_per_expert
+    "*{token_dtype}:16, "  # input_buf
+    "*{token_dtype}:16, "  # output_buf
+    "*{weight_dtype}, "  # weight_send_buf
+    "*{weight_dtype}, "  # weight_recv_buf
+    "*{offset_dtype}, "  # topk_indices_tensor
+    "*{offset_dtype}, "  # token_dst_scatter_idx
+    "*{offset_dtype}, "  # num_input_tokens_per_rank
+) + (
+    "i32, i32, i32, i32, i32, "  # max_tokens/topk/hidden_size/bytes_per_token/num_sms
+) + ("%experts_per_rank, "
+     "%local_world_size, "
+     "%HAS_WEIGHT, "
+     "%WITH_SCATTER_INDICES"))
+
+
+@aot_compile_spaces({
+    "kernel_dispatch_token_bf16_weight_fp32": {
+        "signature":
+        kernel_dispatch_token_signature.format(offset_dtype="i32", signal_dtype="i64", token_dtype="bf16",
+                                               weight_dtype="fp32"), "grid": ["num_sms", "1", "1"], "triton_algo_infos":
+        [{
+            "experts_per_rank": experts_per_rank, "local_world_size": 8, "HAS_WEIGHT": HAS_WEIGHT,
+            "WITH_SCATTER_INDICES": WITH_SCATTER_INDICES, "num_warps": 32, "num_stages": 2
+        }
+         for experts_per_rank in [64, 32, 16, 8, 4, 2]
+         for HAS_WEIGHT in [False, True]
+         for WITH_SCATTER_INDICES in [False, True]]
+    }
+})
+@triton_dist.jit
 def kernel_dispatch_token(
     send_reqs_for_nodes,
     signals_for_nodes,
-    counter_ptr,
     recv_buf_offset_per_expert,
     input_buf,  # recv token from other nodes
     output_buf,
@@ -51,11 +91,11 @@ def kernel_dispatch_token(
     topk: int,
     hidden_size: int,
     bytes_per_token: int,
+    num_sms: int,
     experts_per_rank: tl.constexpr,
     local_world_size: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     WITH_SCATTER_INDICES: tl.constexpr,
-    num_warps: tl.constexpr,
 ):
     WARP_SIZE = 32
     rank = dl.rank()
@@ -67,8 +107,8 @@ def kernel_dispatch_token(
     num_pid = tl.num_programs(0)
     thread_idx = tid(0)
     warp_id = thread_idx // WARP_SIZE
-    total_warps = num_warps * num_pid
-    global_warp_id = pid * num_warps + warp_id
+    total_warps = num_warps() * num_pid
+    global_warp_id = pid * num_warps() + warp_id
     weight_elem_size = tl.constexpr(weight_send_buf.dtype.element_ty.primitive_bitwidth) // 8
     num_tokens = tl.load(num_input_tokens_per_rank + rank)
     for node_offset in range(0, nnodes):
@@ -93,31 +133,26 @@ def kernel_dispatch_token(
                         target_rank,
                     )
 
+            membar(scope="gl")
             __syncthreads()
-
-            count = tl.atomic_add(counter_ptr + target_node, 1, scope="gpu", sem="release")  # noqa: F841
             libshmem_device.fence()
 
-            while ld_acquire(counter_ptr + target_node, "gpu") != num_pid:
-                pass
-
-
-#            __syncthreads()
-            if pid == 0:
-                if thread_idx == 0:
-                    libshmem_device.signal_op(
-                        signals_for_nodes + node_id,
-                        1,
-                        libshmem_device.NVSHMEM_SIGNAL_SET,
-                        target_rank,
-                    )
+            if thread_idx == 0:
+                libshmem_device.signal_op(
+                    signals_for_nodes + node_id,
+                    1,
+                    libshmem_device.NVSHMEM_SIGNAL_ADD,
+                    target_rank,
+                )
 
         __syncthreads()
         src_send_node = (node_id - node_offset + nnodes) % nnodes
         if node_offset > 0:
             if thread_idx == 0:
-                libshmem_device.signal_wait_until(signals_for_nodes + src_send_node, libshmem_device.NVSHMEM_CMP_EQ, 1)
+                libshmem_device.signal_wait_until(signals_for_nodes + src_send_node, libshmem_device.NVSHMEM_CMP_EQ,
+                                                  num_pid)
             __syncthreads()
+        membar(scope="gl")
         src_rank = local_rank + src_send_node * local_world_size
         token_num = tl.load(num_input_tokens_per_rank + src_rank)
         for token_offset in range(global_warp_id, token_num, total_warps):
@@ -149,7 +184,33 @@ def kernel_dispatch_token(
                             expert_rank)
 
 
-@triton.jit
+kernel_combine_token_signature = ((
+    "*i32, "  #counter_ptr,
+    "*{offset_dtype}:16, "  # num_input_tokens_per_rank
+    "*{offset_dtype}:16, "  # send_reqs_in_dispatch
+    "*{token_dtype}:16, "  # intra_node_reduce_buf,
+    "*{token_dtype}:16, "  # input_buf,
+    "*{token_dtype}:16, "  # send_buf
+    "*{offset_dtype}:16, "  # topk_indices_buf
+    "*{offset_dtype}:16, "  # token_dst_scatter_idx
+) + (
+    "i32, i32, i32:16, i32:16, i32, "  #max_tokens/topk/hidden_size/bytes_per_token/num_sms
+) + ("%experts_per_rank, "
+     "%local_world_size, "
+     "%BLOCK_SIZE"))
+
+
+@aot_compile_spaces({
+    "kernel_combine_token_bf16": {
+        "signature":
+        kernel_combine_token_signature.format(offset_dtype="i32", token_dtype="bf16"), "grid": ["num_sms", "1", "1"],
+        "triton_algo_infos": [{
+            "experts_per_rank": experts_per_rank, "local_world_size": 8, "BLOCK_SIZE": BLOCK_SIZE, "num_warps": 32,
+            "num_stages": 2
+        } for experts_per_rank in [64, 32, 16, 8, 4, 2] for BLOCK_SIZE in [8192, 4096, 2048]]
+    }
+})
+@triton_dist.jit
 def kernel_combine_token(
     counter_ptr,
     num_input_tokens_per_rank,  # [world_size]
@@ -161,15 +222,15 @@ def kernel_combine_token(
     token_dst_scatter_idx,  # [self.nnodes, self.max_tokens, self.topk]
     max_tokens: int,
     topk: int,
-    hidden_size: tl.constexpr,
-    bytes_per_token: tl.constexpr,
-    expert_per_rank: tl.constexpr,
+    hidden_size: int,
+    bytes_per_token: int,
+    num_sms: int,  # for aot
+    experts_per_rank: tl.constexpr,
     local_world_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    num_warps: tl.constexpr,
 ):
-    tl.static_assert(hidden_size <= BLOCK_SIZE, "BLOCK_SIZE must be larger than hidden_size")
-    WARP_SIZE = 32
+    # tl.static_assert(hidden_size <= BLOCK_SIZE, "BLOCK_SIZE must be larger than hidden_size")
+    WARP_SIZE = threads_per_warp()
 
     rank = dl.rank()
     world_size = dl.num_ranks()
@@ -181,9 +242,10 @@ def kernel_combine_token(
     token_block_offs = tl.arange(0, BLOCK_SIZE)
     token_mask = (token_block_offs[:] < hidden_size)
     thread_idx = tid(0)
-    total_warps = num_warps * num_pid
+    lane_id = thread_idx % WARP_SIZE
+    total_warps = num_warps() * num_pid
     warp_id = thread_idx // WARP_SIZE
-    global_warp_id = pid * num_warps + warp_id
+    global_warp_id = pid * num_warps() + warp_id
 
     for node_offset in range(1, nnodes):
         target_node = (node_id + node_offset) % nnodes
@@ -193,7 +255,7 @@ def kernel_combine_token(
             token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
             for j in range(topk):
                 expert_idx = tl.load(topk_indices_buf + (target_node * max_tokens + token_idx) * topk + j)
-                expert_rank = expert_idx // expert_per_rank
+                expert_rank = expert_idx // experts_per_rank
                 expert_node_idx = expert_rank // local_world_size
                 if expert_node_idx == node_id:
                     token_scatter_idx = tl.load(token_dst_scatter_idx + (target_node * max_tokens + token_idx) * topk +
@@ -223,26 +285,47 @@ def kernel_combine_token(
 
     num_dispatch_token_cur_rank = tl.load(num_input_tokens_per_rank + rank)
     # for current node
-    for token_idx in range(pid, num_dispatch_token_cur_rank, num_pid):
-        token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
-        for j in range(topk):
-            expert_idx = tl.load(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
-            expert_rank = expert_idx // expert_per_rank
-            expert_node_idx = expert_rank // local_world_size
+    # for token_idx in range(pid, num_dispatch_token_cur_rank, num_pid):
+    #     token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+    #     for j in range(topk):
+    #         expert_idx = tl.load(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
+    #         expert_rank = expert_idx // experts_per_rank
+    #         expert_node_idx = expert_rank // local_world_size
 
-            if expert_node_idx == node_id:
-                token_scatter_idx = tl.load(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
-                remote_input_ptr = dl.symm_at(input_buf, expert_rank)
-                remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
-                token = tl.load(remote_input_ptr + token_scatter_idx * hidden_size + token_block_offs,
-                                mask=token_mask).to(tl.float32)
-                token_accum = token_accum + token
+    #         if expert_node_idx == node_id:
+    #             token_scatter_idx = tl.load(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
+    #             remote_input_ptr = dl.symm_at(input_buf, expert_rank)
+    #             remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
+    #             token = tl.load(remote_input_ptr + token_scatter_idx * hidden_size + token_block_offs,
+    #                             mask=token_mask).to(tl.float32)
+    #             token_accum = token_accum + token
 
-        tl.store(send_buf + (node_id * max_tokens + token_idx) * hidden_size + token_block_offs,
-                 token_accum.to(send_buf.dtype.element_ty), token_mask)
+    #     tl.store(send_buf + (node_id * max_tokens + token_idx) * hidden_size + token_block_offs,
+    #              token_accum.to(send_buf.dtype.element_ty), token_mask)
+
+    for token_idx in range(global_warp_id, num_dispatch_token_cur_rank, total_warps):
+        # token_accum = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+        vec_size: tl.constexpr = 128 // send_buf.dtype.element_ty.primitive_bitwidth
+        # tl.static_assert(hidden_size % vec_size == 0)
+        for i in range(lane_id * vec_size, hidden_size, WARP_SIZE * vec_size):
+            token_accum = dl.zeros_vector(vec_size, tl.float32)
+            for j in range(topk):
+                expert_idx = ld(topk_indices_buf + (node_id * max_tokens + token_idx) * topk + j)
+                expert_rank = expert_idx // experts_per_rank
+                expert_node_idx = expert_rank // local_world_size
+
+                if expert_node_idx == node_id:
+                    token_scatter_idx = ld(token_dst_scatter_idx + (node_id * max_tokens + token_idx) * topk + j)
+                    remote_input_ptr = dl.symm_at(input_buf, expert_rank)
+                    remote_input_ptr = tl.multiple_of(remote_input_ptr, 32)
+                    token = dl.ld_vector(remote_input_ptr + token_scatter_idx * hidden_size + i,
+                                         vec_size=vec_size).to(tl.float32)
+                    token_accum = token_accum + token.to(tl.float32)
+            dl.st_vector(send_buf + (node_id * max_tokens + token_idx) * hidden_size + i,
+                         token_accum.to(send_buf.dtype.element_ty))
 
 
-@triton.jit(do_not_specialize=["nelems"])
+@triton_dist.jit(do_not_specialize=["nelems"])
 def copy_1d_tilewise_kernel(dst_ptr, src_ptr,  #
                             nelems,  #
                             BLOCK_SIZE: tl.constexpr,  #
@@ -264,28 +347,65 @@ def copy_1d_tilewise_kernel(dst_ptr, src_ptr,  #
             tl.store(dst_ptr + offs, data, mask=mask)
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def kernel_get_ag_splits_and_recv_offset(num_tokens,  # int
-                                         send_reqs_for_nodes, send_reqs_recv_bufs,
-                                         send_reqs_recv_bufs_copy,  # torch tensor, [nnodes, 2, max_tokens]
-                                         exp_indices,  # [num_tokens, topk],
-                                         topk_indices_buf,  # symm buf, [nnodes, max_tokens, topk]
-                                         topk_indices_buf_copy,  # torch tensor, [nnodes, max_tokens, topk]
-                                         expert_indices_signal_buf,
-                                         local_splits_buf,  # symm buf, [num_experts + 1, ] (with drop token)
-                                         full_splits_buf,  # symm buf, [world_size, num_experts + 1]
-                                         splits_signal_buf,  # symm buf, [world_size, ]
-                                         num_input_tokens_per_rank,  # [world_size, ]
-                                         cumsum_input_tokens_per_rank,  # [world_size, ]
-                                         num_recv_tokens_per_rank_cpu,  # pin memory, [world_size, ]
-                                         cumsum_recv_tokens_per_rank,  # [world_size, ]
-                                         recv_buf_offset_per_expert,  # [world_size, experts_per_rank, world_size]
-                                         grid_sync_counter,  #[1,] zero init
-                                         full_scatter_indices,  # [num_total_tokens, topk]
-                                         token_dst_scatter_idx,  #[nnodes, max_tokens, topk]
-                                         full_splits_buf_expert_stride, local_world_size, max_tokens, experts_per_rank,
-                                         topk: int, BLOCK_SIZE: tl.constexpr,  # larger than num_experts
-                                         ):
+kernel_get_ag_splits_and_recv_offset_signature = ((
+    "*{offset_dtype}:16, *{offset_dtype}:16, *{offset_dtype}:16, *{offset_dtype}:16, *{offset_dtype}:16, "  # send_reqs_for_nodes/send_reqs_recv_bufs/send_reqs_recv_bufs_copy/topk_indices_buf/topk_indices_buf_copy
+    "*{signal_dtype}, "  # expert_indices_signal_buf
+    "*{offset_dtype}:16, "  # local_splits_buf
+    "*{offset_dtype}:16, "  # full_splits_buf
+    "*{signal_dtype}, "  # splits_signal_buf
+    "*{offset_dtype}, "  # num_input_tokens_per_rank
+    "*i32, "  # cumsum_input_tokens_per_rank
+    "*i32, "  # num_recv_tokens_per_rank_cpu
+    "*i32, "  # cumsum_recv_tokens_per_rank
+    "*{offset_dtype}, "  # recv_buf_offset_per_expert
+    "*i32, "  # grid_sync_counter
+    "*{offset_dtype}, "  # full_scatter_indices
+    "*{offset_dtype}, "  # token_dst_scatter_idx
+    "i32, i32, i32, i32, i32, ") +  # full_splits_buf_expert_stride/local_world_size/max_tokens/experts_per_rank/num_sms
+                                                  (
+                                                      "i32, "  # topk
+                                                      "%BLOCK_SIZE, "
+                                                      "%HAS_FULL_SCATTER_INDICES"))
+
+
+@aot_compile_spaces({
+    "kernel_get_ag_splits_and_recv_offset": {
+        "signature":
+        kernel_get_ag_splits_and_recv_offset_signature.format(offset_dtype="i32", signal_dtype="i64"), "grid":
+        ["num_sms", "1", "1"], "triton_algo_infos": [{
+            "BLOCK_SIZE": BLOCK_SIZE, "HAS_FULL_SCATTER_INDICES": HAS_FULL_SCATTER_INDICES, "num_warps": 32,
+            "num_stages": 2
+        } for BLOCK_SIZE in [128, 256, 512] for HAS_FULL_SCATTER_INDICES in [False, True]]
+    }
+})
+@triton_dist.jit(do_not_specialize=["num_tokens", "num_sms"])
+def kernel_get_ag_splits_and_recv_offset(
+    send_reqs_for_nodes,
+    send_reqs_recv_bufs,
+    send_reqs_recv_bufs_copy,  # torch tensor, [nnodes, 2, max_tokens]
+    topk_indices_buf,  # symm buf, [nnodes, max_tokens, topk]
+    topk_indices_buf_copy,  # torch tensor, [nnodes, max_tokens, topk]
+    expert_indices_signal_buf,
+    local_splits_buf,  # symm buf, [num_experts + 1, ] (with drop token)
+    full_splits_buf,  # symm buf, [world_size, num_experts + 1]
+    splits_signal_buf,  # symm buf, [world_size, ]
+    num_input_tokens_per_rank,  # [world_size, ]
+    cumsum_input_tokens_per_rank,  # [world_size, ]
+    num_recv_tokens_per_rank_cpu,  # pin memory, [world_size, ]
+    cumsum_recv_tokens_per_rank,  # [world_size, ]
+    recv_buf_offset_per_expert,  # [world_size, experts_per_rank, world_size]
+    grid_sync_counter,  #[1,] zero init
+    full_scatter_indices,  # [num_total_tokens, topk]
+    token_dst_scatter_idx,  #[nnodes, max_tokens, topk]
+    full_splits_buf_expert_stride,
+    local_world_size,
+    max_tokens,
+    experts_per_rank,
+    num_sms,
+    topk: int,
+    BLOCK_SIZE: tl.constexpr,  # larger than num_experts
+    HAS_FULL_SCATTER_INDICES: tl.constexpr,
+):
     # TODO: get topk_indices_buf
     rank = dl.rank()
     world_size = dl.num_ranks()
@@ -417,7 +537,7 @@ def kernel_get_ag_splits_and_recv_offset(num_tokens,  # int
 
     barrier_on_this_grid(grid_sync_counter, False)
 
-    if full_scatter_indices:
+    if HAS_FULL_SCATTER_INDICES:
         tl.static_assert(token_dst_scatter_idx is not None)
 
         # grid sync: wait cumsum_recv_tokens_per_rank computation
@@ -447,13 +567,20 @@ def kernel_get_ag_splits_and_recv_offset(num_tokens,  # int
             __syncthreads()
 
 
-@triton.jit(do_not_specialize=["length"])
-def kernel_bincount(
-    n,
-    input,
-    output,
-    length,
-):
+@aot_compile_spaces({
+    "bincount_i32": {
+        "signature":
+        "i32, *i32, *i32, i32, i32", "grid": ["num_sms", "1", "1"], "triton_algo_infos": [
+            {"num_warps": 4, "num_stages": 2},
+            {"num_warps": 8, "num_stages": 2},
+            {"num_warps": 16, "num_stages": 2},
+            {"num_warps": 32, "num_stages": 2},
+        ]
+    }
+})
+@triton_dist.jit(do_not_specialize=["n", "length", "num_sm"])
+def kernel_bincount(n, input, output, length, num_sms,  # for aot
+                    ):
     pid = tl.program_id(0)
     num_pid = tl.num_programs(0)
     with dl.simt_exec_region() as (thread_idx, threads_per_block):
@@ -463,10 +590,93 @@ def kernel_bincount(
                 atomic_add(output + val, 1, scope="gpu", semantic="relaxed")
 
 
+@aot_compile_spaces({
+    "get_dispatch_send_reqs_i32": {
+        "signature":
+        "*i32:16, *i32:16, *i32, i32, i32, i32, i32, %topk, %BLOCK_SIZE, %local_world_size", "grid":
+        ["num_sms", "1", "1"], "triton_algo_infos":
+        [{"topk": topk, "BLOCK_SIZE": BLOCK_SIZE, "local_world_size": 8, "num_warps": num_warps, "num_stages": 2}
+         for topk in [6, 8]
+         for num_warps in [4, 8, 16, 32]
+         for BLOCK_SIZE in [256, 512]]
+    }
+})
+@triton_dist.jit(do_not_specialize=["num_tokens", "max_num_tokens", "num_sms"])
+def kernel_get_dispatch_send_reqs(
+    workspace,  # [NUM_SM * BLOCK_SIZE]
+    exp_indices,  # [num_tokens, topk]
+    send_reqs_for_nodes,  # [nnodes, 2, max_num_tokens], init with -1
+    num_tokens: int,
+    max_num_tokens: int,
+    experts_per_rank: int,
+    num_sms: int,
+    topk: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    local_world_size: tl.constexpr,
+):
+    expert_per_node = experts_per_rank * local_world_size
+
+    world_size = dl.num_ranks()
+    rank = dl.rank()
+    nnodes = world_size // local_world_size
+    cur_node_id = rank // local_world_size
+    total_experts = experts_per_rank * world_size
+    pid = tl.program_id(axis=0)
+    num_pid = tl.num_programs(axis=0)
+    tiles_per_node = tl.cdiv(num_tokens, BLOCK_SIZE)
+    num_tiles = tiles_per_node * nnodes
+    PADDED_TOPK: tl.constexpr = triton.next_power_of_2(topk)
+    offs_token = tl.arange(0, BLOCK_SIZE)
+    offs_topk = tl.arange(0, PADDED_TOPK)
+    thread_idx = tid(0)
+    for tile_id in range(pid, num_tiles, num_pid):
+        target_node_id = tile_id // tiles_per_node
+        tile_id_token = tile_id % tiles_per_node
+        # skip current node(no rdma request)
+        if target_node_id != cur_node_id:
+            offs = (offs_token[:, None] + tile_id_token * BLOCK_SIZE) * topk + offs_topk[None, :]
+            mask = (offs_token[:, None] + tile_id_token * BLOCK_SIZE < num_tokens) & (offs_topk[None, :] < topk)
+            # the `other` should be equal to or greater than total_experts
+            expert_idx = tl.load(exp_indices + offs, mask=mask, other=total_experts)
+            node_idx = expert_idx // expert_per_node
+            send_token_mask = tl.where(node_idx == target_node_id, 1,
+                                       0).to(exp_indices.dtype.element_ty)  # [BLOCK_SIZE, PADDED_TOPK]
+            send_token_mask = tl.sum(send_token_mask, axis=1)  # [BLOCK_SIZE, ]
+            send_token_mask = tl.where(send_token_mask > 0, 1, 0).to(exp_indices.dtype.element_ty)  # [BLOCK_SIZE, ]
+            tl.store(workspace + pid * BLOCK_SIZE + offs_token, send_token_mask)
+            __syncthreads()
+
+            if thread_idx == 0:
+                num_tokens_cur_tile = min(num_tokens - tile_id_token * BLOCK_SIZE, BLOCK_SIZE)
+                token_start = -1
+                token_end = 0
+                has_start = False
+                token_mask_base_ptr = workspace + pid * BLOCK_SIZE
+                send_reqs_base_ptr = send_reqs_for_nodes + target_node_id * 2 * max_num_tokens
+                cnt = 0
+                for i in range(num_tokens_cur_tile):
+                    token_mask = ld(token_mask_base_ptr + i)
+                    if token_mask == 0:
+                        if has_start:
+                            has_start = False
+                            token_end = i + tile_id_token * BLOCK_SIZE
+                            st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt + max_num_tokens, token_end)
+                            cnt += 1
+                    else:
+                        if not has_start:
+                            has_start = True
+                            token_start = i + tile_id_token * BLOCK_SIZE
+                            st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt, token_start)
+                if has_start:
+                    st(send_reqs_base_ptr + tile_id_token * BLOCK_SIZE + cnt + max_num_tokens,
+                       num_tokens_cur_tile + tile_id_token * BLOCK_SIZE)
+            __syncthreads()
+
+
 ########################################
 
 
-def bincount(input, length, output=None, output_dtype=torch.int32, num_sm=16):
+def bincount(input, length, output=None, output_dtype=torch.int32, num_sm=16, use_aot=False):
     if output is None:
         output = torch.zeros(length, dtype=output_dtype, device=input.device)
     assert input.dim() == 1
@@ -474,7 +684,26 @@ def bincount(input, length, output=None, output_dtype=torch.int32, num_sm=16):
     assert input.is_contiguous()
     n = input.size(0)
     num_warps = 8
-    kernel_bincount[(num_sm, )](n, input, output, length, num_warps=num_warps)
+    if use_aot:
+        assert input.dtype == torch.int32
+        assert output.dtype == torch.int32
+        stream = torch.cuda.current_stream()
+        assert AOT_LIB is not None
+        algo_info = AOT_LIB.bincount_i32__triton_algo_info_t()
+        kv_algo_info = {"num_warps": num_warps, "num_stages": 2}
+        for _k, _v in kv_algo_info.items():
+            setattr(algo_info, _k, _v)
+        AOT_LIB.bincount_i32(
+            stream.cuda_stream,
+            n,
+            input.data_ptr(),
+            output.data_ptr(),
+            length,
+            num_sm,
+            algo_info,
+        )
+    else:
+        kernel_bincount[(num_sm, )](n, input, output, length, num_sm, num_warps=num_warps)
     return output
 
 
@@ -493,11 +722,51 @@ def get_dispatch_send_reqs_for_target_node(token_node_idx, traget_node_id, index
     return start_indices[:-1], end_indices[:-1]
 
 
+def get_dispatch_send_reqs(exp_indices, send_reqs_for_nodes, experts_per_rank, local_world_size, num_sms,
+                           use_aot=False):
+    BLOCK_SIZE = 256
+    workspace = torch.empty((num_sms * BLOCK_SIZE), dtype=exp_indices.dtype, device=exp_indices.device)
+    max_num_tokens = send_reqs_for_nodes.shape[-1]
+    assert send_reqs_for_nodes.dtype == exp_indices.dtype
+    num_tokens, topk = exp_indices.shape
+    num_warps = 8
+    if use_aot:
+        assert AOT_LIB is not None
+        assert exp_indices.dtype == torch.int32
+        assert send_reqs_for_nodes.dtype == torch.int32
+
+        stream = torch.cuda.current_stream()
+        algo_info = AOT_LIB.get_dispatch_send_reqs_i32__triton_algo_info_t()
+        kv_algo_info = {
+            "topk": topk, "BLOCK_SIZE": BLOCK_SIZE, "local_world_size": local_world_size, "num_warps": num_warps,
+            "num_stages": 2
+        }
+        for _k, _v in kv_algo_info.items():
+            setattr(algo_info, _k, _v)
+        AOT_LIB.get_dispatch_send_reqs_i32(stream.cuda_stream, workspace.data_ptr(), exp_indices.data_ptr(),
+                                           send_reqs_for_nodes.data_ptr(), num_tokens, max_num_tokens, experts_per_rank,
+                                           num_sms, algo_info)
+    else:
+        kernel_get_dispatch_send_reqs[(num_sms, )](
+            workspace,
+            exp_indices,
+            send_reqs_for_nodes,
+            num_tokens,
+            max_num_tokens,
+            experts_per_rank,
+            num_sms,
+            topk=topk,
+            BLOCK_SIZE=BLOCK_SIZE,
+            local_world_size=local_world_size,
+            num_warps=num_warps,
+        )
+
+
 def get_ag_splits_and_recv_offset_for_dispatch(send_reqs_for_nodes, send_reqs_recv_bufs, exp_indices, topk_indices_buf,
                                                expert_indices_signal_buf, local_splits, full_splits_buf,
                                                splits_signal_buf, topk, local_world_size, world_size, max_tokens,
                                                experts_per_rank, full_scatter_indices=None, cpu_default_val=-1,
-                                               offset_dtype=torch.int32, num_sm=20):
+                                               offset_dtype=torch.int32, num_sm=20, use_aot=False):
     num_recv_tokens_per_rank_cpu = torch.empty((world_size, ), dtype=torch.int32, device="cpu", pin_memory=True)
     num_recv_tokens_per_rank_cpu.fill_(cpu_default_val)
     # gpu tensor
@@ -509,7 +778,11 @@ def get_ag_splits_and_recv_offset_for_dispatch(send_reqs_for_nodes, send_reqs_re
     send_reqs_recv_bufs_copy = torch.zeros(send_reqs_recv_bufs.size(), dtype=send_reqs_recv_bufs.dtype,
                                            device=torch.cuda.current_device())
 
+    has_full_scatter_indices = full_scatter_indices is not None
     token_dst_scatter_idx = None
+    if full_scatter_indices is None:
+        # just for aot compile
+        full_scatter_indices = torch.empty((max_tokens, topk), dtype=offset_dtype, device=torch.cuda.current_device())
     if full_scatter_indices is not None:
         assert len(full_scatter_indices.shape) == 2  # [num_total_tokens, topk]
         nnodes = world_size // local_world_size
@@ -533,34 +806,230 @@ def get_ag_splits_and_recv_offset_for_dispatch(send_reqs_for_nodes, send_reqs_re
 
     BLOCK_SIZE = 1 << (full_splits_buf.shape[1]).bit_length()  # the extra one is for drop token
     assert BLOCK_SIZE >= (full_splits_buf.shape[1])
-    num_tokens = exp_indices.shape[0]
-
-    kernel_get_ag_splits_and_recv_offset[grid](
-        num_tokens,
-        send_reqs_for_nodes,
-        send_reqs_recv_bufs,
-        send_reqs_recv_bufs_copy,
-        exp_indices,
-        topk_indices_buf,
-        topk_indices_buf_copy,
-        expert_indices_signal_buf,
-        local_splits,
-        full_splits_buf,
-        splits_signal_buf,
-        num_input_tokens_per_rank,
-        cumsum_input_tokens_per_rank,
-        num_recv_tokens_per_rank_cpu,
-        cumsum_recv_tokens_per_rank,
-        recv_buf_offset_per_expert,
-        counter_workspace,
-        full_scatter_indices,
-        token_dst_scatter_idx,
-        full_splits_buf.shape[1],
-        local_world_size,
-        max_tokens,
-        experts_per_rank,
-        topk,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=32,
-    )
+    if use_aot:
+        stream = torch.cuda.current_stream()
+        assert AOT_LIB is not None
+        algo_info = AOT_LIB.kernel_get_ag_splits_and_recv_offset__triton_algo_info_t()
+        kv_algo_info = {
+            "num_warps": 32, "num_stages": 2, "BLOCK_SIZE": BLOCK_SIZE, "HAS_FULL_SCATTER_INDICES":
+            has_full_scatter_indices
+        }
+        for _k, _v in kv_algo_info.items():
+            setattr(algo_info, _k, _v)
+        AOT_LIB.kernel_get_ag_splits_and_recv_offset(
+            stream.cuda_stream,
+            send_reqs_for_nodes.data_ptr(),
+            send_reqs_recv_bufs.data_ptr(),
+            send_reqs_recv_bufs_copy.data_ptr(),
+            topk_indices_buf.data_ptr(),
+            topk_indices_buf_copy.data_ptr(),
+            expert_indices_signal_buf.data_ptr(),
+            local_splits.data_ptr(),
+            full_splits_buf.data_ptr(),
+            splits_signal_buf.data_ptr(),
+            num_input_tokens_per_rank.data_ptr(),
+            cumsum_input_tokens_per_rank.data_ptr(),
+            num_recv_tokens_per_rank_cpu.data_ptr(),
+            cumsum_recv_tokens_per_rank.data_ptr(),
+            recv_buf_offset_per_expert.data_ptr(),
+            counter_workspace.data_ptr(),
+            full_scatter_indices.data_ptr(),
+            token_dst_scatter_idx.data_ptr(),
+            full_splits_buf.shape[1],
+            local_world_size,
+            max_tokens,
+            experts_per_rank,
+            num_sm,
+            topk,
+            algo_info,
+        )
+    else:
+        kernel_get_ag_splits_and_recv_offset[grid](
+            send_reqs_for_nodes,
+            send_reqs_recv_bufs,
+            send_reqs_recv_bufs_copy,
+            topk_indices_buf,
+            topk_indices_buf_copy,
+            expert_indices_signal_buf,
+            local_splits,
+            full_splits_buf,
+            splits_signal_buf,
+            num_input_tokens_per_rank,
+            cumsum_input_tokens_per_rank,
+            num_recv_tokens_per_rank_cpu,
+            cumsum_recv_tokens_per_rank,
+            recv_buf_offset_per_expert,
+            counter_workspace,
+            full_scatter_indices,
+            token_dst_scatter_idx,
+            full_splits_buf.shape[1],
+            local_world_size,
+            max_tokens,
+            experts_per_rank,
+            num_sm,
+            topk,
+            BLOCK_SIZE=BLOCK_SIZE,
+            HAS_FULL_SCATTER_INDICES=has_full_scatter_indices,
+            num_warps=32,
+        )
+    if not has_full_scatter_indices:
+        full_scatter_indices = None
+        token_dst_scatter_idx = None
     return recv_buf_offset_per_expert, num_recv_tokens_per_rank_cpu, num_input_tokens_per_rank, token_dst_scatter_idx, send_reqs_recv_bufs_copy, topk_indices_buf_copy
+
+
+def ep_dispatch_token_inplace(
+    send_reqs_for_nodes,
+    signal_buf,
+    recv_buf_offset_per_expert,
+    send_buf,
+    output_buf,
+    weight_send_buf,
+    weight_recv_buf,
+    topk_indices_tensor,
+    token_dst_scatter_idx,
+    num_input_tokens_per_rank,
+    max_tokens,
+    topk,
+    hidden,
+    bytes_per_token,
+    experts_per_rank,
+    local_world_size,
+    has_weight,
+    with_scatter_indices,
+    num_sms,
+    use_aot=False,
+):
+    if use_aot:
+        stream = torch.cuda.current_stream()
+        assert AOT_LIB is not None
+        assert weight_send_buf.dtype == torch.float32
+        assert send_buf.dtype == torch.bfloat16
+        assert output_buf.dtype == torch.bfloat16
+        algo_info = AOT_LIB.kernel_dispatch_token_bf16_weight_fp32__triton_algo_info_t()
+        kv_algo_info = {
+            "experts_per_rank": experts_per_rank, "local_world_size": 8, "HAS_WEIGHT": has_weight,
+            "WITH_SCATTER_INDICES": with_scatter_indices, "num_warps": 32, "num_stages": 2
+        }
+        for _k, _v in kv_algo_info.items():
+            setattr(algo_info, _k, _v)
+        AOT_LIB.kernel_dispatch_token_bf16_weight_fp32(
+            stream.cuda_stream,
+            send_reqs_for_nodes.data_ptr(),
+            signal_buf.data_ptr(),
+            recv_buf_offset_per_expert.data_ptr(),
+            send_buf.data_ptr(),
+            output_buf.data_ptr(),
+            weight_send_buf.data_ptr(),
+            weight_recv_buf.data_ptr(),
+            topk_indices_tensor.data_ptr(),
+            token_dst_scatter_idx.data_ptr(),
+            num_input_tokens_per_rank.data_ptr(),
+            max_tokens,
+            topk,
+            hidden,
+            bytes_per_token,
+            num_sms,
+            algo_info,
+        )
+    else:
+        kernel_dispatch_token[(num_sms, )](
+            send_reqs_for_nodes,
+            signal_buf,
+            recv_buf_offset_per_expert,
+            send_buf,
+            output_buf,
+            weight_send_buf,
+            weight_recv_buf,
+            topk_indices_tensor,
+            token_dst_scatter_idx,
+            num_input_tokens_per_rank,
+            max_tokens,
+            topk,
+            hidden,
+            bytes_per_token,
+            num_sms,
+            experts_per_rank=experts_per_rank,
+            local_world_size=local_world_size,
+            HAS_WEIGHT=has_weight,
+            WITH_SCATTER_INDICES=with_scatter_indices,
+            num_warps=32,
+        )
+
+    return output_buf
+
+
+def ep_combine_token_inplace(
+    counter_workspace,
+    num_input_tokens_per_rank,
+    send_reqs_recv_tensor,
+    intra_node_reduce_buf,
+    input,
+    send_buf,
+    topk_indices_tensor,
+    token_dst_scatter_idx,
+    max_tokens,
+    topk,
+    hidden,
+    bytes_per_token,
+    experts_per_rank,
+    local_world_size,
+    num_sms,
+    use_aot=False,
+):
+
+    assert hidden % 16 == 0
+    BLOCK_SIZE = triton.next_power_of_2(hidden)
+    if use_aot:
+        stream = torch.cuda.current_stream()
+        assert AOT_LIB is not None
+        assert send_buf.dtype == torch.bfloat16
+        assert input.dtype == torch.bfloat16
+        assert counter_workspace.dtype == torch.int32
+        algo_info = AOT_LIB.kernel_combine_token_bf16__triton_algo_info_t()
+        kv_algo_info = {
+            "experts_per_rank": experts_per_rank, "local_world_size": 8, "BLOCK_SIZE": BLOCK_SIZE, "num_warps": 32,
+            "num_stages": 2
+        }
+        for _k, _v in kv_algo_info.items():
+            setattr(algo_info, _k, _v)
+        AOT_LIB.kernel_combine_token_bf16(
+            stream.cuda_stream,
+            counter_workspace.data_ptr(),
+            num_input_tokens_per_rank.data_ptr(),
+            send_reqs_recv_tensor.data_ptr(),
+            intra_node_reduce_buf.data_ptr(),
+            input.data_ptr(),
+            send_buf.data_ptr(),
+            topk_indices_tensor.data_ptr(),
+            token_dst_scatter_idx.data_ptr(),
+            max_tokens,
+            topk,
+            hidden,
+            bytes_per_token,
+            num_sms,
+            algo_info,
+        )
+    else:
+        BLOCK_SIZE = triton.next_power_of_2(hidden)
+        assert hidden % 16 == 0
+        kernel_combine_token[(num_sms, )](
+            counter_workspace,  # int32 tensor
+            num_input_tokens_per_rank,
+            send_reqs_recv_tensor,
+            intra_node_reduce_buf,
+            input,
+            send_buf,
+            topk_indices_tensor,
+            token_dst_scatter_idx,
+            max_tokens,
+            topk,
+            hidden,
+            bytes_per_token,
+            num_sms,
+            experts_per_rank=experts_per_rank,
+            local_world_size=local_world_size,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=32,
+        )
+    return send_buf

@@ -615,6 +615,55 @@ def test_perf_gemm_tma_single_device(args):
         print()
 
 
+@triton.jit
+def block_copy_kernel(a_ptr, b_ptr, sig_ptr, N, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offset = pid * BLOCK_SIZE
+    # We only copy half of the data to see if the padding works
+    a_block_ptr = tl.make_block_ptr(base=a_ptr, shape=(N, ), strides=(1, ), offsets=(offset, ),
+                                    block_shape=(BLOCK_SIZE, ), order=(0, ))
+    b_block_ptr = tl.make_block_ptr(base=b_ptr, shape=(N, ), strides=(1, ), offsets=(offset, ),
+                                    block_shape=(BLOCK_SIZE, ), order=(0, ))
+    token = dl.wait(sig_ptr + offset, 1, "gpu", "acquire")
+    a_block_ptr = dl.consume_token(a_block_ptr, token)
+    a = tl.load(a_block_ptr, boundary_check=(0, ))
+    tl.store(b_block_ptr, a, boundary_check=(0, ))
+
+
+@register_test("block_ptr_wait")
+def test_block_ptr_wait(args):
+    device = "cuda"
+    dtype = torch.float16
+
+    barrier_tensor = torch.zeros([1], dtype=torch.int32, device=device)
+    M = 1024
+
+    A = torch.randn([M], dtype=dtype, device=device)
+    B = torch.empty([M], dtype=dtype, device=device)
+
+    B_golden = A.clone()
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        block_copy_kernel[(1, )](A, B, barrier_tensor, M, BLOCK_SIZE=1024)
+
+    print("Kernel launched!")
+    print("signals are:")
+    print(barrier_tensor)
+    print("sleeping...", flush=True)
+    time.sleep(3)
+    tmp_B = B.clone()
+    print("wake up!", flush=True)
+    barrier_tensor.fill_(1)
+    print("signals are:")
+    print(barrier_tensor)
+
+    torch.cuda.current_stream().wait_stream(stream)
+    print(barrier_tensor)
+    assert not torch.allclose(tmp_B, B_golden, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(B_golden, B, atol=1e-3, rtol=1e-3)
+    print("Pass!")
+
+
 if __name__ == "__main__":
     args = get_args()
     if args.list:

@@ -168,10 +168,6 @@ class DenseLLM:
 
     def init_triton_dist_ctx(self, max_M: int = 4096):
         # init ctx
-        BLOCK_M = 128
-        BLOCK_N = 128
-        BLOCK_K = 128
-        stages = 3
         if PLATFORM == 'nvidia':
             self.ag_intranode_stream = torch.cuda.Stream(priority=-1)
         elif PLATFORM == 'amd':
@@ -180,11 +176,9 @@ class DenseLLM:
             raise RuntimeError(f"Unsupported platform: {PLATFORM}. Supported platforms are 'nvidia' and 'amd'.")
         self.ag_internode_stream = torch.cuda.Stream()
         self.layers[0].attn._init_ctx(max_M=max_M, ag_intranode_stream=self.ag_intranode_stream,
-                                      ag_internode_stream=self.ag_internode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                                      BLOCK_K=BLOCK_K, stages=stages)
+                                      ag_internode_stream=self.ag_internode_stream)
         self.layers[0].mlp._init_ctx(max_M=max_M, ag_intranode_stream=self.ag_intranode_stream,
-                                     ag_internode_stream=self.ag_internode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                                     BLOCK_K=BLOCK_K, stages=stages)
+                                     ag_internode_stream=self.ag_internode_stream)
         for layer in self.layers[1:]:
             layer.attn.ag_ctx = self.layers[0].attn.ag_ctx
             layer.attn.rs_ctx = self.layers[0].attn.rs_ctx

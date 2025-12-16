@@ -28,8 +28,47 @@ from typing import Optional
 import torch
 
 import triton
-from triton_dist.kernels.nvidia.reduce_scatter import (kernel_ring_reduce_non_tma, kernel_ring_reduce_tma)
-from triton_dist.utils import perf_func, sleep_async
+import triton.language as tl
+from triton_dist.kernels.nvidia.reduce_scatter import (kernel_ring_reduce_non_tma)
+from triton_dist.profiler_utils import perf_func
+from triton_dist.utils import sleep_async
+
+
+@triton.jit
+def kernel_ring_reduce_atomic_tma(
+    c_ptr,  # [M, N]
+    out_ptr,  # [M_per_split, N]
+    # shape of matrix
+    M_per_rank,
+    N,
+    begin_idx,
+    num_splits: tl.constexpr,
+    # reduce tile shape
+    BLOCK_SIZE_M: tl.constexpr = 256,
+    BLOCK_SIZE_N: tl.constexpr = 64,
+):
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr,
+        shape=[M_per_rank * num_splits, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+    )
+
+    pid = tl.program_id(axis=0)
+    num_pid = tl.num_programs(axis=0)
+    num_tiles_m = tl.cdiv(M_per_rank, BLOCK_SIZE_M)
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_tiles_m * num_tiles_n
+    for tile_id in range(pid, total_tiles, num_pid):
+        tile_id_m = tile_id // num_tiles_n
+        tile_id_n = tile_id % num_tiles_n
+        # accum = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=out_ptr.dtype.element_ty)
+        cur_rank = (begin_idx + 1) % num_splits
+        # accum = c_desc.load([tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N])
+        for i in range(1, num_splits):
+            cur_rank = (i + begin_idx + 1) % num_splits
+            data = c_desc.load([tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N])
+            c_desc.atomic_add([tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N], data)
 
 
 def ring_reduce_tma(
@@ -45,7 +84,7 @@ def ring_reduce_tma(
     M_per_rank = M // num_split
     assert M_per_rank == output.shape[0]
     assert N == output.shape[1]
-    kernel_ring_reduce_tma[(num_sms, )](
+    kernel_ring_reduce_atomic_tma[(num_sms, )](
         input,
         output,
         M_per_rank,

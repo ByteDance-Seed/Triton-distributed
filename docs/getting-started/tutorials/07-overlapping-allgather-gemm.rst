@@ -11,14 +11,14 @@ In doing so, you will learn about:
 * Optimizing the internode communication with 2D Allgather.
 
 .. code-block:: bash
-    
+
     # To run this tutorial
     bash ./scripts/launch.sh ./tutorials/07-overlapping-allgather-gemm.py
 
 GEMM Kernel
 -----------
 
-In the AllGather kernel, we previously output signals that can be used to interact with computation kernels. 
+In the AllGather kernel, we previously output signals that can be used to interact with computation kernels.
 For instance, in an AllGather GEMM example, we can achieve overlapping computation and communication. The GEMM itself doesn't require extensive modifications, you just need to add a small amount of code compared to Triton's default GEMM.
 
 .. code-block:: Python
@@ -420,6 +420,6 @@ Benchmark
         assert torch.allclose(golden, C, atol=1e-3, rtol=1e-3)
         print("Pass!")
 
-        ctx.finailize()
+        ctx.finalize()
         nvshmem.core.finalize()
         torch.distributed.destroy_process_group()

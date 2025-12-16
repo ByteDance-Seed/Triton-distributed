@@ -26,7 +26,7 @@ import torch
 import os
 import argparse
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import get_torch_prof_ctx
 from triton_dist.mega_triton_kernel.test.torch_impl_utils import (
     torch_gate_silu_mul_up, )
 import triton
@@ -35,6 +35,11 @@ import triton
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=False, action="store_true", help="enable profiling")
+    parser.add_argument("--intra_kernel_profile", default=False, action="store_true",
+                        help="enable intra kernel profiling")
+    parser.add_argument("--enable_runtime_scheduler", default=False, action="store_true",
+                        help="enable runtime scheduler")
+
     return parser.parse_args()
 
 
@@ -45,7 +50,8 @@ if __name__ == "__main__":
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(0)
     l2_cache = torch.randn((256, 1024, 1024)).cuda()
-    builder = ModelBuilder()
+    builder = ModelBuilder(enable_profiling=args.intra_kernel_profile,
+                           enable_runtime_scheduler=args.enable_runtime_scheduler)
     batch = 1
     seq_len = 1
     PAGE_SIZE = 1
@@ -92,6 +98,9 @@ if __name__ == "__main__":
             torch.testing.assert_close(fc1_output_ref, fc1_output, atol=0, rtol=0)
             torch.testing.assert_close(act_out_ref, act_out, atol=0, rtol=0)
             torch.testing.assert_close(fc2_output_ref, fc2_out, atol=0, rtol=0)
+
+    if args.intra_kernel_profile:
+        builder.dump_trace()
 
     if args.profile:
         import os

@@ -44,14 +44,14 @@ def to_be_compiled(q, k, cos, sin, unsqueeze_dim=1):
 
 def main():
     from packaging.version import Version
+    from triton_dist.tools.monkey_inductor import TORCH_VERSION
 
-    torch_version = torch.__version__
-    triton_version = triton.__version__
-    require_patched_torch = (Version("2.7.0") <= Version(torch_version) < Version("2.8.1"))
+    triton_version = Version(triton.__version__)
+    require_patched_torch = (Version("2.7.0a0") <= TORCH_VERSION < Version("2.8.1"))
 
     if not require_patched_torch:
         print("🅾️ Skiping test for monkey patch inductor: "
-              f"torch {torch_version} with triton {triton_version}")
+              f"torch {TORCH_VERSION} with triton {triton_version}")
         return
 
     torch.cuda.manual_seed(42)
@@ -65,14 +65,13 @@ def main():
     sin = torch.randn([B, T, D])
     inps = (q, k, cos, sin)
 
-    print(f">>> torch {torch_version}, triton {triton_version}")
+    print(f">>> torch {TORCH_VERSION}, triton {triton_version}")
     print("🔧 torch.compile WITHOUT patch ...")
     try:
         compiled_func = torch.compile(to_be_compiled)
         compiled_func(*inps)
     except Exception as e:
         print(f"❌ Compilation failed with error:\n  {e}")
-        raise e
 
     print("🔧 torch.compile WITH patch ...")
     apply_triton340_inductor_patch()

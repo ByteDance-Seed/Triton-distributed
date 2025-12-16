@@ -31,10 +31,14 @@ import torch
 
 import triton
 import triton.language as tl
+import triton_dist
 from triton_dist.utils import CUDA_CHECK, NVSHMEM_SIGNAL_DTYPE
 import triton_dist.language as dl
-from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st, tid)
-from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, atomic_add, atomic_cas, ld, ld_acquire, st,
+                                                            tid)
+from triton_dist.utils import (supports_p2p_native_atomic, nvshmem_barrier_all_on_stream, nvshmem_create_tensor,
+                               nvshmem_free_tensor_sync)
+from triton_dist.tools import aot_compile_spaces
 
 
 @triton.jit
@@ -103,7 +107,7 @@ def load_grid_ws_abi_address():
 
 @triton.jit
 def cooperative_barrier_on_this_grid():
-    """ triton implementation of cooperative_group::thid_grid().sync()
+    """ triton implementation of cooperative_group::this_grid().sync()
     WARNING: use with care. better launch triton with launch_cooperative_grid=True to throw an explicit error instead of hang without notice.
     """
     ptr = load_grid_ws_abi_address() + 1
@@ -138,9 +142,18 @@ def barrier_on_this_grid(ptr, use_cooperative: tl.constexpr):
         unsafe_barrier_on_this_grid(ptr)
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
+@aot_compile_spaces({
+    "barrier_all_intra_node_atomic_cas_block_i32": {
+        "signature": "i32, i32, i32, *i32", "grid": ["1", "1", "1"], "triton_algo_infos": [{
+            "num_warps": 4,
+            "num_stages": 2,
+        }]
+    }
+})
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "local_world_size"])
 def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, symm_flag_ptr):
-    """ NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
+    """
+    NOTE: this function should only be called with atomic support. memory over PCI-e does not support atomic r/w. DON'T use this function on such platforms.
     """
     with dl.simt_exec_region() as (thread_idx, block_size):
         local_rank_offset = rank - local_rank
@@ -155,7 +168,7 @@ def barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, 
         __syncthreads()
 
 
-@triton.jit
+@triton_dist.jit
 def _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, local_world_size, symm_flags, target_value):
     with dl.simt_exec_region() as (thread_idx, block_size):
         if thread_idx < local_world_size:  # thread_idx => local_rank
@@ -167,9 +180,10 @@ def _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, local_world_
         __syncthreads()
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_flags, target_value):
-    """ symm_flags is expected to:
+    """
+        symm_flags is expected to:
         1. of int32 dtype
         2. has at least num_ranks * 2 elements
         3. of symmetric pointer
@@ -182,10 +196,11 @@ def barrier_all_intra_node_non_atomic_block(local_rank, rank, num_ranks, symm_fl
     _barrier_all_intra_node_non_atomic_once_block(local_rank, rank, num_ranks, symm_flags + num_ranks, target_value)
 
 
-@triton.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "target_value"])
 def barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_flags, target_value,
                                       use_cooperative: tl.constexpr):
-    """ symm_flags is expected to:
+    """
+        symm_flags is expected to:
         1. of int32 dtype
         2. has at least num_ranks * 2 + 1 elements
         3. of symmetric pointer
@@ -226,6 +241,10 @@ class BarrierAllContext:
             self.symm_barrier = nvshmem_create_tensor((self.num_local_ranks, ), torch.int32)
             self.symm_barrier.fill_(0)
             nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
+
+    def finalize(self):
+        if self.is_intra_node:
+            nvshmem_free_tensor_sync(self.symm_barrier)
 
 
 def barrier_all_on_stream(ctx: BarrierAllContext, stream: Optional[torch.cuda.Stream] = None):
@@ -305,10 +324,8 @@ def bisect_right_kernel(sorted_values_ptr,  # Pointer to sorted input array (1D)
                         target_values,  # Pointer to search values (1D)
                         N: tl.constexpr,  # Length of sorted array
                         ):
-    # Binary search initialization
     index = tl.full((target_values.numel, ), -1, dtype=tl.int32)
 
-    # Binary search loop
     for i in tl.range(N):
         x = tl.load(sorted_values_ptr + i)
         # if index > 0 => index
@@ -326,22 +343,22 @@ def bisect_right_kernel_aligned(
     N: tl.constexpr,
 ):
     # Binary search initialization
-    low = tl.full((target_values.numel, ), 0, dtype=tl.int32)
-    high = tl.full((target_values.numel, ), N, dtype=tl.int32)  # Length of the sorted array
+    low = tl.full((target_values.numel, ), -1, dtype=tl.int32)
+    high = tl.full((target_values.numel, ), N, dtype=tl.int32)
 
-    N_LOG2 = log2(N)
+    ITERS: tl.constexpr = N.bit_length()
     # Binary search loop
-    for _ in tl.range(N_LOG2):
+    for _ in tl.range(ITERS):
+        active_mask = high - low > 1
         mid = (low + high) // 2
-        mid_val = tl.load(sorted_values_ptr + mid)
+        val = tl.load(sorted_values_ptr + mid, mask=active_mask, other=0)
+        go_right = val <= target_values
 
         # Update search bounds
-        low = tl.where(mid_val <= target_values, mid + 1, low)
-        high = tl.where(mid_val > target_values, mid, high)
+        low = tl.where(active_mask & go_right, mid, low)
+        high = tl.where(active_mask & ~go_right, mid, high)
 
-    low = tl.where(low != high and tl.load(sorted_values_ptr + low) <= target_values, low + 1, low)
-    # Store result
-    return low
+    return low + 1
 
 
 def _wait_eq_cuda(signal_tensor: torch.Tensor, signal: int, stream: Optional[torch.cuda.Stream] = None,

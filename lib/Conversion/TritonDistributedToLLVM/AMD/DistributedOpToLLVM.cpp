@@ -116,7 +116,10 @@ public:
     StringRef libname = op.getLibname();
     StringRef libpath = op.getLibpath();
 
-    SmallVector<Value> llvmOpearands;
+    // TODO: refactor below
+    // CreateROCSHMEMOp(rewriter, op, funcName, libname, libpath, newOperands,
+    // retType);
+    SmallVector<Value> llvmOperands;
 
     for (auto val : newOperands) {
       if (auto ptrTy = llvm::dyn_cast<LLVM::LLVMPointerType>(val.getType())) {
@@ -125,9 +128,9 @@ public:
         Value ptrAfterCast = val;
         ptrAfterCast = rewriter.create<LLVM::AddrSpaceCastOp>(
             loc, LLVM::LLVMPointerType::get(rewriter.getContext()), val);
-        llvmOpearands.push_back(ptrAfterCast);
+        llvmOperands.push_back(ptrAfterCast);
       } else {
-        llvmOpearands.push_back(val);
+        llvmOperands.push_back(val);
       }
     }
 
@@ -140,25 +143,23 @@ public:
     }
 
     Type funcType =
-        mlir::triton::gpu::getFunctionType(llvmRetType, llvmOpearands);
+        mlir::triton::gpu::getFunctionType(llvmRetType, llvmOperands);
 
     LLVM::LLVMFuncOp funcOp = mlir::triton::gpu::appendOrGetExternFuncOp(
         rewriter, op, funcName, funcType, libname, libpath);
-    auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOpearands);
+    auto externCallOp =
+        LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOperands);
 
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
     } else {
       if (retType == llvmRetType) {
-        auto newResult = callOp.getResult();
+        auto newResult = externCallOp.getResult();
         rewriter.replaceOp(op, newResult);
       } else {
-
-        auto castOp =
-            rewriter
-                .create<LLVM::AddrSpaceCastOp>(loc, retType, callOp.getResult())
-                ->getResult(0);
-        rewriter.replaceOp(op, castOp);
+        auto castOp = rewriter.create<LLVM::AddrSpaceCastOp>(
+            loc, retType, externCallOp.getResult());
+        rewriter.replaceOp(op, castOp->getResult(0));
       }
     }
 

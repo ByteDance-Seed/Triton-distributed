@@ -39,9 +39,9 @@ def ConvertTritonDistributedToLLVM : Pass<"convert-triton-distributed-to-llvm", 
 
 
 // AMD Backend
-def ConvertLibDeviceToLLVM : Pass<"convert-lib-device-to-llvm", "mlir::ModuleOp"> {
-    let summary = "Convert Lib Device (User Defined Ops) to LLVM";
-    let constructor = "mlir::triton::createConvertLibDeviceToLLVMPass(/*ftz=*/true)";
+def ConvertBuiltinFuncToLLVMExt : Pass<"convert-builtin-func-to-llvm-ext", "mlir::ModuleOp"> {
+    let summary = "Convert Builtin Func (User Defined Ops) to LLVM";
+    let constructor = "mlir::triton::createConvertBuiltinFuncToLLVMExtPass(/*ftz=*/true)";
 
     let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 

@@ -27,9 +27,9 @@ import os
 import torch
 import triton
 from triton_dist.mega_triton_kernel import ModelBuilder
-from triton_dist.mega_triton_kernel.models import Qwen3Model
+from triton_dist.mega_triton_kernel.models import DenseModel
 
-from triton_dist.utils import get_torch_prof_ctx
+from triton_dist.profiler_utils import get_torch_prof_ctx
 from triton_dist.models import ModelConfig
 from triton_dist.models.engine import Engine, AutoTokenizer
 from triton_dist.models.utils import sample_token
@@ -67,11 +67,12 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+
     assert args.dtype == "bfloat16"
 
     dtype = DTYPE_MAP[args.dtype]
     model_config = ModelConfig(model_name=args.model, max_length=args.max_length, dtype=dtype, rank=RANK,
-                               world_size=WORLD_SIZE)
+                               world_size=WORLD_SIZE, local_only=False)
 
     builder = ModelBuilder(rank=RANK, world_size=WORLD_SIZE, local_world_size=LOCAL_WORLD_SIZE,
                            enable_profiling=args.intra_kernel_profile)
@@ -98,7 +99,7 @@ if __name__ == "__main__":
             engine.backend = args.backend
             engine.serve(input_ids=input_ids, gen_len=gen_len)
         else:
-            qwen3 = Qwen3Model(batch_size, model_config, builder, build_lm_head=True)
+            qwen3 = DenseModel(batch_size, model_config, builder, build_lm_head=True)
 
             input_seq_len = input_ids.shape[1]
             output_ids = []
@@ -125,6 +126,7 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             if args.intra_kernel_profile:
                 builder.dump_trace()
+                print(f"sm act = {builder.get_sm_activity()}")
             builder.finalize()
     if args.profile:
         import os

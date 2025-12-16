@@ -30,12 +30,10 @@ import triton.language as tl
 import argparse
 import random
 import os
-import datetime
-import numpy as np
 from tabulate import tabulate
-import nvshmem.core
 
-from triton_dist.utils import group_profile, init_nvshmem_by_torch_process_group, sleep_async
+from triton_dist.profiler_utils import group_profile
+from triton_dist.utils import initialize_distributed, sleep_async, finalize_distributed
 from triton_dist.kernels.nvidia import create_all_to_all_context, fast_all_to_all, all_to_all_post_process
 
 
@@ -106,54 +104,10 @@ DTYPE_MAP = {
     "float32": torch.float32,
 }
 
-
-def init_seed(seed=0):
-    os.environ["NCCL_DEBUG"] = os.getenv("NCCL_DEBUG", "ERROR")
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.manual_seed(3 + seed)
-    torch.cuda.manual_seed_all(3 + seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + seed)
-    random.seed(3 + seed)
-
-
-EP_GROUP = None
 RANK = int(os.environ.get("RANK", 0))
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
-
-
-def initialize_distributed(enable_flux=False):
-    global EP_GROUP
-    assert EP_GROUP is None, "EP_GROUP has already been initialized"
-
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    # use all ranks as tp group
-    EP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-
-    init_seed(seed=RANK)
-
-    if enable_flux:
-        flux.init_flux_shm(EP_GROUP)
-    else:
-        init_nvshmem_by_torch_process_group(EP_GROUP)
-
-    torch.cuda.synchronize()
-    return EP_GROUP
 
 
 def parse_args():
@@ -379,7 +333,10 @@ if __name__ == "__main__":
             import flux
         except ImportError:
             raise ImportError("flux is not successfully imported")
-    EP_GROUP = initialize_distributed(args.enable_flux)
+    EP_GROUP = initialize_distributed(initialize_shmem=not args.enable_flux)
+    if args.enable_flux:
+        flux.init_flux_shm(EP_GROUP)
+
     assert (args.G % WORLD_SIZE == 0), f"args.G:{args.G} should be divisible by WORLD_SIZE:{WORLD_SIZE}"
 
     experts_per_rank = args.G // WORLD_SIZE
@@ -475,5 +432,4 @@ if __name__ == "__main__":
                 _check(flux_scale, ref_scale, "Flux scale")
 
     all_to_all_ctx.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group(EP_GROUP)
+    finalize_distributed()

@@ -27,12 +27,12 @@ import os
 import nvshmem.core
 import torch
 
-import triton
 from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
+import triton_dist
 
 
-@triton.jit
+@triton_dist.jit
 def ring_put(ptr):
     mype = libshmem_device.my_pe()
     npes = libshmem_device.n_pes()

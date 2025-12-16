@@ -23,18 +23,17 @@
 #
 ################################################################################
 import os
-import datetime
 import torch
 import nvshmem
 import nvshmem.core
-import triton
 import triton.language as tl
-from triton_dist.utils import init_nvshmem_by_torch_process_group, init_seed
+import triton_dist
+from triton_dist.utils import initialize_distributed, finalize_distributed
 from triton_dist.language.extra import libshmem_device
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.cuda.language_extra import tid
 
 
-@triton.jit
+@triton_dist.jit
 def team_translate_pe_kernel(
     src_team: int,
     pe_in_src_team: int,
@@ -69,22 +68,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    # use all ranks as tp group
-    WORLD_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(WORLD_GROUP)
-
-    seed = 2025
-    init_seed(seed=seed if seed is not None else RANK)
-
-    init_nvshmem_by_torch_process_group(WORLD_GROUP)
+    WORLD_GROUP = initialize_distributed(seed=2005)
 
     ep_size = 4
     pp_size = WORLD_SIZE // ep_size
@@ -111,4 +95,4 @@ if __name__ == "__main__":
     team_translate_pe_kernel[(1, )](int(pp_team), int(mype_pp), libshmem_device.NVSHMEM_TEAM_WORLD, out)
     assert out[0].cpu().item() == RANK, f"out[0].cpu().item(): {out[0].cpu().item()} should be equal to RANK: {RANK}"
 
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

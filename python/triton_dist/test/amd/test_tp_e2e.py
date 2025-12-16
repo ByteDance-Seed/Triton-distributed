@@ -30,12 +30,12 @@ import argparse
 from functools import partial
 from transformers import AutoConfig
 
-import pyrocshmem
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.config import ModelConfig
 from triton_dist.models import AutoLLM
 from triton_dist.models.utils import seed_everything, init_model_cpu
-from triton_dist.utils import perf_func, dist_print, group_profile
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -104,24 +104,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=2)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
+    TP_GROUP = initialize_distributed(args.seed)
     current_stream = torch.cuda.current_stream()
     torch.cuda.synchronize()
     DTYPE = DTYPE_MAP[args.dtype]
@@ -173,7 +156,7 @@ if __name__ == "__main__":
         golden = golden.split(BSZ // WORLD_SIZE, dim=0)[RANK]
         check_allclose(logits.softmax(dim=-1), golden.softmax(dim=-1), atol=ATOL, rtol=RTOL)
 
-        torch.distributed.destroy_process_group()
+        finalize_distributed()
         exit(0)
 
     profile = args.profile
@@ -231,5 +214,4 @@ if __name__ == "__main__":
                    allowed_ranks=list(range(WORLD_SIZE)))
         del torch_graph, triton_dist_graph, mempool
 
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

@@ -27,7 +27,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torch.profiler import profile, ProfilerActivity, schedule
-from triton_dist.utils import perf_func
+from triton_dist.profiler_utils import perf_func
 from triton_dist.kernels.nvidia import chunk_gated_delta_rule_fwd
 
 RANK = int(os.getenv("RANK", "0"))

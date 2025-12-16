@@ -34,6 +34,9 @@ import triton
 import triton.language as tl
 from triton_dist.utils import has_tma
 from triton_dist.tools.compile_aot import aot_compile_spaces
+from triton_dist.utils import initialize_distributed
+import nvshmem.core
+from triton_dist.kernels.nvidia.common_ops import BarrierAllContext
 
 USE_AOT_ENV = os.environ.get("USE_TRITON_DISTRIBUTED_AOT", "0")
 USE_AOT = USE_AOT_ENV.lower() in ["1", "true", "on"]
@@ -184,6 +187,26 @@ def test_test_aot_kernel():
     print("✅ TEST_TEST_AOT_KERNEL done")
 
 
+def test_barrier_all_intra_node_atomic_cas_block_i32():
+    barrier_ctx = BarrierAllContext(is_intra_node=True)
+    print("🚀 TEST_BARRIER_ALL_INTRA_NODE_ATOMIC_CAS_BLOCK_I32 AOT")
+    algo_info = distributed.barrier_all_intra_node_atomic_cas_block_i32__triton_algo_info_t()
+    kv_algo_info = {"num_warps": 4, "num_stages": 2}
+    for _k, _v in kv_algo_info.items():
+        setattr(algo_info, _k, _v)
+    distributed.barrier_all_intra_node_atomic_cas_block_i32(
+        0,  # torch.cuda.current_stream().cuda_stream,
+        barrier_ctx.local_rank,
+        barrier_ctx.rank,
+        barrier_ctx.num_local_ranks,
+        barrier_ctx.symm_barrier.data_ptr(),
+        algo_info,
+    )
+
+    barrier_ctx.finalize()
+    print("✅ TEST_BARRIER_ALL_INTRA_NODE_ATOMIC_CAS_BLOCK_I32 done")
+
+
 def test_matmul_descriptor_persistent():
     """
     TMA descriptors require a global memory allocation
@@ -247,8 +270,13 @@ if __name__ == "__main__":
         print("Triton Distributed AOT is not enabled. skip the test")
         exit(0)
 
+    GROUP = initialize_distributed()
+
     torch.set_default_device("cuda")
     torch.manual_seed(42)
 
     test_test_aot_kernel()
     test_matmul_descriptor_persistent()
+    test_barrier_all_intra_node_atomic_cas_block_i32()
+    nvshmem.core.finalize()
+    torch.distributed.destroy_process_group()

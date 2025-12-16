@@ -101,7 +101,7 @@ class TP_Attn:
         wq = shard_local(self_attn.q_proj.weight.detach(), self.world_size, 0, self.rank)
         wk = shard_local(self_attn.k_proj.weight.detach(), self.world_size, 0, self.rank)
         wv = shard_local(self_attn.v_proj.weight.detach(), self.world_size, 0, self.rank)
-        self.wqkv = torch.cat((wq, wk, wv), dim=0).to("cuda", non_blocking=True)  # [qkv_dim, hidden_size]
+        self.wqkv: torch.Tensor = torch.cat((wq, wk, wv), dim=0).to("cuda", non_blocking=True)  # [qkv_dim, hidden_size]
         self.wo = shard_local(self_attn.o_proj.weight.detach(), self.world_size, 1,
                               self.rank).to("cuda", non_blocking=True)
 
@@ -126,11 +126,12 @@ class TP_Attn:
         if verbose:
             print(f"[RANK {self.rank}] Attn initialized with parameters: qkv ({self.wqkv.shape}, o ({self.wo.shape}))")
 
-    def _init_ctx(self, max_M, ag_intranode_stream, ag_internode_stream, BLOCK_M, BLOCK_N, BLOCK_K, stages):
+    def _init_ctx(self, max_M, ag_intranode_stream: torch.cuda.Stream | None,
+                  ag_internode_stream: torch.cuda.Stream | None):
         self.ag_ctx = AllGatherGEMMTensorParallelContext(
-            N_per_rank=self.ag_N_per_rank, K=self.K, tensor_dtype=self.dtype, rank=self.rank, num_ranks=self.world_size,
+            N_per_rank=self.ag_N_per_rank, K=self.K, dtype=self.dtype, rank=self.rank, num_ranks=self.world_size,
             num_local_ranks=self.world_size, max_M=max_M, ag_intranode_stream=ag_intranode_stream,
-            ag_internode_stream=ag_internode_stream, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, stages=stages,
+            ag_internode_stream=ag_internode_stream,
             all_gather_method=get_auto_all_gather_method(self.world_size, self.world_size))
         self.rs_ctx = create_gemm_rs_context(
             max_M=max_M,
@@ -140,10 +141,6 @@ class TP_Attn:
             local_world_size=self.world_size,
             output_dtype=self.dtype,
             rs_stream=ag_intranode_stream,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
-            stages=stages,
         )
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         torch.cuda.synchronize()
@@ -157,7 +154,7 @@ class TP_Attn:
 
     def finalize(self):
         if self.ag_ctx:
-            self.ag_ctx.finailize()
+            self.ag_ctx.finalize()
         if self.rs_ctx:
             self.rs_ctx.finalize()
         if self.ar_ctx:
@@ -170,8 +167,8 @@ class TP_Attn:
         if cos_sin_cache.dtype != torch.float32:
             cos_sin_cache = cos_sin_cache.to(torch.float32)
         bsz, seq, _ = q.shape
-        flashinfer.apply_rope_with_cos_sin_cache_inplace(position_ids, q.view(bsz * seq, -1), k.view(bsz * seq, -1),
-                                                         self.head_dim, cos_sin_cache, True),
+        flashinfer.apply_rope_with_cos_sin_cache_inplace(position_ids.contiguous(), q.view(bsz * seq, -1),
+                                                         k.view(bsz * seq, -1), self.head_dim, cos_sin_cache, True),
         q = q.view(bsz, seq, -1, self.head_dim)
         k = k.view(bsz, seq, -1, self.head_dim)
         return q, k
@@ -212,8 +209,7 @@ class TP_Attn:
         return out
 
     @torch.inference_mode()
-    def dist_triton_fwd(self, x, position_ids, cos_sin_cache, kv_cache, layer_idx: int, ag_gemm_persistent=False,
-                        gemm_rs_persistent=False, autotune=True):
+    def dist_triton_fwd(self, x, position_ids, cos_sin_cache, kv_cache, layer_idx: int, autotune=True):
         """
         triton_dist forward pass.
         Input x is batch-sharded. Output is also batch-sharded.
@@ -222,7 +218,7 @@ class TP_Attn:
         bsz, q_len, d = x.size()
 
         # ag + gemm
-        qkv = ag_gemm(x.view(-1, d), self.wqkv, ctx=self.ag_ctx, persistent=ag_gemm_persistent,
+        qkv = ag_gemm(x.view(-1, d), self.wqkv.T, ctx=self.ag_ctx,
                       autotune=autotune).view(bsz * self.world_size, q_len, -1)
         if hasattr(self, 'bqkv'):
             qkv = qkv + self.bqkv.view(1, 1, -1).expand(bsz * self.world_size, q_len, -1)
@@ -246,8 +242,8 @@ class TP_Attn:
                                       causal=True)
 
         # gemm + rs
-        out = gemm_rs(out.view(bsz * self.world_size * q_len, -1), self.wo, self.rs_ctx, persistent=gemm_rs_persistent,
-                      fuse_scatter=True).view(bsz, q_len, -1)
+        out = gemm_rs(out.view(bsz * self.world_size * q_len, -1), self.wo.T, self.rs_ctx,
+                      autotune=True).view(bsz, q_len, -1)
         return out
 
     @torch.inference_mode()

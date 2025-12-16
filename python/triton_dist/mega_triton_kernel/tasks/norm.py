@@ -43,6 +43,7 @@ class QKVPackQKNormRopeSplitVConfig(ConfigBase):
 class QKNormRopeUpdateKVCacheConfig(ConfigBase):
     pass
 
+
 @dataclass
 class RMSNormConfig(ConfigBase):
     BLOCK_SIZE_N: int = 2048
@@ -100,7 +101,8 @@ def codegen_qk_norm_rope_update_kvcache(task: QKNormRopeUpdateKVCacheTask) -> st
 rmsnorm_rope_update_kv_cache_task_compute(
     task_base_info, scoreboard, NUM_Q_HEADS={NUM_Q_HEADS}, NUM_KV_HEADS={NUM_KV_HEADS}, Q_HEAD_DIM={Q_HEAD_DIM},
     V_HEAD_DIM={V_HEAD_DIM}, PAGE_SIZE={PAGE_SIZE}, MAX_NUM_BLOCKS_PER_SEQ={MAX_NUM_BLOCKS_PER_SEQ},
-    Q_RMS_EPS={task.extra_params["q_rms_eps"]}, K_RMS_EPS={task.extra_params["k_rms_eps"]}
+    Q_RMS_EPS={task.extra_params["q_rms_eps"]}, K_RMS_EPS={task.extra_params["k_rms_eps"]},
+    SKIP_Q_NORM={task.extra_params["skip_q_norm"]}, SKIP_K_NORM={task.extra_params["skip_k_norm"]},
 )
 """
     return code

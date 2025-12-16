@@ -26,9 +26,18 @@ from typing import List, Dict, Tuple
 import textwrap
 from .registry import registry
 from .task_base import TaskBase, CodeGenKey
+from dataclasses import dataclass
 
 
-def make_mega_kernel_src(tasks_dispatch_code: str, enalbe_profiling: bool, task_types_and_str: Dict[int, str]) -> str:
+@dataclass
+class CodeGenOptions:
+    enable_profiling: bool = False
+    enable_runtime_scheduler: bool = False
+    enalbe_task_prefetch: bool = False
+
+
+def make_mega_kernel_src(tasks_dispatch_code: str, task_types_and_str: Dict[int, str],
+                         codegen_options: CodeGenOptions) -> str:
     """
         max_task_type: profiling use only
     """
@@ -40,17 +49,58 @@ def make_mega_kernel_src(tasks_dispatch_code: str, enalbe_profiling: bool, task_
     task_types_and_str[scoreboard_wait_deps_task_type] = "scoreboard_wait_deps"
     task_types_and_str[task_decoding_task_type] = "task_decoding"
 
+    enable_profiling = codegen_options.enable_profiling
+    enalbe_task_prefetch = codegen_options.enalbe_task_prefetch
+    enable_runtime_scheduler = codegen_options.enable_runtime_scheduler
+
     src = f"""
 import triton
+import triton_dist
 import triton.language as tl
 from triton_dist.mega_triton_kernel.kernels import *
 
 from triton_dist.mega_triton_kernel.kernels.task_context import Scoreboard
 from triton_dist.tools.profiler import Profiler
-from triton.language.extra.cuda.language_extra import tid
-@triton.jit
+from triton_dist.language.extra.language_extra import tid
+
+@triton_dist.jit
+def FETCH_TASK(work_queues, idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER=False):
+    sm_id = tl.program_id(axis=0)
+    TASK_TYPE_OFFSET = 0
+    LAYER_ID_OFFSET = 1
+    TASK_ID_OFFSET = 2
+    TILE_ID_OR_START_OFFSET = 3
+    DEPEND_ENTRY_START_OFFSET = 4
+    DEPEND_ENTRY_END_OFFSET = 5
+    IO_TENSORS_OFFSET = 6
+
+    if not ENABLE_RUNTIME_SCHEDUER:
+        offset = INT_PER_TASK * NUM_SMS
+
+        task_type = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + TASK_TYPE_OFFSET).to(tl.int32)
+        layer_id = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + LAYER_ID_OFFSET).to(tl.int32)
+        task_id = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + TASK_ID_OFFSET).to(tl.int32)
+        tile_id_or_start = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + TILE_ID_OR_START_OFFSET).to(tl.int32)
+        depend_entry_start = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_START_OFFSET).to(tl.int32)
+        depend_entry_end = tl.load(work_queues + idx * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_END_OFFSET).to(tl.int32)
+        io_tensors_ptr = work_queues + idx * offset + sm_id * INT_PER_TASK + IO_TENSORS_OFFSET
+    else:
+        task_type = tl.load(work_queues + idx * INT_PER_TASK + TASK_TYPE_OFFSET).to(tl.int32)
+        layer_id = tl.load(work_queues + idx * INT_PER_TASK + LAYER_ID_OFFSET).to(tl.int32)
+        task_id = tl.load(work_queues + idx * INT_PER_TASK + TASK_ID_OFFSET).to(tl.int32)
+        tile_id_or_start = tl.load(work_queues + idx * INT_PER_TASK + TILE_ID_OR_START_OFFSET).to(tl.int32)
+        depend_entry_start = tl.load(work_queues + idx * INT_PER_TASK + DEPEND_ENTRY_START_OFFSET).to(tl.int32)
+        depend_entry_end = tl.load(work_queues + idx * INT_PER_TASK + DEPEND_ENTRY_END_OFFSET).to(tl.int32)
+        io_tensors_ptr = work_queues + idx * INT_PER_TASK + IO_TENSORS_OFFSET
+    
+    task_base_info = TaskBaseInfo(io_tensors_ptr, task_type, layer_id, task_id, tile_id_or_start, depend_entry_start, depend_entry_end, MAX_NUM_TENSOR_DIMS)
+    return task_base_info
+
+
+@triton_dist.jit
 def MEGA_TRITON_KERNEL(
-    {"profiler_buf, # ensor<uint64>" if enalbe_profiling else ""}
+    {"profiler_buf, # ensor<uint64>" if enable_profiling else ""}
+    work_queue_start, # [1, ] int32, init with zero
     work_queues, # [MAX_INS, NUM_SMS, INS], int32
     num_tasks_per_wq, #[num_sms,]
     scoreboard_ptr,
@@ -64,43 +114,67 @@ def MEGA_TRITON_KERNEL(
     NUM_SMS: tl.constexpr,
     num_warps: tl.constexpr
 ):
-    {f"profiler = Profiler.create(profiler_buf, 0, is_leader=(tid(0) == 0), ENABLE_PROFILING={enalbe_profiling})" if enalbe_profiling else ""}
+    {f"profiler = Profiler.create(profiler_buf, 0, is_leader=(tid(0) == 0), ENABLE_PROFILING={enable_profiling})" if enable_profiling else ""}
 
     WARP_SIZE: tl.constexpr = 32
     NUM_THREADS: tl.constexpr = num_warps * WARP_SIZE
     scoreboard = Scoreboard(task_deps_ptr, INT_PER_DEPS, scoreboard_ptr, MAX_TASK_ID, MAX_NUM_TILES_PER_OP, tl.constexpr(1), NUM_THREADS)
     sm_id = tl.program_id(axis=0)
+
+    {(
+    '''
+    num_tasks = tl.load(num_tasks_per_wq + 0)
+    cur_task_idx = tl.atomic_add(work_queue_start, 1, scope="gpu", sem="release")
+    ''' if enable_runtime_scheduler else
+    '''
     num_tasks = tl.load(num_tasks_per_wq + sm_id)
-    offset = INT_PER_TASK * NUM_SMS
+    cur_task_idx = 0
+    '''
+    )}
 
-    TASK_TYPE_OFFSET = 0
-    LAYER_ID_OFFSET = 1
-    TASK_ID_OFFSET = 2
-    TILE_ID_OR_START_OFFSET = 3
-    DEPEND_ENTRY_START_OFFSET = 4
-    DEPEND_ENTRY_END_OFFSET = 5
-    IO_TENSORS_OFFSET = 6
+    # early exit
+    if cur_task_idx >= num_tasks:
+        return
 
-    for i in range(num_tasks):
-        task_type = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TASK_TYPE_OFFSET).to(tl.int32)
-        layer_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + LAYER_ID_OFFSET).to(tl.int32)
-        task_id = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TASK_ID_OFFSET).to(tl.int32)
-        tile_id_or_start = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + TILE_ID_OR_START_OFFSET).to(tl.int32)
-        depend_entry_start = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_START_OFFSET).to(tl.int32)
-        depend_entry_end = tl.load(work_queues + i * offset + sm_id * INT_PER_TASK + DEPEND_ENTRY_END_OFFSET).to(tl.int32)
-        
-        io_tensors_ptr = work_queues + i * offset + sm_id * INT_PER_TASK + IO_TENSORS_OFFSET
-        task_base_info = TaskBaseInfo(io_tensors_ptr, layer_id, task_id, tile_id_or_start, depend_entry_start, depend_entry_end, MAX_NUM_TENSOR_DIMS)
+    cur_task_base_info = FETCH_TASK(work_queues, cur_task_idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER={enable_runtime_scheduler})
+    nxt_task_base_info = cur_task_base_info
+    nxt_task_idx = cur_task_idx
+
+    while cur_task_idx < num_tasks:
+
+        {(
+        f'''
+        {'nxt_task_idx = tl.atomic_add(work_queue_start, 1, scope="gpu", sem="release")' if enable_runtime_scheduler else 'nxt_task_idx = cur_task_idx + 1'}
+        if nxt_task_idx < num_tasks:
+            nxt_task_base_info = FETCH_TASK(work_queues, nxt_task_idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER={enable_runtime_scheduler})
+        ''' if enalbe_task_prefetch else ''
+        )}
+
+        task_type = cur_task_base_info.task_type
 
         # task kernel need to set signal for each tile
-        {f"profiler = profiler.record(is_start=True, task_type={scoreboard_wait_deps_task_type})" if enalbe_profiling else ""}
-        scoreboard.wait_deps(task_base_info)
-        {f"profiler = profiler.record(is_start=False, task_type={scoreboard_wait_deps_task_type})" if enalbe_profiling else ""}
+        {f"profiler = profiler.record(is_start=True, task_type={scoreboard_wait_deps_task_type})" if enable_profiling else ""}
+        scoreboard.wait_deps(cur_task_base_info)
+        {f"profiler = profiler.record(is_start=False, task_type={scoreboard_wait_deps_task_type})" if enable_profiling else ""}
 
         #### run task ####
-        {"profiler = profiler.record(is_start=True, task_type=task_type)" if enalbe_profiling else ""}
+        task_base_info = cur_task_base_info
+        {"profiler = profiler.record(is_start=True, task_type=task_type)" if enable_profiling else ""}
 {textwrap.indent(tasks_dispatch_code.strip(), '        ')}
-        {"profiler = profiler.record(is_start=False, task_type=task_type)" if enalbe_profiling else ""}
+        {"profiler = profiler.record(is_start=False, task_type=task_type)" if enable_profiling else ""}
+
+        # nxt task
+        {(
+        f'''
+        {'cur_task_idx = tl.atomic_add(work_queue_start, 1, scope="gpu", sem="release")' if enable_runtime_scheduler else 'cur_task_idx = cur_task_idx + 1'}
+        if cur_task_idx < num_tasks:
+            cur_task_base_info = FETCH_TASK(work_queues, cur_task_idx, INT_PER_TASK, NUM_SMS, MAX_NUM_TENSOR_DIMS, ENABLE_RUNTIME_SCHEDUER={enable_runtime_scheduler})
+        ''' if not enalbe_task_prefetch else
+        '''
+        cur_task_base_info = nxt_task_base_info
+        cur_task_idx = nxt_task_idx
+        '''
+        )}
 """
     return src, task_types_and_str
 
@@ -166,7 +240,7 @@ class CodeGenerator:
 {textwrap.indent(all_codes.strip(), '    ')}
 """
 
-    def generate_code(self, tasks: List['TaskBase'], enable_profiling=False) -> str:
+    def generate_code(self, tasks: List['TaskBase'], codegen_options: CodeGenOptions) -> str:
         self._condition_and_codes.clear()
         self._task_types_and_str.clear()
 
@@ -188,6 +262,6 @@ class CodeGenerator:
             tasks_dispatch_code += self.generate_for_each_task_type(key_and_tasks_list, is_first_branch)
             is_first_branch = False
 
-        mege_kernel_src, self._task_types_and_str = make_mega_kernel_src(tasks_dispatch_code, enable_profiling,
-                                                                         self._task_types_and_str)
+        mege_kernel_src, self._task_types_and_str = make_mega_kernel_src(tasks_dispatch_code, self._task_types_and_str,
+                                                                         codegen_options)
         return mege_kernel_src, self._task_types_and_str

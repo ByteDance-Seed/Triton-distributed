@@ -35,7 +35,8 @@ import numpy as np
 import torch
 import torch.distributed
 
-from triton_dist.utils import assert_allclose, bitwise_equal, initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
+from triton_dist.test.utils import assert_allclose, bitwise_equal
+from triton_dist.utils import initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed
 
 from triton_dist.kernels.nvidia.sp_ulysess_o_all2all_gemm import SpUlysessOAll2AllGemmKernel
 
@@ -44,7 +45,8 @@ gemm_a2a_op = None
 
 def triton_dist_init(world_group: torch.distributed.ProcessGroup, nnodes: int, sp_size: int, max_batch_size: int,
                      num_head: int, max_seq_len: int, head_dim: int, input_dtype=torch.bfloat16,
-                     output_dtype=torch.bfloat16, max_num_comm_buf: int = 1, fuse_sync: bool = True):
+                     output_dtype=torch.bfloat16, max_num_comm_buf: int = 1, fuse_sync: bool = True,
+                     use_persistent: bool = True):
     global gemm_a2a_op
     if gemm_a2a_op is None:
         gemm_a2a_op = SpUlysessOAll2AllGemmKernel(
@@ -60,6 +62,7 @@ def triton_dist_init(world_group: torch.distributed.ProcessGroup, nnodes: int, s
             output_dtype=output_dtype,
             a2a_only=True,
             fuse_sync=fuse_sync,
+            use_persistent=use_persistent,
         )
     nvshmem_barrier_all_on_stream()
 
@@ -455,6 +458,12 @@ def parse_args():
         help="whether to use fast accumulation (FP8 Gemm only)",
     )
     parser.add_argument(
+        "--no_persistent",
+        default=False,
+        action="store_true",
+        help="whether to disable persistent GEMM",
+    )
+    parser.add_argument(
         "--transpose_weight",
         dest="transpose_weight",
         action=argparse.BooleanOptionalAction,
@@ -507,19 +516,10 @@ if __name__ == "__main__":
 
     dtype = DTYPE_MAP[args.dtype]
 
-    triton_dist_init(
-        world_group=TP_GROUP,
-        nnodes=WORLD_SIZE // LOCAL_WORLD_SIZE,
-        sp_size=args.sp_size,
-        max_batch_size=args.bs,
-        num_head=args.nh,
-        max_seq_len=args.seq_len,
-        head_dim=args.hd,
-        input_dtype=dtype,
-        output_dtype=dtype,
-        max_num_comm_buf=3,
-        fuse_sync=args.fuse_sync,
-    )
+    triton_dist_init(world_group=TP_GROUP, nnodes=WORLD_SIZE // LOCAL_WORLD_SIZE, sp_size=args.sp_size,
+                     max_batch_size=args.bs, num_head=args.nh, max_seq_len=args.seq_len, head_dim=args.hd,
+                     input_dtype=dtype, output_dtype=dtype, max_num_comm_buf=3, fuse_sync=args.fuse_sync,
+                     use_persistent=not args.no_persistent)
 
     if dtype not in [torch.bfloat16]:
         raise NotImplementedError("A2A Gemm only support BF16.")

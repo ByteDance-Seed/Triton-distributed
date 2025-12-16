@@ -20,22 +20,13 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-// TODO: include rocshmem headers
-#include "c10/hip/HIPFunctions.h"
-#include "c10/hip/HIPGuard.h"
-#include "c10/hip/HIPStream.h"
-#include <ATen/ops/from_blob.h>
-#include <c10/core/ScalarType.h>
 #include <cstdint>
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
+#include <iostream>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <rocshmem/rocshmem.hpp>
-#include <torch/all.h>
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
-#include <torch/csrc/utils/pybind.h>
-#include <torch/python.h>
 
 namespace py = pybind11;
 

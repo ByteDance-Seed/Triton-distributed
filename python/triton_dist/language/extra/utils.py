@@ -22,24 +22,36 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import os
-import datetime
-import torch
-import torch.distributed
-# FIXME: pyrocshmem must import after torch, otherwise error happened: "request to allocate mask for invalid number: Invalid argument"
+from typing import Dict, Callable, Any
+from functools import wraps
+from triton.language import core
 
-RANK = int(os.environ.get("RANK", 0))
-LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-torch.cuda.set_device(LOCAL_RANK)
-torch.distributed.init_process_group(
-    backend="ipc",
-    world_size=WORLD_SIZE,
-    rank=RANK,
-    timeout=datetime.timedelta(seconds=1800),
-)
-assert torch.distributed.is_initialized()
-# use all ranks as tp group
-TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="ipc")
 
-torch.cuda.synchronize()
+class ModuleProxy:
+
+    def __init__(self, module_list: Dict[Callable, Any]):
+        active_modules = [module for is_active, module in module_list if is_active()]
+        assert len(active_modules) == 1, "only one module can be active"
+        self._module = active_modules[0]
+
+    def __getattr__(self, name) -> Any:
+        return getattr(self._module, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_module":
+            super().__setattr__(name, value)
+        else:
+            setattr(self._module, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(self._module, name)
+
+    def dispatch(self, func: Callable) -> Any:
+
+        @core.builtin
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            method = getattr(self._module, func.__name__)
+            return method(*args, **kwargs)
+
+        return wrapper

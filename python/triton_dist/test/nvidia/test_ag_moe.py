@@ -33,8 +33,10 @@ from triton_dist.kernels.nvidia import (ag_group_gemm, create_ag_group_gemm_cont
 from triton_dist.kernels.nvidia.allgather_group_gemm import run_moe_ag_triton_non_overlap, sort_topk_ids_align_block_size
 from triton_dist.kernels.nvidia.comm_perf_model import (estimate_all_gather_time_ms, get_nic_gbps_per_gpu)
 from triton_dist.kernels.nvidia.gemm_perf_model import (get_dram_gbps, get_tensorcore_tflops)
-from triton_dist.utils import (assert_allclose, dist_print, get_device_max_shared_memory_size, get_intranode_max_speed,
-                               group_profile, initialize_distributed, perf_func, sleep_async)
+from triton_dist.profiler_utils import group_profile, perf_func
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import (dist_print, get_device_max_shared_memory_size, initialize_distributed, sleep_async)
+from triton_dist.nv_utils import get_intranode_max_speed_gbps
 
 
 def torch_moe_scatter_group_gemm(in_features, expert_weights, topk_ids):
@@ -110,10 +112,10 @@ def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed
         print(f"   Memory write: {memory_write_per_rank/1e9:0.2f} GB, {memory_write_ms:0.2f} ms expected")
         print(f"   SOL time: {moe_sol_ms:0.2f} ms")
         print("  AllGather perf estimate")
-        intranode_bw = get_intranode_max_speed()
-        internode_bw = get_nic_gbps_per_gpu()
+        intranode_bw_in_gbps = get_intranode_max_speed_gbps()
+        internode_bw_in_gbps = get_nic_gbps_per_gpu()
         allgather_sol_ms = estimate_all_gather_time_ms(M * K * dtype.itemsize, WORLD_SIZE, LOCAL_WORLD_SIZE,
-                                                       intranode_bw, internode_bw)
+                                                       intranode_bw_in_gbps, internode_bw_in_gbps)
         print(f"   SOL time: {allgather_sol_ms:0.2f} ms")
         print(f" AG+MOE SOL time: {max(allgather_sol_ms, moe_sol_ms):0.2f} ms")
 
@@ -159,11 +161,13 @@ def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed
     )
 
     C_triton = ag_group_gemm(A, B, ctx, full_topk_ids)
-    C_triton_non_overlap = run_moe_ag_triton_non_overlap(A, B, full_topk_ids)
+    C_triton_non_overlap = run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=False)
+    C_triton_non_overlap_persistent = run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=True)
     _, C_torch = torch_ag_group_gemm(pg, A, B, full_topk_ids)
     try:
         assert_allclose(C_torch, C_triton, atol=1e-3, rtol=1e-3, verbose=False)
         assert_allclose(C_torch, C_triton_non_overlap, atol=1e-3, rtol=1e-3, verbose=False)
+        assert_allclose(C_torch, C_triton_non_overlap_persistent, atol=1e-3, rtol=1e-3, verbose=False)
     except Exception as e:
         torch.save(C_torch, f"{name}_C_torch_{RANK}.pt")
         torch.save(C_triton, f"{name}_C_triton_{RANK}.pt")
@@ -173,7 +177,8 @@ def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed
 
     triton_func = lambda: ag_group_gemm(A, B, ctx, full_topk_ids)
     torch_func = lambda: torch_ag_group_gemm(pg, A, B, full_topk_ids)
-    triton_non_overlap_func = lambda: run_moe_ag_triton_non_overlap(A, B, full_topk_ids)
+    triton_non_overlap_func = lambda: run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=False)
+    triton_non_overlap_persistent_func = lambda: run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=True)
 
     name = name.lower().replace(" ", "_").replace("-", "_")
     with group_profile(f"ag_moe_{name}_{os.environ['TORCHELASTIC_RUN_ID']}", do_prof=args.profile, group=pg):
@@ -189,13 +194,18 @@ def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed
         sleep_async(100)
         _, duration_triton_non_overlap_ms = perf_func(triton_non_overlap_func, iters=args.iters,
                                                       warmup_iters=args.warmup_iters)
+    with group_profile(f"ag_moe_triton_non_overlap_persistent_{name}_{os.environ['TORCHELASTIC_RUN_ID']}",
+                       do_prof=args.profile, group=pg):
+        sleep_async(100)
+        _, duration_triton_non_overlap_persistent_ms = perf_func(triton_non_overlap_persistent_func, iters=args.iters,
+                                                                 warmup_iters=args.warmup_iters)
 
     sort_func = lambda: sort_topk_ids_align_block_size(full_topk_ids, E, RANK, WORLD_SIZE, LOCAL_WORLD_SIZE, BM)
     sleep_async(100)
     _, duration_context_ms = perf_func(sort_func, iters=args.iters, warmup_iters=args.warmup_iters)
 
     dist_print(
-        f"RANK {RANK} perf: calc sorted_gather_index {duration_context_ms:0.3f} ms, dist-triton={duration_triton_ms:0.3f} ms, torch={duration_torch_ms:0.3f} ms, triton-non-overlap={duration_triton_non_overlap_ms:0.3f} ms; speedup={duration_torch_ms/duration_triton_ms:0.2f}",
+        f"RANK {RANK} perf: calc sorted_gather_index {duration_context_ms:0.3f} ms, dist-triton={duration_triton_ms:0.3f} ms, torch={duration_torch_ms:0.3f} ms, triton-non-overlap={duration_triton_non_overlap_ms:0.3f} ms; triton-non-overlap-persistent={duration_triton_non_overlap_persistent_ms:0.3f} ms, speedup={duration_torch_ms/duration_triton_ms:0.2f}",
         need_sync=True,
         allowed_ranks=list(range(WORLD_SIZE)),
     )

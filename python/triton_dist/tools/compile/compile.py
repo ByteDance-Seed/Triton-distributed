@@ -227,6 +227,7 @@ def materialize_c_params(
 
     # dump C stub code
     hex_ = str(binascii.hexlify(ccinfo.asm["cubin"]))[2:-1]
+    has_shmem = "nvshmem" in ccinfo.asm['ttgir'] or "distributed." in ccinfo.asm['ttgir']
     params = {
         "kernel_name":
         func_name,
@@ -267,6 +268,8 @@ def materialize_c_params(
         grid[2],
         "_placeholder":
         "",
+        "use_nvshmem":
+        int(has_shmem),
     }
     return params, suffix
 

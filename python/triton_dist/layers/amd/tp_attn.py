@@ -178,10 +178,10 @@ class TP_Attn:
     def __init__(self, rank=0, world_size=8, group=None):
         self.rank = rank
         self.world_size = world_size
-        self.group = group
+        self.group: torch.distributed.ProcessGroup = group
         self.head_dim = 128
-        self.wqkv = None
-        self.wo = None
+        self.wqkv: torch.Tensor = None
+        self.wo: torch.Tensor = None
 
     def _init_parameters(self, self_attn: nn.Module, verbose=False):
         self.q_size = self_attn.q_proj.weight.shape[0] // self.world_size
@@ -207,16 +207,12 @@ class TP_Attn:
         if verbose:
             print(f"[RANK {self.rank}] Attn initialized with parameters: qkv ({self.wqkv.shape}, o ({self.wo.shape}))")
 
-    def _init_ctx(self, max_M, ag_intranode_stream, BLOCK_M, BLOCK_N, BLOCK_K, stages, serial=False,
-                  ag_internode_stream=None):
-        if serial:
-            print(f"[RANK {self.rank}] Using serial mode for AG-GEMM.")
+    def _init_ctx(self, max_M, ag_intranode_stream: torch.cuda.Stream,
+                  ag_internode_stream: torch.cuda.Stream | None = None):
         self.ag_ctx = create_ag_gemm_intra_node_context(max_M=max_M, N=self.ag_N_per_rank, K=self.K, rank=self.rank,
                                                         num_ranks=self.world_size, input_dtype=self.dtype,
                                                         output_dtype=self.dtype, tp_group=self.group,
-                                                        ag_streams=ag_intranode_stream, serial=serial, autotune=True,
-                                                        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                                        stages=stages, M_PER_CHUNK=256)
+                                                        ag_streams=ag_intranode_stream, M_PER_CHUNK=256)
         self.rs_ctx = create_gemm_rs_intra_node_context(
             max_M=max_M,
             N=self.K,
@@ -282,8 +278,7 @@ class TP_Attn:
         bsz, q_len, d = x.size()
 
         # ag + gemm
-        qkv = ag_gemm_intra_node(x.view(-1, d), self.wqkv, transe_b=False,
-                                 ctx=self.ag_ctx).view(bsz * self.world_size, q_len, -1)
+        qkv = ag_gemm_intra_node(x.view(-1, d), self.wqkv, ctx=self.ag_ctx).view(bsz * self.world_size, q_len, -1)
 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         v = v.view(bsz * self.world_size, q_len, -1, self.head_dim)

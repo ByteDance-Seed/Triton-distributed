@@ -170,8 +170,8 @@ protected:
 
 } // namespace
 
-void mlir::triton::NVIDIA::populateSIMTOpToLLVMPatterns(
-    LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
+void mlir::triton::populateSIMTOpToLLVMPatterns(
+    LLVMTypeConverter &typeConverter, const TargetInfoBase &targetInfo,
     RewritePatternSet &patterns, PatternBenefit benefit) {
   patterns.add<LoadSharedOpPattern, StoreSharedOpPattern>(typeConverter,
                                                           targetInfo, benefit);

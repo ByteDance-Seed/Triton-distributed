@@ -26,11 +26,13 @@ import torch
 import dataclasses
 import triton
 import triton.language as tl
-from triton.language.extra.hip import libdevice
 from typing import List
 
 import pyrocshmem
+import triton_dist
+import triton_dist.tune
 from triton_dist.kernels.amd.common_ops import barrier_all_on_stream
+from triton.runtime.driver import driver
 
 SIGNAL_DTYPE = torch.int32
 
@@ -123,10 +125,6 @@ def get_hip_autotune_config():
     ]
 
 
-@triton.autotune(
-    configs=get_hip_autotune_config(),
-    key=['M', 'N', 'K'],
-)
 @triton.jit
 def kernel_gemm_rs_producer_fuse_scatter(
         # Pointers to matrices
@@ -179,7 +177,6 @@ def kernel_gemm_rs_producer_fuse_scatter(
     # pid_m = (pid_m + rank_swizzle_offset) % num_pid_m
     rank_offset = (rank_offset + rank + 1) % num_ranks
     pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_COPY_CHUNK + block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
-    thread_idx = libdevice.thread_idx(axis=0)  # noqa: F841
 
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)
@@ -265,8 +262,8 @@ def kernel_consumer_reduce(
 def ring_reduce_after_scatter(
     rank,
     num_ranks,
-    scatter_out,  # [M, N]
-    stream,
+    scatter_out: torch.Tensor,  # [M, N]
+    stream: torch.cuda.Stream,
 ):
     M, N = scatter_out.shape
     M_per_rank = M // num_ranks
@@ -287,18 +284,13 @@ def ring_reduce_after_scatter(
     return output
 
 
-def matmul_fuse_scatter(a, b, scatter_bufs_ptr, rank, num_ranks, transpose_weight):
+def matmul_fuse_scatter(A: torch.Tensor, B: torch.Tensor, scatter_bufs_ptr: torch.Tensor, rank, num_ranks,
+                        gemm_config: triton.Config):
     # Check constraints.
-    if transpose_weight:
-        assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-        K, N = b.shape
-        stride_bk, stride_bn = b.stride(0), b.stride(1)
-    else:
-        assert a.shape[1] == b.shape[1], "Incompatible dimensions"
-        N, K = b.shape
-        stride_bk, stride_bn = b.stride(1), b.stride(0)
-    assert a.is_contiguous(), "Matrix A must be contiguous"
-    M, K = a.shape
+    assert A.shape[1] == B.shape[1], "Incompatible dimensions"
+    N, K = B.shape
+    assert A.is_contiguous(), "Matrix A must be contiguous"
+    M, K = A.shape
 
     alignment = 128
     assert M % alignment == 0 and N % alignment == 0 and K % alignment == 0
@@ -306,24 +298,48 @@ def matmul_fuse_scatter(a, b, scatter_bufs_ptr, rank, num_ranks, transpose_weigh
     # Allocates output.
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     compiled = kernel_gemm_rs_producer_fuse_scatter[grid](
-        a, b, scatter_bufs_ptr,  #
+        A, B, scatter_bufs_ptr,  #
         rank, num_ranks, M, N, K,  #
-        a.stride(0), a.stride(1),  #
-        stride_bk, stride_bn,  #
+        A.stride(0), A.stride(1),  #
+        B.stride(1), B.stride(0),  #
         N, 1,  #
-    )
+        **gemm_config.all_kwargs())
     return compiled
 
 
-def gemm_rs_intra_node_op(a, b, output_dtype, rank, num_ranks, scatter_bufs, scatter_bufs_ptr, sync_bufs_ptr,
-                          fuse_scatter=True, transpose_weight=False):
+def prune_fn_by_shared_memory(config, A: torch.Tensor, *args, **kwargs):
+    itemsize = A.itemsize
+    gemm_config: triton.Config = config["gemm_config"]
+    BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
+    BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
+    BLOCK_SIZE_K = gemm_config.kwargs["BLOCK_SIZE_K"]
+    num_stages = max(0, gemm_config.num_stages - 1)
+    shared_mem_size = num_stages * (BLOCK_SIZE_M * BLOCK_SIZE_K * itemsize + BLOCK_SIZE_N * BLOCK_SIZE_K * itemsize)
+    device = torch.cuda.current_device()
+    if shared_mem_size > driver.active.utils.get_device_properties(device)["max_shared_mem"]:
+        return False
+    return True
+
+
+def key_fn(A: torch.Tensor, B: torch.Tensor, output_dtype: torch.dtype, *args, **kwargs):
+    return triton_dist.tune.to_hashable(A), triton_dist.tune.to_hashable(B), output_dtype
+
+
+DEFAULT_GEMM_CONFIG = get_hip_autotune_config()[0]
+
+
+@triton_dist.tune.autotune(config_space=[{"gemm_config": c} for c in get_hip_autotune_config()], key_fn=key_fn,
+                           prune_fn=prune_fn_by_shared_memory)
+def gemm_rs_intra_node_op(A: torch.Tensor, B: torch.Tensor, output_dtype: torch.dtype, rank, num_ranks,
+                          scatter_bufs: List[torch.Tensor], scatter_bufs_ptr: torch.Tensor, sync_bufs: torch.Tensor,
+                          fuse_scatter=True, gemm_config: triton.Config = DEFAULT_GEMM_CONFIG):
     """gemm reduce scatter for intra-node
 
-    Local matrix A and do matmul with local matrix B, produces local matrix C, then reduce scatter
+    return C = reduce_scatter(A, B.T)
 
     Args:
-        a (torch.Tensor<float>): local matmul A matrix. shape: [M, K_per_rank]
-        b (torch.Tensor<float>): local matmul B matrix. shape: [N, K_per_rank]
+        A (torch.Tensor<float>): local matmul A matrix. shape: [M, K_per_rank]
+        B (torch.Tensor<float>): local matmul B matrix. shape: [N, K_per_rank]
         output_dtype (torch.dtype): output data type
         rank (int): current rank
         num_ranks (int): total number of ranks
@@ -340,28 +356,22 @@ def gemm_rs_intra_node_op(a, b, output_dtype, rank, num_ranks, scatter_bufs, sca
     """
     if not fuse_scatter:
         raise NotImplementedError()
-    if transpose_weight:
-        raise NotImplementedError()
 
-    M, local_K = a.shape
-    N, _ = b.shape
-    if not transpose_weight:
-        N, weight_local_K = b.shape
-        assert weight_local_K == local_K
-    else:
-        weight_local_K, N = b.shape
-        assert weight_local_K == local_K
+    M, local_K = A.shape
+    N, _ = B.shape
+    N, weight_local_K = B.shape
+    assert weight_local_K == local_K
 
-    assert a.dtype == b.dtype
-    local_M = M // num_ranks
+    assert A.dtype == B.dtype
+    M_per_rank = M // num_ranks
     current_stream = torch.cuda.current_stream()
-    barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
+    barrier_all_on_stream(current_stream)
 
-    output = torch.empty((local_M, N), dtype=output_dtype, device=a.device)
-    matmul_fuse_scatter(a, b, scatter_bufs_ptr, rank, num_ranks, transpose_weight=transpose_weight)
+    output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
+    matmul_fuse_scatter(A, B, scatter_bufs_ptr, rank, num_ranks, gemm_config=gemm_config)
     scatter_out = scatter_bufs[rank][:M]
 
-    barrier_all_on_stream(rank, num_ranks, sync_bufs_ptr, current_stream)
+    barrier_all_on_stream(current_stream)
     output = ring_reduce_after_scatter(rank, num_ranks, scatter_out, current_stream)
     return output
 
@@ -376,11 +386,10 @@ class GEMMReduceScatterTensorParallelContext:
     sync_bufs: List[torch.Tensor]
     output_dtype: torch.dtype
     fuse_scatter: bool
-    transpose_weight: bool
 
 
-def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group, fuse_scatter=True,
-                                      transpose_weight=False):
+def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group: torch.distributed.ProcessGroup,
+                                      fuse_scatter=True):
     """create context for gemm reduce-scatter intra-node
 
     Args:
@@ -391,13 +400,10 @@ def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, t
         num_ranks (int): total number of ranks
         tp_group: tp process_group
         fuse_scatter: whether fuse scatter into gemm
-        transpose_weight: if transpose_weight, weight shape is [K, N], otherwise it is [N, K]
     Returns:
         GEMMReduceScatterTensorParallelContext
     """
     if not fuse_scatter:
-        raise NotImplementedError()
-    if transpose_weight:
         raise NotImplementedError()
 
     sync_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([num_ranks], torch.int32)
@@ -408,11 +414,8 @@ def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, t
     scatter_bufs = pyrocshmem.rocshmem_create_tensor_list_intra_node([max_M, N], output_dtype)
     scatter_bufs_ptr = torch.tensor([t.data_ptr() for t in scatter_bufs], device=torch.cuda.current_device(),
                                     requires_grad=False)
-
-    print("from gemm_reduce_scatter")
     torch.cuda.synchronize()
-    torch.distributed.barrier()
-
+    torch.distributed.barrier(tp_group)
     ret = GEMMReduceScatterTensorParallelContext(
         rank=rank,
         num_ranks=num_ranks,
@@ -422,26 +425,25 @@ def create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, t
         sync_bufs=sync_bufs,
         output_dtype=output_dtype,
         fuse_scatter=fuse_scatter,
-        transpose_weight=transpose_weight,
     )
     return ret
 
 
-def gemm_rs_intra_node(a, b, ctx):
+def gemm_rs_intra_node(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorParallelContext):
     """GEMM Reduce-Scatter for Intra-Node
 
-    computes local GEMM (a x b) to generate partial results, followed by `reduce_scatter` to produce c
+    return C = reduce_scatter(A @ B.T)
 
     Args:
-        a (torch.Tensor<bfloat16/float16>): local matmul A matrix. shape: [M, local_K]
-        b (torch.Tensor<bfloat16/float16>): local matmul B matrix. shape: [N, local_K]
+        A (torch.Tensor<bfloat16/float16>): local matmul A matrix. shape: [M, local_K]
+        B (torch.Tensor<bfloat16/float16>): local matmul B matrix. shape: [N, local_K]
         ctx(GEMMReduceScatterTensorParallelContext): context
 
     Returns:
         c (torch.Tensor<bfloat16/float16>): local matmul C matrix. shape: [M // world_size, N]
     """
 
-    C = gemm_rs_intra_node_op(a, b, ctx.output_dtype, ctx.rank, ctx.num_ranks, ctx.scatter_bufs, ctx.scatter_bufs_ptr,
-                              ctx.sync_bufs_ptr, ctx.fuse_scatter, ctx.transpose_weight)
+    C = gemm_rs_intra_node_op(A, B, ctx.output_dtype, ctx.rank, ctx.num_ranks, ctx.scatter_bufs, ctx.scatter_bufs_ptr,
+                              ctx.sync_bufs_ptr, ctx.fuse_scatter)
 
     return C

@@ -32,20 +32,23 @@ function build_pyrocshmem_setup() {
   popd
 }
 
-function download_and_copy() {
-    local dst_path=${PROJECT_ROOT}/../../3rdparty/triton/third_party/amd/backend/lib
+function copy_rocshmem_bitcode() {
+    if [ -n "$ROCSHMEM_HOME" ]; then
+        local dst_path="$ROCSHMEM_HOME/lib"
+    else
+        local dst_path="${PROJECT_ROOT}/../../python/triton_dist/tools/compile"
+    fi
     rocshmem_dir=${ROCSHMEM_DIR:-${PROJECT_ROOT}/rocshmem_build/install}
     lib_file=$rocshmem_dir/lib/librocshmem_device.bc
-    if ! mv -f $lib_file $dst_path; then
-      echo "File move failed" >&2
+    if ! cp -f $lib_file $dst_path; then
+      echo "Rocshmem bitcode move failed." >&2
       rm -rf "$tmp_dir"
       return 1
     fi
 
-    echo "Move done."
+    echo "Rocshmem bitcode move done."
 }
 
-# build rocshmem
 export ROCSHMEM_DIR=${PROJECT_ROOT}/rocshmem_build/install
 export ROCSHMEM_INSTALL_DIR=${ROCSHMEM_DIR}
 export ROCSHMEM_HEADER=${ROCSHMEM_INSTALL_DIR}/include/rocshmem
@@ -57,12 +60,12 @@ export LD_LIBRARY_PATH="${OPENMPI_UCX_INSTALL_DIR}/lib:$LD_LIBRARY_PATH"
 
 apt_install_deps
 
+# build rocshmem
 bash -x ${PROJECT_ROOT}/build_rocshmem.sh
-
+# build rocshmem bitcode
 bash -x ${PROJECT_ROOT}/scripts/build_rocshmem_device_bc.sh
-
-download_and_copy
-
+# move bitcode
+copy_rocshmem_bitcode
 # build pyrocshmem
 build_pyrocshmem_setup
 

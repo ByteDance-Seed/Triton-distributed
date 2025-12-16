@@ -20,6 +20,7 @@ jobs:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
       PYTHON: "python3"
+      TRITON_BUILD_PROTON: "0"
 
     steps:
       - name: Install dependencies
@@ -60,6 +61,7 @@ jobs:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
       PYTHON: "python3"
+      TRITON_BUILD_PROTON: "0"
 
     steps:
       - name: Install dependencies

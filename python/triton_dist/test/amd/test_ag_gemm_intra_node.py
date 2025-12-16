@@ -23,40 +23,49 @@
 #
 ################################################################################
 import torch
-import random
 
 import argparse
 import os
 from typing import Optional
-import datetime
-import numpy as np
 from functools import partial
-import pyrocshmem
+import random
 
-from triton_dist.utils import (generate_data, get_torch_prof_ctx, perf_func, dist_print)
-from triton_dist.kernels.amd import ag_gemm_intra_node, create_ag_gemm_intra_node_context
+from triton_dist.profiler_utils import perf_func, group_profile
+from triton_dist.test.utils import assert_allclose
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
+from triton_dist.kernels.amd.all_gather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm_only, allgather
+
+
+def make_cuda_graph(mempool, func):
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(30):
+            func()
+        s.synchronize()
+    torch.cuda.current_stream().wait_stream(s)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, pool=mempool):
+        func()
+    return graph
 
 
 def torch_ag_gemm(
-    input: torch.Tensor,  # [local_M, k]
-    weight: torch.Tensor,  # [local_N, K]
-    transed_weight: bool,
+    A: torch.Tensor,  # [local_M, K]
+    B: torch.Tensor,  # [local_N, K]
     bias: Optional[torch.Tensor],
-    TP_GROUP,
+    tp_group: torch.distributed.ProcessGroup,
 ):
-    local_M, K = input.shape
-    world_size = TP_GROUP.size()
-    if transed_weight:
-        assert K == weight.shape[0]
-    else:
-        assert K == weight.shape[1]
-        weight = weight.T
-    assert input.device == weight.device
+    """ return C = all_gather(A) @ B.T """
+    local_M, K = A.shape
+    world_size = tp_group.size()
+    assert K == B.shape[1]
+    assert A.device == B.device
     # AG
-    full_input = torch.empty((local_M * world_size, K), dtype=input.dtype, device=input.device)
-    torch.distributed.all_gather_into_tensor(full_input, input, group=TP_GROUP)
+    full_A = torch.empty((local_M * world_size, K), dtype=A.dtype, device=A.device)
+    torch.distributed.all_gather_into_tensor(full_A, A, group=tp_group)
     # Gemm
-    output = torch.matmul(full_input, weight)
+    output = torch.matmul(full_A, B.T)
 
     if bias:
         output = output + bias
@@ -75,7 +84,10 @@ class AGGemmIntraNode(torch.nn.Module):
         M_PER_CHUNK: int,
         input_dtype: torch.dtype,
         output_dtype: torch.dtype,
+        use_copy_kernel: bool = False,
+        comm_sms_per_rank: int = 8,
     ):
+        super().__init__()
         self.tp_group = tp_group
         self.rank: int = tp_group.rank()
         self.world_size = tp_group.size()
@@ -86,35 +98,56 @@ class AGGemmIntraNode(torch.nn.Module):
         self.input_dtype = input_dtype
         self.output_dtype = output_dtype
 
-        # NOTE: use the default size of `M_PER_CHUNK`.
-        self.ctx = create_ag_gemm_intra_node_context(
-            self.max_M,
-            self.N,
-            self.K,
-            self.input_dtype,
-            self.output_dtype,
-            self.rank,
-            self.world_size,
-            self.tp_group,
-            M_PER_CHUNK=M_PER_CHUNK,
-        )
+        self.ctx = create_ag_gemm_intra_node_context(self.max_M, self.N, self.K, self.input_dtype, self.output_dtype,
+                                                     self.rank, self.world_size, tp_group, M_PER_CHUNK=M_PER_CHUNK,
+                                                     use_copy_kernel=use_copy_kernel,
+                                                     comm_sms=comm_sms_per_rank * (self.world_size - 1))
 
-    def forward(self, input: torch.Tensor,  # [local_M, K]
-                weight: torch.Tensor,  # [local_N, K]
-                transed_weight: bool,  # indicates whether weight already transposed
-                ):
-
-        _, K = input.shape
-
+    def forward(
+        self,
+        A: torch.Tensor,  # [local_M, K]
+        B: torch.Tensor,  # [local_N, K]
+        use_fused_kernel: bool = False,  # whether to use fused kernel
+        autotune: bool = False,
+    ):
+        """ return C = all_gather(A) @ B.T """
+        _, K = A.shape
         assert K == self.K
         assert self.max_M % self.world_size == 0
-        if transed_weight:
-            assert weight.shape[0] == K
-        else:
-            assert weight.shape[1] == K
-        output = ag_gemm_intra_node(input, weight, transed_weight, ctx=self.ctx)
+        assert B.shape == (self.N // self.world_size, K)
+
+        output = ag_gemm_intra_node(A, B, ctx=self.ctx, use_fused_kernel=use_fused_kernel, autotune=autotune)
 
         return output
+
+    def gemm_only(self, A: torch.Tensor, weight: torch.Tensor, NUM_SMS: int):
+        return gemm_only(A, weight, ctx=self.ctx, NUM_SMS=NUM_SMS)
+
+    def gemm_only_perf(self, A: torch.Tensor, weight: torch.Tensor, iters: int = 100, warmup_iters: int = 10):
+
+        barrier_ptr = self.ctx.barrier_tensors[self.ctx.rank]
+        barrier_ptr.fill_(1)
+        torch.cuda.synchronize()
+        NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
+        with group_profile("gemm_only", True, group=self.tp_group):
+            _, gemm_perf = perf_func(partial(self.gemm_only, A, weight, NUM_SMS), iters=iters,
+                                     warmup_iters=warmup_iters)
+        barrier_ptr.fill_(0)
+        dist_print("gemm only perf: ", gemm_perf, need_sync=True, allowed_ranks=list(range(self.world_size)))
+
+        return gemm_perf
+
+    def comm_only(self, input: torch.Tensor):
+        return allgather(input, ctx=self.ctx)
+
+    def comm_only_perf(self, input: torch.Tensor, iters: int = 100, warmup_iters: int = 10):
+        for comm_sms_per_rank in range(
+                1, min(torch.cuda.get_device_properties(0).multi_processor_count // (self.world_size - 1), 17)):
+            self.ctx.comm_sms = comm_sms_per_rank * (self.world_size - 1)
+            _, comm_perf = perf_func(partial(self.comm_only, input), iters=iters, warmup_iters=warmup_iters)
+            dist_print(f"comm only perf with {self.ctx.comm_sms} sms: ", comm_perf, need_sync=True,
+                       allowed_ranks=list(range(self.world_size)))
+        return comm_perf
 
 
 DTYPE_MAP = {
@@ -140,13 +173,18 @@ def parse_args():
     parser.add_argument("N", type=int)
     parser.add_argument("K", type=int)
     parser.add_argument("--chunk_m", default=256, type=int, help="chunk size at dim m")
-    parser.add_argument("--warmup", default=5, type=int, help="warmup iterations")
-    parser.add_argument("--iters", default=10, type=int, help="perf iterations")
+    parser.add_argument("--warmup", default=10, type=int, help="warmup iterations")
+    parser.add_argument("--iters", default=20, type=int, help="perf iterations")
     parser.add_argument("--dtype", default="float16", type=str, help="data type")
+    parser.add_argument("--use_copy_kernel", default=False, action="store_true", help="use copy kernel")
+    parser.add_argument("--comm_sms_per_rank", default=8, type=int, help="communication sms per rank")
+    parser.add_argument("--autotune", default=False, action="store_true", help="autotune")
 
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--check", default=False, action="store_true", help="correctness check")
     parser.add_argument("--verify-iters", default=10, type=int)
+    parser.add_argument("--stress", default=False, action="store_true", help="run stress test with random shapes")
+    parser.add_argument("--stress_rounds", type=int, default=100, help="number of stress test rounds")
 
     parser.add_argument(
         "--transpose_weight",
@@ -157,58 +195,93 @@ def parse_args():
     )
     parser.add_argument("--has_bias", default=False, action="store_true", help="whether have bias")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--gemm_only_perf", default=False, action="store_true", help="gemm only perf")
+    parser.add_argument("--comm_only_perf", default=False, action="store_true", help="comm only perf")
+    parser.add_argument("--use_fused_kernel", default=False, action="store_true",
+                        help="use fused all-gather-gemm kernel")
 
     return parser.parse_args()
 
 
-if __name__ == "__main__":
-    # init
-    args = parse_args()
+def run_stress_test(args, TP_GROUP: torch.distributed.ProcessGroup):
+    """Run stress test with random shapes"""
+    input_dtype = DTYPE_MAP[args.dtype]
+    output_dtype = input_dtype
+    atol = THRESHOLD_MAP[output_dtype]
+    rtol = THRESHOLD_MAP[output_dtype]
 
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    max_M, max_N, max_K = args.M, args.N, args.K
 
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
+    dist_print(f"Running stress test: {args.stress_rounds} rounds")
+    dist_print(f"Max M={max_M}, Max N={max_N}, Max K={max_K}, dtype={input_dtype}")
 
-    TP_GROUP = torch.distributed.new_group(ranks=list(range(torch.distributed.get_world_size())), backend="nccl")
-    torch.distributed.barrier(TP_GROUP)
+    for round_idx in range(args.stress_rounds):
+        # Generate random dimensions for each round
+        M_per_rank = random.randint(128, max_K) // 128 * 128
+        M = M_per_rank * TP_GROUP.size()
+        N = random.randint(128, max_N)
+        K = random.randint(128, max_K) // 128 * 128
+        chunk_m = random.choice([64, 128, 256, 512])
 
-    torch.use_deterministic_algorithms(False, warn_only=True)
-    torch.set_printoptions(precision=5)
-    torch.manual_seed(3 + RANK)
-    torch.cuda.manual_seed_all(3 + RANK)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    np.random.seed(3 + RANK)
-    random.seed(args.seed)
+        dist_print(f"\nRound {round_idx + 1}/{args.stress_rounds}: M={M}, N={N}, K={K}, chunk_m={chunk_m}")
 
-    num_ranks = torch.distributed.get_world_size()
-    rank_id = torch.distributed.get_rank()
+        try:
+            # Create AG-GEMM operator
+            dist_ag_gemm_op = AGGemmIntraNode(TP_GROUP, M, N, K, chunk_m, input_dtype, output_dtype,
+                                              args.use_copy_kernel, args.comm_sms_per_rank)
 
-    if rank_id == 0:
-        uid = pyrocshmem.rocshmem_get_uniqueid()
-        bcast_obj = [uid]
-    else:
-        bcast_obj = [None]
+            use_fused = args.use_fused_kernel
 
-    torch.distributed.broadcast_object_list(bcast_obj, src=0)
-    torch.distributed.barrier()
+            for _ in range(10):
+                A, B, bias = _make_data(M, N, K, args.has_bias, TP_GROUP)
+                # Run distributed AG-GEMM
+                dist_output = dist_ag_gemm_op.forward(A, B, use_fused, args.autotune)
 
-    pyrocshmem.rocshmem_init_attr(rank_id, num_ranks, bcast_obj[0])
+                # Run reference PyTorch implementation
+                torch_output = torch_ag_gemm(A, B, bias, TP_GROUP)
+
+                # Check correctness
+                assert_allclose(torch_output, dist_output, atol=atol, rtol=rtol, verbose=False)
+
+            dist_print(f"✅ Round {round_idx + 1} passed (fused={use_fused})")
+
+        except Exception as e:
+            dist_print(f"❌ Round {round_idx + 1} failed: {str(e)}")
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+            raise RuntimeError(f"Stress test failed at round {round_idx + 1}: {str(e)}")
 
     torch.cuda.synchronize()
     torch.distributed.barrier()
-    pyrocshmem.init_rocshmem_by_uniqueid(TP_GROUP)
+
+    dist_print("\n" + "=" * 60)
+    dist_print(f"✅ Stress test completed: All {args.stress_rounds} rounds passed")
+
+
+def _make_data(M, N, K, has_bias, tp_group: torch.distributed.ProcessGroup):
+    current_device = torch.cuda.current_device()
+    rank, num_ranks = tp_group.rank(), tp_group.size()
+    local_M = M // num_ranks
+    local_N = N // num_ranks
+    scale = (rank + 1) * 0.01
+
+    A = rand_tensor((local_M, K), dtype=input_dtype, device=current_device) * scale
+    if args.transpose_weight:
+        B = rand_tensor((K, local_N), dtype=input_dtype, device=current_device).T * scale
+    else:
+        B = rand_tensor((local_N, K), dtype=input_dtype, device=current_device) * scale
+    bias = None
+    if has_bias:
+        bias = rand_tensor((M, local_N), dtype=input_dtype, device=current_device)
+    return A, B, bias
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    RANK = int(os.environ.get("RANK", 0))
+    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+    TP_GROUP = initialize_distributed(args.seed, initialize_shmem=True)
 
     input_dtype = DTYPE_MAP[args.dtype]
     output_dtype = input_dtype
@@ -217,77 +290,52 @@ if __name__ == "__main__":
 
     assert args.M % WORLD_SIZE == 0
     assert args.N % WORLD_SIZE == 0
-    assert args.K % WORLD_SIZE == 0
     local_M = args.M // WORLD_SIZE
     local_N = args.N // WORLD_SIZE
 
-    scale = TP_GROUP.rank() + 1
+    dist_ag_gemm_op = AGGemmIntraNode(TP_GROUP, args.M, args.N, args.K, args.chunk_m, input_dtype, output_dtype,
+                                      args.use_copy_kernel, args.comm_sms_per_rank)
 
-    def _make_data():
-        data_config = [
-            ((local_M, args.K), input_dtype, (0.01 * scale, 0)),  # A
-            ((local_N, args.K), input_dtype, (0.01 * scale, 0)),  # B
-            (  # bias
-                None if not args.has_bias else ((args.M, local_N), input_dtype, (1, 0))),
-        ]
-        generator = generate_data(data_config)
-        input, weight, bias = next(generator)
-        if args.transpose_weight:
-            weight = weight.T.contiguous()  # from N,K to K,N
-        return input, weight, bias
+    A, B, bias = _make_data(args.M, args.N, args.K, args.has_bias, TP_GROUP)
 
-    dist_ag_gemm_op = AGGemmIntraNode(TP_GROUP, args.M, args.N, args.K, args.chunk_m, input_dtype, output_dtype)
+    if args.gemm_only_perf:
+        dist_ag_gemm_op.gemm_only_perf(A, B, iters=args.iters, warmup_iters=args.warmup)
 
-    ctx = get_torch_prof_ctx(args.profile)
-    input, weight, bias = _make_data()
+    elif args.comm_only_perf:
+        dist_ag_gemm_op.comm_only_perf(A, iters=args.iters, warmup_iters=args.warmup)
 
-    with ctx:
-        torch_output, torch_perf = perf_func(
-            partial(torch_ag_gemm, input, weight, args.transpose_weight, bias, TP_GROUP), iters=args.iters,
-            warmup_iters=args.warmup)
+    else:
+
+        if args.stress:
+            # Run stress test with random shapes
+            run_stress_test(args, TP_GROUP)
+
+        torch_output = torch_ag_gemm(A, B, bias, TP_GROUP)
+        dist_triton_output = dist_ag_gemm_op.forward(A, B, args.use_fused_kernel)
+
+        with group_profile("ag_gemm", args.profile, group=TP_GROUP):
+
+            _, dist_triton_perf = perf_func(partial(dist_ag_gemm_op.forward, A, B, args.use_fused_kernel),
+                                            iters=args.iters, warmup_iters=args.warmup)
+
+            _, torch_perf = perf_func(partial(torch_ag_gemm, A, B, bias, TP_GROUP), iters=args.iters,
+                                      warmup_iters=args.warmup)
 
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
-        dist_triton_output, dist_triton_perf = perf_func(
-            partial(dist_ag_gemm_op.forward, input, weight, args.transpose_weight), iters=args.iters,
-            warmup_iters=args.warmup)
+        atol, rtol = THRESHOLD_MAP[input_dtype], THRESHOLD_MAP[input_dtype]
+        assert_allclose(torch_output, dist_triton_output, atol=atol, rtol=rtol)
 
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
-    if args.profile:
-        # run_id = os.environ["TORCHELASTIC_RUN_ID"]
-        run_id = os.environ.get("TORCHELASTIC_RUN_ID", f"manual_run_{os.getpid()}")
-        prof_dir = "prof_ag_gemm_rshmem"
-        os.makedirs(prof_dir, exist_ok=True)
-        ctx.export_chrome_trace(f"{prof_dir}/trace_rank{TP_GROUP.rank()}.json.gz")
-
-    atol, rtol = THRESHOLD_MAP[input_dtype], THRESHOLD_MAP[input_dtype]
-
-    if torch.allclose(dist_triton_output, torch_output, atol=atol, rtol=rtol):
-        dist_print("✅ Triton and Torch match")
-    else:
-        dist_print(
-            f"The maximum difference between torch and triton is {torch.max(torch.abs(dist_triton_output - torch_output))}"
-        )
-        dist_print("❌ Triton and Torch differ")
-
-    torch.cuda.synchronize()
-
-    dist_print(f"dist-triton #{RANK}", dist_triton_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
-    dist_print(f"torch #{RANK}", torch_perf, need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
+        kernel_type = "fused" if args.use_fused_kernel else "producer-consumer"
+        dist_print(f"#{RANK} dist-triton {kernel_type} {dist_triton_perf:0.3f} ms/iter torch {torch_perf:0.3f} ms/iter",
+                   need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
     # Explicitly delete rocSHMEM-backed tensors before finalization
-    # without explicit cleanup, rocshmem barrier_all collective operation 
+    # without explicit cleanup, rocshmem barrier_all collective operation
     # is called during python shutdown when some ranks may already have exited,
     # which may cause segfaults.
     del dist_ag_gemm_op
-    del input, weight, bias
-    del torch_output, dist_triton_output
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-
-    pyrocshmem.rocshmem_finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

@@ -24,10 +24,9 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton.language.extra.cuda.language_extra import tid
+from triton_dist.language.extra.language_extra import tid, __syncthreads, atomic_cas
 import triton_dist.language as dl
 from .task_context import TaskBaseInfo, Scoreboard
-from triton.language.extra.cuda.language_extra import (__syncthreads, atomic_cas)
 
 
 @triton.jit

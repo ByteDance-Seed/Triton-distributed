@@ -40,6 +40,8 @@ def rmsnorm_rope_update_kv_cache_task_compute(
     MAX_NUM_BLOCKS_PER_SEQ: tl.constexpr,
     Q_RMS_EPS: tl.constexpr,
     K_RMS_EPS: tl.constexpr,
+    SKIP_Q_NORM: tl.constexpr,
+    SKIP_K_NORM: tl.constexpr,
 ):
     # cos/sin: [sin_cos_batch/1, seq_len, q_head_dim]
     # qkv : [batch, seq_len, num_total_heads, q_head_dim]
@@ -120,20 +122,25 @@ def rmsnorm_rope_update_kv_cache_task_compute(
     if idx_1 >= NUM_Q_HEADS:
         RMS_EPS = K_RMS_EPS
         rms_weight_ptr = k_rms_weight_ptr
+        is_q_head = False
     else:
         RMS_EPS = Q_RMS_EPS
         rms_weight_ptr = q_rms_weight_ptr
+        is_q_head = True
     # apply rmsnorm in qk head_dim
     _rms = tl.zeros([PADDED_Q_HEAD_DIM], dtype=tl.float32)
 
     a = tl.load(X + cols, mask=cols < q_head_dim, other=0.0).to(tl.float32)
-    _rms += a * a
-    rms = tl.rsqrt(tl.sum(_rms) / q_head_dim + RMS_EPS)
+    if (is_q_head and not SKIP_Q_NORM) or (not is_q_head and not SKIP_K_NORM):
+        _rms += a * a
+        rms = tl.rsqrt(tl.sum(_rms) / q_head_dim + RMS_EPS)
 
-    mask = cols < q_head_dim
-    w = tl.load(rms_weight_ptr + cols, mask=mask).to(tl.float32)
-    x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
-    y = w * (x * rms)
+        mask = cols < q_head_dim
+        w = tl.load(rms_weight_ptr + cols, mask=mask).to(tl.float32)
+        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
+        y = w * (x * rms)
+    else:
+        y = a
 
     # store rmsnorm for debug
     # tl.store(Y + cols, y, mask=mask)

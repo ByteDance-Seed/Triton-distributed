@@ -1004,7 +1004,7 @@ def gqa_fwd_batch_decode_aot(stream, q, k_cache, v_cache, workspace, q_lens, kv_
             split_algo_info = distributed.gqa_fwd_batch_decode_split_kv_fp16_fp16_fp16__triton_algo_info_t()
             combine_algo_info = distributed.gqa_fwd_batch_decode_combine_kv_fp16_fp16__triton_algo_info_t()
         else:
-            raise RuntimeError("Unsupported data type of intermediate output:", output_split.dtype)
+            raise RuntimeError(f"Unsupported data type of intermediate output: {output_split.dtype}")
 
         py_split_algo_info = get_triton_split_kv_algo_info(q_heads, kv_heads, q_head_dim, v_head_dim, page_size,
                                                            split_kv=NUM_KV_SPLITS, soft_cap=soft_cap)
@@ -1062,7 +1062,7 @@ def gqa_fwd_batch_decode_intra_rank_aot(stream, q, k_cache, v_cache, workspace, 
             split_algo_info = distributed.gqa_fwd_batch_decode_split_kv_fp16_fp16_fp16__triton_algo_info_t()
             combine_algo_info = distributed.intra_rank_gqa_fwd_batch_decode_combine_kv_fp16_fp16__triton_algo_info_t()
         else:
-            raise RuntimeError("Unsupported data type of intermediate output:", output_split.dtype)
+            raise RuntimeError(f"Unsupported data type of intermediate output: {output_split.dtype}")
 
         py_split_algo_info = get_triton_split_kv_algo_info(q_heads, kv_heads, q_head_dim, v_head_dim, page_size,
                                                            split_kv=NUM_KV_SPLITS, soft_cap=soft_cap)
