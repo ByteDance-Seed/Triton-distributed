@@ -22,6 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+import triton
 import triton.language as tl
 from triton.language import core
 from triton_dist.language import core as dist_core
@@ -432,12 +433,73 @@ def fence(semantic="monotonic", scope="agent", _semantic=None):
     )
 
 
+def _str_to_gpu_shfl_mode(mode_str):
+    # The order of shfl modes is from (llvm-project/mlir/include/mlir/Dialect/GPU/IR/GPUOps.td)
+    ALL_SHFL_MODES = ["xor", "up", "down", "idx"]
+
+    if mode_str not in ALL_SHFL_MODES:
+        raise RuntimeError(f"unexpected gpu shuffle mode, expecte: {ALL_SHFL_MODES}, but got: {mode_str}")
+
+    return ALL_SHFL_MODES.index(mode_str)
+
+
+@core.extern
+def laneid(_semantic=None):
+    return core.tensor(_semantic.builder.create_laneid(), core.int32)
+
+
+@core.extern
+def __shfl_sync_with_mode_i32(
+    value,
+    offset,
+    mode: core.constexpr = "up",
+    width: int = 64,
+    _semantic=None,
+):
+    shfl_mode = _str_to_gpu_shfl_mode(mode.value)
+    if isinstance(offset, core.constexpr):
+        offset = core.to_tensor(offset, _semantic=_semantic)
+
+    return core.tensor(
+        _semantic.builder.create_warp_shuffle(
+            value.handle,
+            offset.handle,
+            core.to_tensor(width, _semantic=_semantic).handle,
+            shfl_mode,
+        ), value.dtype)
+
+
+@triton.jit
+def __shfl_sync_i32(value, laneid):
+    return __shfl_sync_with_mode_i32(value, laneid, "idx", 64)
+
+
+@triton.jit
+def __shfl_up_sync_i32(value, offset):
+    return __shfl_sync_with_mode_i32(value, offset, "up", 64)
+
+
+@triton.jit
+def __shfl_down_sync_i32(value, offset):
+    return __shfl_sync_with_mode_i32(value, offset, "down", 64)
+
+
+@triton.jit
+def __shfl_xor_sync_i32(value, offset):
+    return __shfl_sync_with_mode_i32(value, offset, "xor", 64)
+
+
 __all__ = [
     "__syncthreads",
     "tid",
     "ntid",
+    "laneid",
     "atomic_cas",
     "atomic_add",
+    "__shfl_sync_i32",
+    "__shfl_up_sync_i32",
+    "__shfl_down_sync_i32",
+    "__shfl_xor_sync_i32",
     "load",
     "store",
     "sync_grid",
