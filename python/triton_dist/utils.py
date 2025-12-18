@@ -176,7 +176,6 @@ def init_mori_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     import mori.shmem as mori_shmem
 
     rank, nranks = pg.rank(), pg.size()
-    print(f"mori here, rank {rank}, nranks {nranks}", flush=True)
     if rank == 0:
         buffer: bytes = bytearray(mori_shmem.shmem_get_unique_id())
         unique_id: torch.Tensor = torch.frombuffer(
@@ -327,7 +326,6 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
             init_nvshmem_by_torch_process_group(pg)
         elif is_hip():
             backend = get_shmem_backend()
-            print(f"Using {backend} as shared memory backend")
             if backend == 'rocshmem':
                 init_rocshmem_by_torch_process_group(pg)
             elif backend == 'mori_shmem':
