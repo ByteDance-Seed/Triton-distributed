@@ -22,16 +22,51 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import sys
+from triton.language import core
+import triton.language as tl
+from triton_dist.language.core import extern_call
+
+pi_u64_t = tl.core.pointer_type(tl.core.dtype("uint64"))
+pi_i64_t = tl.core.pointer_type(tl.core.dtype("int64"))
 
 
-def mori_shmem_my_pe():
-    ...
+@core.extern
+def my_pe(_semantic=None):
+    return extern_call(
+        "libmori_shmem_device",
+        "",
+        [],
+        {(): ("mori_shmem_my_pe", (tl.int32))},
+        is_pure=False,
+        _semantic=_semantic,
+    )
 
 
-def mori_shmem_n_pes():
-    ...
+@core.extern
+def n_pes(_semantic=None):
+    return extern_call(
+        "libmori_shmem_device",
+        "",
+        [],
+        {(): ("mori_shmem_n_pes", (tl.int32))},
+        is_pure=True,
+        _semantic=_semantic,
+    )
 
 
-def mori_shmem_int_p(dest, value, pe):
-    ...
+@core.extern
+def int_p(dest, value, pe, _semantic=None):
+    return extern_call(
+        "libmori_shmem_device",
+        "",
+        [
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(value, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
+        {
+            (tl.pointer_type(tl.void), tl.int32, tl.int32): ("mori_shmem_int_p", ()),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )

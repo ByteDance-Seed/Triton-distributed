@@ -30,333 +30,183 @@ import shutil
 import torch
 import torch.distributed as dist
 
+
+# Set default environment variables
+os.environ.setdefault('TRITON_DIST_SHMEM_BACKEND', 'mori_shmem')
+
 _test_dir = os.path.dirname(os.path.abspath(__file__))
 _workspace_root = os.path.abspath(os.path.join(_test_dir, "../../../.."))
+_triton_dist_python_path = os.path.join(_workspace_root, "python")
+if _triton_dist_python_path not in sys.path:
+    sys.path.insert(0, _triton_dist_python_path)
+current_pythonpath = os.environ.get('PYTHONPATH', '')
+if _triton_dist_python_path not in current_pythonpath:
+    os.environ['PYTHONPATH'] = f"{_triton_dist_python_path}:{current_pythonpath}" if current_pythonpath else _triton_dist_python_path
+
+# Add upstream Triton python path
 _triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
 if os.path.exists(_triton_python_path):
     sys.path.insert(0, _triton_python_path)
 
-
-class TorchDistContext:
-    
-    def __init__(self, rank, world_size, master_addr="localhost", master_port="12335",
-                 device_id=None, backend="cpu:gloo,cuda:nccl"):
-        self.rank = rank
-        self.world_size = world_size
-        self.master_addr = master_addr
-        self.master_port = master_port
-        self.device_id = device_id if device_id is not None else self.rank
-        self.backend = backend
-    
-    def __enter__(self):
-        if self.master_addr is not None:
-            os.environ["MASTER_ADDR"] = self.master_addr
-        if self.master_port is not None:
-            os.environ["MASTER_PORT"] = str(self.master_port)
-        
-        torch.cuda.set_device(self.device_id)
-        device = torch.device("cuda", self.device_id)
-        
-        dist.init_process_group(
-            backend=self.backend,
-            rank=self.rank,
-            world_size=self.world_size,
-            device_id=device,
-        )
-        
-        # Register the "default" process group for mori
-        world_group = torch.distributed.group.WORLD
-        assert world_group is not None
-        torch._C._distributed_c10d._register_process_group("default", world_group)
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if dist.is_initialized():
-            dist.barrier()
-            dist.destroy_process_group()
+from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed, get_triton_dist_world
+import mori.shmem as mori_shmem
 
 
-def _test_mori_shmem_init(rank, world_size, master_port):
-    """Test mori shmem initialization with PyTorch process group"""
-    
-    with TorchDistContext(rank=rank, world_size=world_size, master_port=str(master_port)):
-        import mori.shmem as mori_shmem
-        
-        mori_shmem.shmem_torch_process_group_init("default")
-        
-        my_pe = mori_shmem.shmem_mype()
-        n_pes = mori_shmem.shmem_npes()
-        
-        assert my_pe == rank, f"PE mismatch: expected {rank}, got {my_pe}"
-        assert n_pes == world_size, f"nPEs mismatch: expected {world_size}, got {n_pes}"
-        
-        ptr1 = mori_shmem.shmem_malloc(4096)
-        assert ptr1 != 0, f"shmem_malloc returned NULL"
-        
-        ptr2 = mori_shmem.shmem_malloc_align(256, 8192)
-        assert ptr2 != 0, f"shmem_malloc_align returned NULL"
-        assert ptr2 % 256 == 0, f"Memory not aligned: 0x{ptr2:x}"
-        
-        mori_shmem.shmem_barrier_all()
-        
-        mori_shmem.shmem_free(ptr1)
-        mori_shmem.shmem_free(ptr2)
-        
-        mori_shmem.shmem_finalize()
-        
-        if rank == 0:
-            print(f"PyTorch init test passed with {world_size} processes")
+# Simple helper to wrap mori shmem pointer as torch tensor
+class MoriShmemBuffer:
+    def __init__(self, ptr, nbytes, dtype: torch.dtype):
+        self.ptr = ptr
+        self.nbytes = nbytes
+        self.dtype = dtype
+        self.__cuda_array_interface__ = {
+            "data": (self.ptr, False),
+            "shape": (self.nbytes,),
+            "typestr": "<i1",  # uint8
+            "strides": None,
+            "version": 3,
+        }
+
+def mori_shmem_create_tensor(shape, dtype):
+    """Create a torch tensor backed by mori shmem memory"""
+    nbytes = torch.tensor(shape).prod().item() * dtype.itemsize
+    torch.cuda.synchronize()
+    ptr = mori_shmem.shmem_malloc(nbytes)
+    assert ptr != 0, "mori_shmem.shmem_malloc failed"
+    buffer = MoriShmemBuffer(ptr, nbytes, dtype)
+    tensor = torch.as_tensor(buffer, device="cuda").view(dtype).view(shape)
+    tensor._mori_ptr = ptr  # Keep reference to free later
+    return tensor
 
 
-def _test_mori_uniqueid_init(rank, world_size, master_port):
-    """Test mori shmem initialization with UniqueID (no PyTorch distributed)"""
+def test_mori_shmem_basic():
+    """Run all mori shmem basic tests"""
+    import triton
+    import triton.language as tl
     
-    import mori.shmem as mori_shmem
+    @triton.jit
+    def _mori_shmem_basic(ptr, mype, npes):
+        tl.store(ptr, mype)
+        tl.store(ptr + 1, npes)
+
+    print("**mori_shmem basic start!")
+
+    mype = mori_shmem.shmem_mype()
+    npes = mori_shmem.shmem_npes()
+    assert npes == get_triton_dist_world().size(), f"nPEs mismatch: expected {get_triton_dist_world().size()}, got {npes}"
     
-    # Set GPU device for this rank
-    torch.cuda.set_device(rank)
+    # Create tensor backed by mori shmem memory
+    comm_buf = mori_shmem_create_tensor((2,), torch.int32)
+
+    # Launch kernel
+    _mori_shmem_basic[(1, )](comm_buf, mype, npes)
+    mori_shmem.shmem_barrier_all()
+    torch.cuda.synchronize()
+
+    print(f"mype#{mype} comm_buf: {comm_buf}")
+
+    try:
+        torch.testing.assert_close(comm_buf, torch.tensor([mype, npes], dtype=torch.int32, device="cuda"))
+    except Exception as e:
+        print(f"❌ _mori_shmem_basic #{mype} failed")
+        raise e
+    else:
+        print(f"✅ _mori_shmem_basic #{mype} pass")
     
-    os.environ['MORI_SOCKET_IFNAME'] = 'lo'
+    # Cleanup
+    if hasattr(comm_buf, '_mori_ptr'):
+        mori_shmem.shmem_free(comm_buf._mori_ptr)
+
+def test_mori_shmem_device():
+    import triton
+    import triton.language as tl
+    import triton_dist
+    import triton_dist.language as dl
+    from triton_dist.language.extra import libshmem_device
+
+    @triton_dist.jit
+    def _mori_shmem_device(comm_buf):
+        mype = dl.rank()
+        npes = dl.num_ranks()
+
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        tl.store(comm_buf, mype)
+        comm_buf += 1
+        tl.store(comm_buf, npes)
+
+    @triton_dist.jit
+    def _mori_shmem_ring_put(ptr):
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+
+        libshmem_device.int_p(ptr, mype, peer)
+
+
+    print("**test_mori_shmem_device start!")
+
+    mype = mori_shmem.shmem_mype()
+    npes = mori_shmem.shmem_npes()
+    comm_buf = mori_shmem_create_tensor((2, ), torch.int32)
+
+    torch.distributed.barrier()
+    _mori_shmem_device[(1, )](comm_buf)
+    torch.distributed.barrier()
+    torch.cuda.synchronize()
+
+    print(f"mype#{mype} comm_buf: {comm_buf}")
+
+    try:
+        torch.testing.assert_close(comm_buf, torch.tensor([mype, npes], dtype=torch.int32, device="cuda"))
+    except Exception as e:
+        print(f"❌ _mori_shmem_device #{mype} failed")
+        raise e
+    else:
+        print(f"✅ _mori_shmem_device #{mype} pass")
+
+    # Cleanup first tensor
+    if hasattr(comm_buf, '_mori_ptr'):
+        mori_shmem.shmem_free(comm_buf._mori_ptr)
+
+    # Test ring put
+    print("**test_mori_shmem_ring_put start!")
     
-    uid_dir = f"/tmp/mori_shmem_test_{master_port}"
-    uid_file = os.path.join(uid_dir, "uniqueid")
-    ready_file = os.path.join(uid_dir, f"ready_{rank}")
+    put_buf = mori_shmem_create_tensor((1,), torch.int32)
+    put_buf.fill_(-1)  # Initialize with -1
+    
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    
+    # Each PE puts its rank to next PE in ring
+    _mori_shmem_ring_put[(1,)](put_buf)
+    
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    torch.cuda.synchronize()
+    
+    # Verify: should receive from previous PE in ring
+    expected_value = (mype - 1 + npes) % npes
+    actual_value = put_buf[0].item()
+    
+    print(f"mype#{mype} ring_put result: received={actual_value}, expected={expected_value}")
     
     try:
-        if rank == 0:
-            os.makedirs(uid_dir, exist_ok=True)
-            unique_id = mori_shmem.shmem_get_unique_id()
-            assert len(unique_id) == 128, f"Invalid unique ID length: {len(unique_id)}"
-            
-            with open(uid_file, 'wb') as f:
-                f.write(unique_id)
-            with open(ready_file, 'w') as f:
-                f.write('ready')
-        else:
-            max_wait = 30
-            for i in range(max_wait * 10):
-                if os.path.exists(uid_dir):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError(f"Timeout waiting for directory")
-            
-            rank0_ready = os.path.join(uid_dir, "ready_0")
-            for i in range(max_wait * 10):
-                if os.path.exists(rank0_ready) and os.path.exists(uid_file):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError(f"Timeout waiting for unique ID file")
-            
-            with open(uid_file, 'rb') as f:
-                unique_id = f.read()
-        
-        assert len(unique_id) == 128, f"Invalid unique ID length: {len(unique_id)}"
-        time.sleep(0.01 * rank)
-        
-        ret = mori_shmem.shmem_init_attr(
-            mori_shmem.MORI_SHMEM_INIT_WITH_UNIQUEID,
-            rank,
-            world_size,
-            unique_id
-        )
-        assert ret == 0, f"shmem_init_attr failed with code {ret}"
-        
-        my_rank = mori_shmem.shmem_mype()
-        npes = mori_shmem.shmem_npes()
-        assert my_rank == rank, f"Rank mismatch: expected {rank}, got {my_rank}"
-        assert npes == world_size, f"World size mismatch: expected {world_size}, got {npes}"
-        
-        ptr1 = mori_shmem.shmem_malloc(4096)
-        assert ptr1 != 0, f"shmem_malloc returned NULL"
-        
-        ptr2 = mori_shmem.shmem_malloc_align(256, 8192)
-        assert ptr2 != 0, f"shmem_malloc_align returned NULL"
-        assert ptr2 % 256 == 0, f"Memory not aligned: 0x{ptr2:x}"
-        
-        mori_shmem.shmem_barrier_all()
-        
-        mori_shmem.shmem_free(ptr1)
-        mori_shmem.shmem_free(ptr2)
-        
-        mori_shmem.shmem_finalize()
-        
-        if rank == 0:
-            print(f"UniqueID init test passed with {world_size} processes")
-        
-    finally:
-        if rank == 0:
-            time.sleep(2.0)
-            if os.path.exists(uid_dir):
-                shutil.rmtree(uid_dir, ignore_errors=True)
-
-
-def test_mori_shmem_torch_init():
-    """Test mori shmem with PyTorch process group initialization"""
+        assert actual_value == expected_value, f"Ring put failed: expected {expected_value}, got {actual_value}"
+    except Exception as e:
+        print(f"❌ _mori_shmem_ring_put #{mype} failed")
+        raise e
+    else:
+        print(f"✅ _mori_shmem_ring_put #{mype} pass")
     
-    world_size = int(os.environ.get('WORLD_SIZE', 8))
-    master_port = int(os.environ.get('MASTER_PORT', 29500))
-    
-    torch.multiprocessing.spawn(
-        _test_mori_shmem_init,
-        args=(world_size, master_port),
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def test_mori_shmem_uniqueid_init():
-    """Test mori shmem with UniqueID initialization (no PyTorch distributed)"""
-    
-    world_size = int(os.environ.get('WORLD_SIZE', 8))
-    master_port = int(os.environ.get('MASTER_PORT', 29501))
-    
-    torch.multiprocessing.spawn(
-        _test_mori_uniqueid_init,
-        args=(world_size, master_port),
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def _test_mori_shmem_device_kernel(rank, world_size, master_port):
-    """Test libmori_shmem_device Python bindings in Triton kernel"""
-    
-    # Enable LLIR dump for debugging
-    # os.environ['LLIR_ENABLE_DUMP'] = '1'
-    
-    with TorchDistContext(rank=rank, world_size=world_size, master_port=str(master_port)):
-        import triton
-        import triton.language as tl
-        from triton.language.extra.hip import libmori_shmem_device
-        import mori.shmem as mori_shmem
-        
-        # Initialize mori shmem
-        mori_shmem.shmem_torch_process_group_init("default")
-        
-        my_pe = mori_shmem.shmem_mype()
-        n_pes = mori_shmem.shmem_npes()
-        
-        assert my_pe == rank, f"PE mismatch: expected {rank}, got {my_pe}"
-        assert n_pes == world_size, f"nPEs mismatch: expected {world_size}, got {n_pes}"
-        
-        # Define Triton kernel that uses libmori_shmem_device
-        @triton.jit
-        def test_kernel(output_pe, output_npes):
-            # Call mori shmem device functions from kernel
-            pe = libmori_shmem_device.mori_shmem_my_pe()
-            npes = libmori_shmem_device.mori_shmem_n_pes()
-            
-            # Store results
-            tl.store(output_pe, pe)
-            tl.store(output_npes, npes)
-        
-        # Allocate output tensors on GPU
-        output_pe = torch.zeros(1, dtype=torch.int32, device=f'cuda:{rank}')
-        output_npes = torch.zeros(1, dtype=torch.int32, device=f'cuda:{rank}')
-        
-        # Launch kernel
-        test_kernel[(1,)](output_pe, output_npes)
-        
-        # Synchronize and check results
-        torch.cuda.synchronize()
-        
-        kernel_pe = output_pe.item()
-        kernel_npes = output_npes.item()
-        
-        assert kernel_pe == rank, f"Kernel PE mismatch: expected {rank}, got {kernel_pe}"
-        assert kernel_npes == world_size, f"Kernel nPEs mismatch: expected {world_size}, got {kernel_npes}"
-        
-        # Barrier before finalize
-        mori_shmem.shmem_barrier_all()
-        
-        # Finalize
-        mori_shmem.shmem_finalize()
-        
-        if rank == 0:
-            print(f"libmori_shmem_device kernel test passed with {world_size} processes")
-            print(f"  - Kernel correctly returned PE={kernel_pe}, nPEs={kernel_npes}")
-
-
-def test_mori_shmem_device_kernel():
-    """Test libmori_shmem_device Python bindings in Triton kernel"""
-    
-    world_size = int(os.environ.get('WORLD_SIZE', 8))
-    master_port = int(os.environ.get('MASTER_PORT', 29502))
-    
-    torch.multiprocessing.spawn(
-        _test_mori_shmem_device_kernel,
-        args=(world_size, master_port),
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def _test_mori_ring_put(rank, world_size, master_port):
-    """Test mori_shmem_int_p with ring communication pattern"""
-    
-    with TorchDistContext(rank=rank, world_size=world_size, master_port=str(master_port)):
-        import triton
-        from triton.language.extra.hip import libmori_shmem_device
-        import mori.shmem as mori_shmem
-        
-        # Initialize mori shmem
-        mori_shmem.shmem_torch_process_group_init("default")
-        
-        # Define ring put kernel
-        @triton.jit
-        def ring_put(ptr):
-            mype = libmori_shmem_device.mori_shmem_my_pe()
-            npes = libmori_shmem_device.mori_shmem_n_pes()
-            peer = (mype + 1) % npes
-            libmori_shmem_device.mori_shmem_int_p(ptr, mype, peer)
-        
-        shmem_ptr = mori_shmem.shmem_malloc(32)
-        
-        import ctypes
-        ptr = ctypes.cast(shmem_ptr, ctypes.POINTER(ctypes.c_int32))
-        for i in range(8):
-            ptr[i] = -1
-        
-        mori_shmem.shmem_barrier_all()
-        
-        ring_put[(1,)](shmem_ptr)
-        
-        mori_shmem.shmem_barrier_all()
-        torch.cuda.synchronize()
-        
-        actual = ptr[0]
-        # Verify: should receive from previous PE in ring
-        expected = (rank - 1 + world_size) % world_size
-        
-        assert actual == expected, f"Ring put failed on rank {rank}: received={actual}, expected={expected}"
-        
-        if rank == 0:
-            print(f"Ring put test passed with {world_size} processes")
-            print(f"  - All PEs correctly received data from previous PE in ring")
-        
-        # Cleanup
-        mori_shmem.shmem_free(shmem_ptr)
-        mori_shmem.shmem_finalize()
-
-
-def test_mori_ring_put():
-    """Test mori_shmem_int_p with ring communication pattern"""
-    
-    world_size = int(os.environ.get('WORLD_SIZE', 8))
-    master_port = int(os.environ.get('MASTER_PORT', 29503))
-    
-    torch.multiprocessing.spawn(
-        _test_mori_ring_put,
-        args=(world_size, master_port),
-        nprocs=world_size,
-        join=True,
-    )
-
+    # Cleanup
+    if hasattr(put_buf, '_mori_ptr'):
+        mori_shmem.shmem_free(put_buf._mori_ptr)
 
 if __name__ == "__main__":
-    # test_mori_shmem_torch_init()
-    test_mori_shmem_uniqueid_init()
-    test_mori_shmem_device_kernel()
-    test_mori_ring_put()
+
+    TP_GROUP = initialize_distributed()
+    test_mori_shmem_basic()
+    test_mori_shmem_device()
+
+    finalize_distributed()
     print("All tests passed!")

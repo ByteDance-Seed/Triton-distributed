@@ -44,9 +44,6 @@ if [ ! -f "$MEMORY_BC" ]; then
     exit 1
 fi
 
-# Destination path (only need to copy to backend, python has a symlink)
-TRITON_BACKEND_LIB="${SCRIPT_DIR}/../3rdparty/triton/third_party/amd/backend/lib"
-
 # Create temp directory for linking
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
@@ -76,27 +73,28 @@ else
     exit 1
 fi
 
-echo "Copying unified BC to triton backend..."
-mkdir -p "$TRITON_BACKEND_LIB"
-cp "$TEMP_DIR/libmori_shmem_device.bc" "$TRITON_BACKEND_LIB/"
+echo "Copying mori_shmem bitcode to destination..."
 
-echo "Creating symlink in python/triton/backends/amd/lib..."
-TRITON_PYTHON_LIB="${SCRIPT_DIR}/../3rdparty/triton/python/triton/backends/amd/lib"
-mkdir -p "$TRITON_PYTHON_LIB"
+# Determine destination path (similar to rocshmem build.sh)
+if [ -n "$MORI_HOME" ]; then
+    DST_PATH="$MORI_HOME/lib"
+else
+    DST_PATH="${SCRIPT_DIR}/../python/triton_dist/tools/compile"
+fi
 
-# Remove old symlink if exists
-rm -f "$TRITON_PYTHON_LIB/libmori_shmem_device.bc"
+mkdir -p "$DST_PATH"
 
-# Create symlink (relative path)
-cd "$TRITON_PYTHON_LIB"
-ln -s ../../../../../third_party/amd/backend/lib/libmori_shmem_device.bc libmori_shmem_device.bc
-cd - > /dev/null
+if ! cp -f "$TEMP_DIR/libmori_shmem_device.bc" "$DST_PATH/"; then
+    echo "Error: Mori bitcode copy failed." >&2
+    exit 1
+fi
+
+echo "✓ Mori bitcode copied to: $DST_PATH/libmori_shmem_device.bc"
 
 echo ""
 echo "=========================================="
 echo "  Build complete!"
 echo "=========================================="
 echo "  Mori Python module: installed via pip"
-echo "  Device BC: $TRITON_BACKEND_LIB/libmori_shmem_device.bc"
-echo "  Symlink: $TRITON_PYTHON_LIB/libmori_shmem_device.bc"
+echo "  Device BC: $DST_PATH/libmori_shmem_device.bc"
 echo "=========================================="
