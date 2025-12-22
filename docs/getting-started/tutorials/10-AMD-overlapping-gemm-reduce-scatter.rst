@@ -12,7 +12,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch_amd.sh ./tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
+    bash ./scripts/launch_amd.sh tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
 
 
 Kernel
@@ -20,7 +20,7 @@ Kernel
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def kernel_gemm_rs_producer_fuse_scatter(
             # Pointers to matrices
             a_ptr, b_ptr, scatter_bufs_ptr, rank, num_ranks,
@@ -121,7 +121,7 @@ Kernel
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def kernel_consumer_reduce(
         c_ptr,  # [M, N]
         out_ptr,  # [M_per_rank, N]

@@ -17,7 +17,7 @@
     > Note: This step is because of NVSHMEM license requirements, it is illegal to release any modified codes or patch.
 
     File: ```src/include/non_abi/device/common/nvshmemi_common_device.cuh``` (Line 287)
-    ```cpp
+    ```diff
     - dst = (void *)(dst_p + nelems);
     - src = (void *)(src_p + nelems);
 
@@ -35,7 +35,7 @@
     > Note: This step is because of NVSHMEM license requirements, it is illegal to release any modified codes or patch.
 
     File: ```src/include/device_host/nvshmem_common.cuh``` (Line 41)
-    ```cpp
+    ```diff
     - __device__ int __nvvm_reflect(const char *s);
     + __device__ int __nvvm_reflect(const void *s);
     ```

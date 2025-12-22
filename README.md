@@ -42,6 +42,7 @@ Triton-distributed currently mainly targets Nvidia GPU and AMD GPU. It can also 
 Feel free to contact us if you want to use Triton-distributed on your own hardware.
 
 ## News
+- 12/22/2025 ✨✨✨: Updated EP functions, support low-latency mode, token saving, and Mega-EP.
 - 21/10/2025 🔥🔥🔥: Triton-distributed is presented at [Triton Conference 2025](https://tritonconference.eventbuilder.com/TritonDeveloperConference?ref=TritonDeveloperConference), see the [talk](https://www.youtube.com/playlist?list=PLc_vA1r0qoiQqCdWFDUDqI90oY5EjfGuO) for details.
 - 09/03/2025 ✨✨✨: Introduced Intra-Kernel Profiler, See the [doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/profiler/intra_kernel_profiler.md) for details.
 - 08/24/2025 ⚡⚡⚡: Support inference acceleration for [ByteDance-Seed/Seed-OSS-36B-Instruct](https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct), achieving a 1.33x speedup.
@@ -73,6 +74,7 @@ docker exec -it triton-dist /bin/bash
 Install Dependencies
 
 ```sh
+pip3 install cuda.core==0.2.0 nvidia-nvshmem-cu12==3.3.9 Cython==0.29.24 nvshmem4py-cu12==0.1.2
 pip3 install cuda-python==12.4 setuptools==69.0.0 wheel pybind11
 ```
 
@@ -83,7 +85,8 @@ pip uninstall triton
 pip uninstall triton_dist # remove previous triton-dist
 rm -rf /usr/local/lib/python3.12/dist-packages/triton
 # Install Triton-distributed
-pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/download/v0.0.1-rc/triton_dist-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+VERSION=v0.0.2 # use the latest version
+pip install https://github.com/ByteDance-Seed/Triton-distributed/releases/download/${VERSION}/triton_dist-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 ```
 
 
@@ -95,7 +98,7 @@ Triton-distributed provides a set of easy-to use primitives to support the devel
 Using these primitives, users can program communication kernels easily. For example, a low-latency AllToAll (with better latency than [DeepEP](https://github.com/deepseek-ai/DeepEP) for inference) is shown below.
 The performance of this example on 32 H800 GPUs is 137us (128 tokens per rank, topk=8, hidden_size=7168, dtype=fp8), while DeepEP is 182 us (note: DeepEP doesn't use NVLink for inference).
 ```py
-@triton.jit
+@triton_dist.jit
 def all_to_all_kernel(
     data_src,
     data_dst,

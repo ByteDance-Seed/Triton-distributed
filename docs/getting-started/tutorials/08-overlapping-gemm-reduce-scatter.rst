@@ -13,7 +13,8 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch.sh ./tutorials/08-overlapping-gemm-reduce-scatter.py
+    source ./scripts/setenv.sh
+    bash ./scripts/launch.sh tutorials/08-overlapping-gemm-reduce-scatter.py
 
 
 Overlapping GEMM ReduceScatter Kernel
@@ -26,7 +27,7 @@ The 'kernel_gemm_rs_producer_persistent' kernel is almost identical to a regular
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def kernel_gemm_rs_producer_persistent(
         a_ptr,
         b_ptr,

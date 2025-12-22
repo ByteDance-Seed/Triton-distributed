@@ -72,6 +72,10 @@ sphinx_gallery_conf = {
     'run_stale_examples': False,
 }
 
+# Prefix section labels with document name to avoid duplicates
+autosectionlabel_prefix_document = True
+autosectionlabel_maxdepth = 2  # Only generate labels for top-level sections
+
 # Use Google style docstrings instead of NumPy docstrings.
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False

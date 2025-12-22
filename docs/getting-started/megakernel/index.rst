@@ -1,7 +1,7 @@
 :orphan:
 
 Megakernel Implementations
-=========================
+==========================
 
 Here you'll find a list of tutorials for implementing MegaKernels in Triton-distributed.
 

@@ -8,7 +8,8 @@ paradigm in Expert Parallelism (EP) for MoE models using Triton-distributed.
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./launch.sh ./tutorials/04-deepseek-infer-all2all.py
+    source ./scripts/setenv.sh
+    bash ./scripts/launch.sh tutorials/04-deepseek-infer-all2all.py
 
 
 Motivations
@@ -44,7 +45,7 @@ Kernel
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def all_to_all_kernel(
         send_tensor,
         data_src,

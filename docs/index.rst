@@ -14,10 +14,11 @@ Using Triton-distributed, programmers are able to develop efficient kernels comp
 Getting Started
 ---------------
 
-- Follow the :doc:`installation instructions <getting-started/installation>` for your platform of choice.
+- Follow the :doc:`build instructions <build>` for your platform of choice.
 - Take a look at the :doc:`tutorials <getting-started/tutorials/index>` to learn how to write your first Triton-distributed program.
 - Explore our :doc:`end-to-end integration <getting-started/e2e/index>` to learn how Triton-Distributed accelerates inference for real-world LLMs.
 - Try our :doc:`megakernel implementations <getting-started/megakernel/index>` to learn how Triton-Distributed accelerates inference for real-world LLMs.
+- Learn how to :doc:`run all tests <testing>` to verify your installation.
 
 .. toctree::
    :maxdepth: 10
@@ -27,6 +28,34 @@ Getting Started
    getting-started/installation
    getting-started/tutorials/index
    getting-started/e2e/index
+   getting-started/megakernel/index
+   getting-started/profiler/intra_kernel_profiler
+   build
+   testing
+   primitives
+   autotuner
+
+
+Distributed Kernels
+-------------------
+
+Triton-distributed provides optimized distributed kernels for both NVIDIA and AMD GPUs:
+
+- :doc:`kernels/index`
+
+Layer Abstractions
+------------------
+
+High-level layer abstractions for easier model integration:
+
+- :doc:`layers/index`
+
+Model Implementations
+---------------------
+
+End-to-end model implementations with distributed inference support:
+
+- :doc:`models/index`
 
 
 Python API
@@ -38,8 +67,44 @@ Python API
 
 .. toctree::
    :maxdepth: 10
+   :caption: Kernels & Layers
+   :hidden:
+
+   kernels/index
+   layers/index
+   models/index
+
+
+.. toctree::
+   :maxdepth: 10
    :caption: Python API
    :hidden:
 
    python-api/triton-dist.language
    python-api/triton-dist.semantics
+
+
+.. toctree::
+   :maxdepth: 10
+   :caption: Advanced Topics
+   :hidden:
+
+   amd-perf
+   prepare_nvshmem
+   e2e
+   update-upstream
+
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Examples
+   :hidden:
+
+   examples/GALLERY_HEADER
+
+
+.. toctree::
+   :hidden:
+
+   README
+   autotuner-cn
