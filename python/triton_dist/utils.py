@@ -37,7 +37,7 @@ import warnings
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict
 
 import numpy as np
 import packaging.version
@@ -45,6 +45,7 @@ import torch
 import triton
 import triton.backends
 import triton_dist
+import dataclasses
 
 
 def is_cuda():
@@ -799,3 +800,533 @@ def rand_tensor(shape, dtype: torch.dtype, device: torch.device | int | str = "c
         return torch.randint(0, 2**32, shape, dtype=dtype, device=device)
 
     raise Exception(f"rand for {dtype} not implemented")
+
+
+################################################################################
+"""
+Lazy tensor allocation utilities.
+
+This module provides a lazy allocation mechanism for tensors, allowing users to:
+1. Create tensor specifications without actually allocating memory
+2. Query the total memory requirement before allocation
+3. Materialize all tensors at once when ready
+
+This is particularly useful for nvshmem tensors where knowing the total memory
+requirement upfront is important.
+
+Usage:
+    from ditron_kernel.utils.lazy_allocator import LazyAllocator, LazyTensor
+    
+    # Create allocator with custom tensor creation function
+    allocator = LazyAllocator(
+        create_tensor_fn=nvshmem_create_tensor,
+        lazy=True
+    )
+    
+    # Create lazy tensors (no actual allocation yet)
+    buf1 = allocator.create_tensor("buffer1", [1024, 256], torch.bfloat16)
+    buf2 = allocator.create_tensor("buffer2", [512], torch.int32, fill_value=0)
+    
+    # Query total size before allocation
+    print(f"Total memory needed: {allocator.get_total_size_gb():.2f} GB")
+    
+    # Actually allocate all tensors
+    allocator.sync()
+    
+    # Now tensors can be used normally
+    buf1[0] = 1.0
+"""
+
+
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size in bytes for a given dtype."""
+    dtype_sizes = {
+        torch.float32: 4,
+        torch.float16: 2,
+        torch.bfloat16: 2,
+        torch.int32: 4,
+        torch.int64: 8,
+        torch.uint64: 8,
+        torch.int8: 1,
+        torch.uint8: 1,
+        torch.bool: 1,
+        torch.float64: 8,
+    }
+    return dtype_sizes.get(dtype, torch.tensor([], dtype=dtype).element_size())
+
+
+@dataclasses.dataclass
+class LazyTensorSpec:
+    """Specification for a lazy tensor."""
+    name: str
+    shape: List[int]
+    dtype: torch.dtype
+    fill_value: Optional[float] = None  # Value to fill after allocation, None means no fill
+
+    @property
+    def numel(self) -> int:
+        """Total number of elements."""
+        result = 1
+        for s in self.shape:
+            result *= s
+        return result
+
+    @property
+    def nbytes(self) -> int:
+        """Total size in bytes."""
+        return self.numel * get_dtype_size(self.dtype)
+
+
+class LazyTensor:
+    """
+    A lazy tensor wrapper that delays allocation until sync() is called.
+    
+    Before sync(): records the shape/dtype, allows querying size
+    After sync(): behaves like a normal tensor
+    
+    This class implements __torch_function__ to be compatible with PyTorch
+    operations like torch.empty_like(), torch.zeros_like(), etc.
+    """
+
+    def __init__(self, spec: LazyTensorSpec, allocator: 'LazyAllocator'):
+        self._spec = spec
+        self._allocator = allocator
+        self._tensor: Optional[torch.Tensor] = None
+
+    @property
+    def is_materialized(self) -> bool:
+        """Check if the tensor has been allocated."""
+        return self._tensor is not None
+
+    @property
+    def spec(self) -> LazyTensorSpec:
+        """Get the tensor specification."""
+        return self._spec
+
+    @property
+    def shape(self) -> torch.Size:
+        """Get the shape (available before materialization)."""
+        if self._tensor is not None:
+            return self._tensor.shape
+        return torch.Size(self._spec.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Get the dtype (available before materialization)."""
+        if self._tensor is not None:
+            return self._tensor.dtype
+        return self._spec.dtype
+
+    @property
+    def nbytes(self) -> int:
+        """Get the size in bytes (available before materialization)."""
+        return self._spec.nbytes
+
+    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
+        """Get size like torch.Tensor.size()."""
+        if dim is None:
+            return self.shape
+        return self.shape[dim]
+
+    def fill_(self, value: float) -> 'LazyTensor':
+        """
+        Fill the tensor with a value.
+        If not materialized, the fill is deferred until sync().
+        """
+        if self._tensor is not None:
+            self._tensor.fill_(value)
+        else:
+            self._spec.fill_value = value
+        return self
+
+    def zero_(self) -> 'LazyTensor':
+        """Zero the tensor."""
+        return self.fill_(0)
+
+    def _materialize(self, tensor: torch.Tensor) -> None:
+        """Called by allocator to set the actual tensor."""
+        self._tensor = tensor
+        # Apply pending fill if any
+        if self._spec.fill_value is not None:
+            self._tensor.fill_(self._spec.fill_value)
+
+    def _ensure_materialized(self) -> None:
+        """Ensure the tensor is materialized before access."""
+        if self._tensor is None:
+            raise RuntimeError(f"LazyTensor '{self._spec.name}' has not been materialized. "
+                               f"Call allocator.sync() or allocator.materialize() first.")
+
+    @property
+    def tensor(self) -> torch.Tensor:
+        """Get the underlying tensor (must be materialized)."""
+        self._ensure_materialized()
+        return self._tensor
+
+    def get_underlying_tensor(self) -> Optional[torch.Tensor]:
+        """Get the underlying tensor, or None if not materialized."""
+        return self._tensor
+
+    # ==================== Tensor-like operations ====================
+
+    def __getitem__(self, key):
+        self._ensure_materialized()
+        return self._tensor[key]
+
+    def __setitem__(self, key, value):
+        self._ensure_materialized()
+        self._tensor[key] = value
+
+    def copy_(self, src) -> 'LazyTensor':
+        self._ensure_materialized()
+        self._tensor.copy_(src)
+        return self
+
+    def data_ptr(self) -> int:
+        self._ensure_materialized()
+        return self._tensor.data_ptr()
+
+    def is_contiguous(self) -> bool:
+        if self._tensor is not None:
+            return self._tensor.is_contiguous()
+        return True  # Assume contiguous before materialization
+
+    def view(self, *args):
+        self._ensure_materialized()
+        return self._tensor.view(*args)
+
+    def reshape(self, *args):
+        self._ensure_materialized()
+        return self._tensor.reshape(*args)
+
+    def contiguous(self):
+        self._ensure_materialized()
+        return self._tensor.contiguous()
+
+    def numel(self) -> int:
+        if self._tensor is not None:
+            return self._tensor.numel()
+        return self._spec.numel
+
+    def dim(self) -> int:
+        if self._tensor is not None:
+            return self._tensor.dim()
+        return len(self._spec.shape)
+
+    def stride(self, dim: Optional[int] = None):
+        self._ensure_materialized()
+        if dim is None:
+            return self._tensor.stride()
+        return self._tensor.stride(dim)
+
+    @property
+    def device(self) -> torch.device:
+        if self._tensor is not None:
+            return self._tensor.device
+        return torch.device("cuda")  # Default to CUDA
+
+    @property
+    def data(self):
+        self._ensure_materialized()
+        return self._tensor.data
+
+    def __getattr__(self, name: str):
+        """Forward attribute access to underlying tensor for compatibility."""
+        # Avoid infinite recursion for internal attributes
+        if name.startswith('_'):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+        # Check if materialized
+        if self._tensor is None:
+            raise RuntimeError(f"LazyTensor '{self._spec.name}' has not been materialized. "
+                               f"Cannot access attribute '{name}'. Call allocator.sync() first.")
+
+        # Forward to underlying tensor
+        return getattr(self._tensor, name)
+
+    def __repr__(self) -> str:
+        if self._tensor is not None:
+            return f"LazyTensor(materialized, {self._spec.name}, shape={list(self._tensor.shape)}, dtype={self._tensor.dtype})"
+        return f"LazyTensor(pending, {self._spec.name}, shape={self._spec.shape}, dtype={self._spec.dtype}, nbytes={self._spec.nbytes})"
+
+    # ==================== PyTorch compatibility ====================
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        """
+        Handle PyTorch functions that receive LazyTensor as input.
+        Automatically unwrap LazyTensor to underlying tensor.
+        
+        This makes LazyTensor compatible with functions like:
+        - torch.empty_like()
+        - torch.zeros_like()
+        - torch.ones_like()
+        - etc.
+        """
+        if kwargs is None:
+            kwargs = {}
+
+        # Unwrap LazyTensor arguments to underlying tensors
+        def unwrap(arg):
+            if isinstance(arg, LazyTensor):
+                arg._ensure_materialized()
+                return arg._tensor
+            elif isinstance(arg, (list, tuple)):
+                return type(arg)(unwrap(a) for a in arg)
+            elif isinstance(arg, dict):
+                return {k: unwrap(v) for k, v in arg.items()}
+            return arg
+
+        args = unwrap(args)
+        kwargs = unwrap(kwargs)
+
+        return func(*args, **kwargs)
+
+
+class LazyAllocator:
+    """
+    Lazy allocator for tensors.
+    
+    This allocator can delay tensor allocation until sync() is called,
+    allowing users to query the total memory requirement before allocation.
+    
+    Args:
+        create_tensor_fn: Function to create a tensor, signature: (shape, dtype) -> Tensor
+        free_tensor_fn: Optional function to free a tensor, signature: (tensor) -> None
+        lazy: If True, delay allocation until sync() is called.
+              If False, allocate immediately (default behavior).
+    
+    Usage:
+        allocator = LazyAllocator(
+            create_tensor_fn=nvshmem_create_tensor,
+            free_tensor_fn=nvshmem_free_tensor_sync,
+            lazy=True
+        )
+        
+        # Create lazy tensors (no actual allocation)
+        tensor1 = allocator.create_tensor("buf1", [1024, 256], torch.bfloat16)
+        tensor2 = allocator.create_tensor("buf2", [512], torch.int32)
+        
+        # Query total size before allocation
+        total_bytes = allocator.get_total_size()
+        print(f"Total memory needed: {total_bytes / 1e9:.2f} GB")
+        
+        # Actually allocate all tensors
+        allocator.sync()
+        
+        # Now tensors can be used normally
+        tensor1.fill_(0)
+    """
+
+    def __init__(self, create_tensor_fn: Callable[[List[int], torch.dtype], torch.Tensor],
+                 free_tensor_fn: Optional[Callable[[torch.Tensor], None]] = None, lazy: bool = False):
+        """
+        Initialize the allocator.
+        
+        Args:
+            create_tensor_fn: Function to create a tensor, signature: (shape, dtype) -> Tensor
+            free_tensor_fn: Optional function to free a tensor, signature: (tensor) -> None
+            lazy: If True, delay allocation until sync() is called.
+                  If False, allocate immediately (default behavior).
+        """
+        self._create_tensor_fn = create_tensor_fn
+        self._free_tensor_fn = free_tensor_fn
+        self._lazy = lazy
+        self._lazy_tensors: List[LazyTensor] = []
+        self._materialized = False
+        self._total_bytes = 0
+
+    @property
+    def lazy(self) -> bool:
+        """Check if allocator is in lazy mode."""
+        return self._lazy
+
+    @property
+    def is_materialized(self) -> bool:
+        """Check if all tensors have been materialized."""
+        return self._materialized or not self._lazy
+
+    def create_tensor(self, name: str, shape: List[int], dtype: torch.dtype,
+                      fill_value: Optional[float] = None) -> LazyTensor:
+        """
+        Create a (potentially lazy) tensor.
+        
+        Args:
+            name: Name for debugging/tracking
+            shape: Tensor shape
+            dtype: Tensor dtype
+            fill_value: Optional value to fill after allocation
+        
+        Returns:
+            LazyTensor that wraps the allocation
+        """
+        spec = LazyTensorSpec(name=name, shape=list(shape), dtype=dtype, fill_value=fill_value)
+        lazy_tensor = LazyTensor(spec, self)
+
+        self._total_bytes += spec.nbytes
+        self._lazy_tensors.append(lazy_tensor)
+
+        if not self._lazy or self._materialized:
+            # Allocate immediately
+            tensor = self._create_tensor_fn(shape, dtype)
+            lazy_tensor._materialize(tensor)
+
+        return lazy_tensor
+
+    def get_total_size(self) -> int:
+        """
+        Get the total size in bytes.
+        
+        This can be called before sync() to query the total memory needed.
+        """
+        return self._total_bytes
+
+    def get_total_size_gb(self) -> float:
+        """Get the total size in GB."""
+        return self._total_bytes / (1024**3)
+
+    def get_total_size_mb(self) -> float:
+        """Get the total size in MB."""
+        return self._total_bytes / (1024**2)
+
+    def get_tensor_breakdown(self) -> Dict[str, int]:
+        """
+        Get a breakdown of memory usage by tensor.
+        
+        Returns:
+            Dict mapping tensor name to size in bytes
+        """
+        return {lt._spec.name: lt._spec.nbytes for lt in self._lazy_tensors}
+
+    def print_memory_breakdown(self) -> None:
+        """Print a human-readable breakdown of memory usage."""
+        breakdown = self.get_tensor_breakdown()
+        print(f"{'Tensor Name':<60} {'Size (Bytes)':>12} {'Size (GB)':>12}")
+        print("-" * 86)
+        for name, nbytes in sorted(breakdown.items(), key=lambda x: -x[1]):
+            print(f"{name:<60} {nbytes:>12} {nbytes / 1e9:>12.4f}")
+        print("-" * 86)
+        print(f"{'TOTAL':<60} {self._total_bytes / 1e6:>12.2f} {self._total_bytes / 1e9:>12.4f}")
+
+    def sync(self) -> None:
+        """
+        Materialize all lazy tensors.
+        
+        This actually allocates the memory for all pending tensors.
+        """
+        if self._materialized:
+            return
+
+        if not self._lazy:
+            self._materialized = True
+            return
+
+        # Allocate all pending tensors
+        for lazy_tensor in self._lazy_tensors:
+            if not lazy_tensor.is_materialized:
+                tensor = self._create_tensor_fn(lazy_tensor._spec.shape, lazy_tensor._spec.dtype)
+                lazy_tensor._materialize(tensor)
+
+        self._materialized = True
+
+    def materialize(self) -> None:
+        """Alias for sync()."""
+        self.sync()
+
+    def free_tensor(self, tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> None:
+        """
+        Free a tensor using the configured free function.
+        
+        Handles both LazyTensor and regular torch.Tensor.
+        """
+        if tensor_or_lazy is None:
+            return
+
+        if self._free_tensor_fn is None:
+            return
+
+        underlying = tensor_or_lazy
+        if isinstance(tensor_or_lazy, LazyTensor):
+            underlying = tensor_or_lazy.get_underlying_tensor()
+
+        if underlying is not None:
+            self._free_tensor_fn(underlying)
+
+    def __len__(self) -> int:
+        """Number of tensors managed by this allocator."""
+        return len(self._lazy_tensors)
+
+
+# Convenience function for getting underlying tensor
+def get_underlying_tensor(tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> Optional[torch.Tensor]:
+    """
+    Get the underlying tensor from a LazyTensor or return the tensor as-is.
+    
+    Args:
+        tensor_or_lazy: LazyTensor, torch.Tensor, or None
+    
+    Returns:
+        The underlying torch.Tensor, or None
+    """
+    if tensor_or_lazy is None:
+        return None
+    if isinstance(tensor_or_lazy, LazyTensor):
+        return tensor_or_lazy.get_underlying_tensor()
+    return tensor_or_lazy
+
+
+def nvshmem_free_lazy_tensor(tensor_or_lazy):
+    """
+    Free a nvshmem tensor, handling both LazyTensor and regular torch.Tensor.
+    """
+    underlying = get_underlying_tensor(tensor_or_lazy)
+    if underlying is not None:
+        nvshmem_free_tensor_sync(underlying)
+
+
+class NVSHMEMLazyAllocator(LazyAllocator):
+    """
+    Lazy allocator specifically for nvshmem tensors.
+    
+    This is a convenience wrapper around LazyAllocator that uses
+    nvshmem_create_tensor and nvshmem_free_tensor_sync by default.
+    
+    Usage:
+        allocator = NVSHMEMLazyAllocator(lazy=True)
+        
+        # Create lazy tensors (no actual allocation)
+        tensor1 = allocator.create_tensor("buf1", [1024, 256], torch.bfloat16)
+        tensor2 = allocator.create_tensor("buf2", [512], torch.int32)
+        
+        # Query total size before allocation
+        total_bytes = allocator.get_total_nvshmem_size()
+        print(f"Total nvshmem needed: {total_bytes / 1e9:.2f} GB")
+        
+        # Actually allocate all tensors
+        allocator.sync()
+        
+        # Now tensors can be used normally
+        tensor1.fill_(0)
+    """
+
+    def __init__(self, lazy: bool = False):
+        """
+        Initialize the nvshmem allocator.
+        
+        Args:
+            lazy: If True, delay allocation until sync() is called.
+                  If False, allocate immediately (default behavior).
+        """
+        super().__init__(create_tensor_fn=nvshmem_create_tensor, free_tensor_fn=nvshmem_free_tensor_sync, lazy=lazy)
+
+    # Convenience aliases for backward compatibility
+    def get_total_nvshmem_size(self) -> int:
+        """Get the total nvshmem size in bytes."""
+        return self.get_total_size()
+
+    def get_total_nvshmem_size_gb(self) -> float:
+        """Get the total nvshmem size in GB."""
+        return self.get_total_size_gb()
+
+    def get_total_nvshmem_size_mb(self) -> float:
+        """Get the total nvshmem size in MB."""
+        return self.get_total_size_mb()
