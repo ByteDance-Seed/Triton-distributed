@@ -160,7 +160,7 @@ class DispatchCombineContext:
             [ep_config.local_world_size * max_tokens * ep_config.topk, ep_config.topk], NVSHMEM_SIGNAL_DTYPE)
         intra_node_dispatch_skipped_token_topk_mapping_indices.fill_(-1)
 
-        nvshmem_barrier_all_on_stream()
+        nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
         return DispatchCombineContext(
             ep_config=ep_config,
@@ -578,6 +578,7 @@ class EPAll2AllLayer(torch.nn.Module):
         assert input.dtype == self.dtype
         current_stream = torch.cuda.current_stream()
         # self.send_buf.fill_(0)
+        self.a2a_ctx.token_send_buf_rdma.fill_(0)
         # reuse dispatch_output_buf as combine input
         self.a2a_ctx.dispatch_output_buf[:input.shape[0]].copy_(input)
         combine_input = self.a2a_ctx.dispatch_output_buf[:input.shape[0]]
