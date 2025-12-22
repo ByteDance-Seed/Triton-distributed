@@ -33,6 +33,7 @@ import torch.distributed as dist
 
 # Set default environment variables
 os.environ.setdefault('TRITON_DIST_SHMEM_BACKEND', 'mori_shmem')
+os.environ["MORI_SHMEM_HEAP_SIZE"] = "1G"
 
 _test_dir = os.path.dirname(os.path.abspath(__file__))
 _workspace_root = os.path.abspath(os.path.join(_test_dir, "../../../.."))

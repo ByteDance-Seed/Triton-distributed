@@ -14,6 +14,7 @@ echo "=========================================="
 # Install mori Python interface (this will also build and install C++ library via CMake)
 echo "Installing mori..."
 cd "${MORI_DIR}"
+pip install -r requirements-build.txt
 pip3 install . --no-build-isolation
 
 echo "Mori build and installation complete"
