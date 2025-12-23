@@ -31,12 +31,11 @@ from functools import partial
 from transformers import AutoConfig
 
 import triton
-import nvshmem.core
 from triton_dist.layers.nvidia.tp_moe import TP_MoE
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import initialize_distributed, dist_print, nvshmem_barrier_all_on_stream
+from triton_dist.utils import finalize_distributed, initialize_distributed, dist_print, nvshmem_barrier_all_on_stream, rand_tensor
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -46,13 +45,6 @@ THRESHOLD_MAP = {
     torch.int8: 0,
     torch.int32: 0,
 }
-
-
-def rand_tensor(shape: list[int], dtype: torch.dtype):
-    if dtype in [torch.int32, torch.int8]:
-        return torch.randint(-127, 128, shape, dtype=dtype).cuda()
-    else:
-        return torch.rand(shape, dtype=dtype).cuda() / 10
 
 
 def make_cuda_graph(mempool, func):
@@ -96,7 +88,7 @@ if __name__ == "__main__":
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    TP_GROUP = initialize_distributed()
+    TP_GROUP = initialize_distributed(args.seed)
 
     DTYPE = DTYPE_MAP[args.dtype]
     ATOL = THRESHOLD_MAP[DTYPE]
@@ -112,7 +104,7 @@ if __name__ == "__main__":
     BSZ = args.bsz
     SEQ_LEN = args.seq_len
     K = mlp.hidden_size
-    x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE)
+    x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE) * 2
     hf_mlp = hf_mlp.cuda()
 
     # Preicision Test
@@ -171,5 +163,4 @@ if __name__ == "__main__":
     del triton_dist_graph
 
     mlp.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group(TP_GROUP)
+    finalize_distributed()

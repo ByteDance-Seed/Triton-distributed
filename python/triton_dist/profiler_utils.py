@@ -300,6 +300,33 @@ def get_torch_prof_ctx(do_prof: bool):
     return ctx
 
 
+class AutoExportProfiler:
+
+    def __init__(self, trace_file: str | None):
+        if trace_file is None:
+            self.ctx = nullcontext()
+        else:
+            self.ctx = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                with_stack=False,
+            )
+        self.trace_file = trace_file
+
+    def __enter__(self):
+        self.ctx.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.ctx:
+            self.ctx.__exit__(exc_type, exc_val, exc_tb)
+            if self.trace_file is not None:
+                Path(self.trace_file).parent.mkdir(exist_ok=True, parents=True)
+                self.ctx.export_chrome_trace(self.trace_file)
+
+
 def perf_func_with_l2_reset(func, iters, warmup_iters):
     # total 256MB is enough to clear L2 cache
     cache = torch.zeros((64 * 1024 * 1024, ), dtype=torch.int, device="cuda")

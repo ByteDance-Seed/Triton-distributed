@@ -210,7 +210,6 @@ if __name__ == "__main__":
             B = rand_tensor((args.N, K_per_rank), dtype=input_dtype, device="cuda").T
         else:
             B = rand_tensor((K_per_rank, args.N), dtype=input_dtype, device="cuda")
-        B *= 0.01 * scale
         if args.has_bias:
             bias = rand_tensor((M, args.N), dtype=input_dtype, device="cuda")
         else:

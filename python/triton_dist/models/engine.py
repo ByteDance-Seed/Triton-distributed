@@ -107,7 +107,7 @@ class Engine:
     def get_ctx(self, input_ids: torch.LongTensor):
         input_len = input_ids.size(1)
         past_len = self.kv_cache.get_kv_len()
-        position_ids = past_len[:, None].long() + torch.arange(input_len).long().cuda()
+        position_ids = past_len[:, None].long() + torch.arange(input_len, device="cuda", dtype=torch.long)
         return position_ids
 
     def serve(self, input_ids: torch.Tensor, gen_len: int):

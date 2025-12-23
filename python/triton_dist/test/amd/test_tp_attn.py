@@ -33,7 +33,7 @@ from triton_dist.layers.amd.tp_attn import TP_Attn, _set_cos_sin_cache
 from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.profiler_utils import group_profile, perf_func
-from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -43,6 +43,8 @@ THRESHOLD_MAP = {
     torch.int8: 0,
     torch.int32: 0,
 }
+
+DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16}
 
 
 def check_allclose(out: torch.Tensor, golden: torch.Tensor, atol=1e-3, rtol=1e-3):
@@ -57,13 +59,6 @@ def check_allclose(out: torch.Tensor, golden: torch.Tensor, atol=1e-3, rtol=1e-3
         dist_print(f"❗ [RANK {RANK}] Max difference: {max_diff.item()} (atol={atol}, rtol={rtol})")
         dist_print(f"Output: {out}\nGolden: {golden}", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
         assert False, f"❌ [RANK {RANK}] Output mismatch."
-
-
-def rand_tensor(shape: list[int], dtype: torch.dtype):
-    if dtype in [torch.int32, torch.int8]:
-        return torch.randint(-127, 128, shape, dtype=dtype).cuda()
-    else:
-        return torch.rand(shape, dtype=dtype).cuda() / 10
 
 
 def make_cuda_graph(mempool, func):
@@ -87,7 +82,7 @@ def parse_args():
     parser.add_argument("--model", default="Qwen/Qwen3-32B", type=str, help="HuggingFace model name")
     parser.add_argument("--warmup", default=20, type=int, help="warmup iterations")
     parser.add_argument("--iters", default=100, type=int, help="perf iterations")
-    parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
+    parser.add_argument("--dtype", default="bfloat16", choices=DTYPE_MAP.keys(), help="data type")
     parser.add_argument("--mode", default="prefill", type=str, choices=["prefill", "decode"],
                         help="mode of operation: prefill or decode")
 
@@ -99,11 +94,6 @@ def parse_args():
 
     return parser.parse_args()
 
-
-DTYPE_MAP = {
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-}
 
 if __name__ == "__main__":
     args = parse_args()
@@ -137,7 +127,7 @@ if __name__ == "__main__":
     kv_cache = KV_Cache(
         num_layers=1,
         batch_size=BSZ,
-        max_length=SEQ_LEN + 8,
+        max_length=SEQ_LEN + 128,
         kv_heads=8,
         head_dim=hf_attn.head_dim,
         dtype=DTYPE,
@@ -155,7 +145,7 @@ if __name__ == "__main__":
     if MODE == "prefill":
         # Preicision Test
         position_ids = torch.arange(0, SEQ_LEN, dtype=torch.int64, device="cuda").unsqueeze(0).expand(BSZ, -1)
-        x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE)
+        x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE) / 10
         # golden prefill from HF
         with torch.inference_mode():
             t = torch.arange(4096, device="cuda", dtype=hf_model.model.rotary_emb.inv_freq.cuda().dtype)
@@ -181,7 +171,7 @@ if __name__ == "__main__":
         check_allclose(out_triton, out, atol=ATOL, rtol=RTOL)
 
         # Efficiency Test
-        x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE)
+        x = rand_tensor([BSZ, SEQ_LEN, K], dtype=DTYPE) / 10
         position_ids = torch.arange(0, SEQ_LEN, dtype=torch.int64, device="cuda").unsqueeze(0).expand(BSZ, -1)
         kv_cache.kv_offset.fill_(0)
         dist_x = x.split(bsz_per_rank, dim=0)[RANK].contiguous()
@@ -216,7 +206,7 @@ if __name__ == "__main__":
     else:
         # decoce
         # torch decode
-        x = rand_tensor([BSZ, 1, K], dtype=DTYPE)
+        x = rand_tensor([BSZ, 1, K], dtype=DTYPE) / 10
         position_ids = torch.arange(SEQ_LEN, SEQ_LEN + 1, dtype=torch.int64, device="cuda").unsqueeze(0).expand(BSZ, -1)
         kv_cache.kv_offset.fill_(SEQ_LEN)
         kv_cache.rand_fill_kv_cache(SEQ_LEN)

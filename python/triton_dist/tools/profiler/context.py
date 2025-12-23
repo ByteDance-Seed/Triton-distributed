@@ -26,7 +26,8 @@
 import torch
 
 PROFILER_ENTRY_DTYPE = torch.uint64
-EMPTY_VALUE = 0xFFFFFFFFFFFFFFFF
+# 0xFFFFFFFFFFFFFFFF can't run with torch.profiler: https://github.com/pytorch/pytorch/issues/157728
+EMPTY_VALUE = 0x7FFFFFFFFFFFFFFF
 # Whether to export trace. Default is True.
 export_trace_on = True
 

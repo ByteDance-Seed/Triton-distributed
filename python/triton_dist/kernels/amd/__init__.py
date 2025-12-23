@@ -22,7 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from .all_gather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context
+from .allgather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context
 from .gemm_reduce_scatter import gemm_rs_intra_node, create_gemm_rs_intra_node_context
 
 __all__ = [

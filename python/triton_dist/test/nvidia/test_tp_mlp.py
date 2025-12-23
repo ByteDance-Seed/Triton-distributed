@@ -31,13 +31,12 @@ from functools import partial
 from transformers import AutoConfig
 
 import triton
-import nvshmem.core
 from triton_dist.kernels.allreduce import to_allreduce_method
 from triton_dist.layers.nvidia.tp_mlp import TP_MLP
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import initialize_distributed, dist_print, nvshmem_barrier_all_on_stream
+from triton_dist.utils import initialize_distributed, finalize_distributed, dist_print, nvshmem_barrier_all_on_stream, rand_tensor
 
 from triton_dist.kernels.allreduce import get_allreduce_methods
 
@@ -54,13 +53,6 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
 }
-
-
-def rand_tensor(shape: list[int], dtype: torch.dtype):
-    if dtype in [torch.int32, torch.int8]:
-        return torch.randint(-127, 128, shape, dtype=dtype).cuda()
-    else:
-        return torch.rand(shape, dtype=dtype).cuda() / 10
 
 
 def make_cuda_graph(mempool, func):
@@ -150,7 +142,7 @@ if __name__ == "__main__":
     mlp._init_parameters(hf_mlp, verbose=True)
     M = args.M
     K = hf_mlp.gate_proj.weight.shape[1]
-    x = rand_tensor([M, K], dtype=DTYPE)
+    x = rand_tensor([M, K], dtype=DTYPE) / 4
 
     # Golden reference from HuggingFace
     with torch.inference_mode():
@@ -224,5 +216,4 @@ if __name__ == "__main__":
 
     # Final cleanup
     mlp.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group(TP_GROUP)
+    finalize_distributed()

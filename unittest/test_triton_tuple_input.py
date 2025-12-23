@@ -31,7 +31,7 @@ import itertools
 
 from triton_dist.test.utils import assert_allclose
 from triton_dist.profiler_utils import perf_func
-from triton.language.extra.cuda.language_extra import __syncthreads
+from triton_dist.language.extra.language_extra import __syncthreads
 
 
 @triton.jit

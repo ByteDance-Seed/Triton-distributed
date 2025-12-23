@@ -35,7 +35,7 @@ from triton.runtime.driver import driver
 import triton_dist
 from triton_dist.language.extra.language_extra import st
 from hip import hip
-from triton_dist.utils import HIP_CHECK, launch_cooperative_grid_options
+from triton_dist.utils import HIP_CHECK
 from typing import Optional, List
 import pyrocshmem
 from triton_dist.kernels.amd.common_ops import barrier_all_ipc_kernel_v2, barrier_on_this_grid
@@ -920,7 +920,6 @@ def create_ag_gemm_intra_node_context(max_M, N, K, input_dtype: torch.dtype, out
         rank (int): current rank
         num_ranks (int): total number of ranks
         ag_streams (torch.cuda.streams.Stream, optional): The stream used for allgather, if not provided, create a new one. Defaults to None.
-        serial (bool, optional): Make the execution serialized, for debug. Defaults to False.
         use_copy_kernel (bool, optional): whether to use SM-based copy kernel. Defaults to False.
         comm_sms (int, optional): number of SMs to reserve for comm. Defaults to 0.
 
@@ -1022,9 +1021,9 @@ def fused_ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
 
 DEFAULT_CONFIG = triton.Config(
     {
-        "BLOCK_SIZE_M": 128,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
+        "BLOCK_SIZE_M": 256,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1,
         "NUM_XCDS": 8,
         "matrix_instr_nonkdim": 16,
@@ -1049,19 +1048,19 @@ def ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, ctx
     N_per_rank, _ = B.shape
     current_stream = torch.cuda.current_stream()
     num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
+    # for amd gpus, we should not use launch_cooperative_grid_options, which will lead to bubbles between kernels
     local_copy_and_barrier_all_ipc_kernel[(num_sms, )](
         ctx.rank, A, ctx.workspace_tensors[ctx.rank], M_per_rank, K, A.stride(0), A.stride(1),
         ctx.workspace_tensors[ctx.rank].stride(0), ctx.workspace_tensors[ctx.rank].stride(1), ctx.num_ranks,
         ctx.comm_buf_ptr, barrier_ptr=ctx.barrier_tensors[ctx.rank], chunk_counters_ptr=ctx.chunk_counters,
         sync_grid_buf_ptr=ctx.sync_grid_buf, m_chunk_num=ctx.barrier_tensors[ctx.rank].shape[0],
-        num_chunks=ctx.chunk_counters.shape[0], BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=16,
-        **launch_cooperative_grid_options())
+        num_chunks=ctx.chunk_counters.shape[0], BLOCK_SIZE_M=128, BLOCK_SIZE_N=256, num_warps=16)
 
     if use_fused_kernel:
         # Use the new fused kernel
         return fused_ag_gemm_intra_node_op(A, B, C, ctx, gemm_config)
 
-    # Original implementation with separate kernels
+    # implementation with separate kernels
     for ag_stream in ctx.ag_streams:
         ag_stream.wait_stream(current_stream)
 
@@ -1164,7 +1163,6 @@ def gemm_only(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallel
                                           C.stride(0), C.stride(1), ctx.rank, ctx.num_ranks,
                                           ctx.barrier_tensors[ctx.rank], M_PER_CHUNK=ctx.M_PER_CHUNK, NUM_SMS=NUM_SMS,
                                           **gemm_config.all_kwargs())
-
     return C
 
 

@@ -32,20 +32,29 @@ import torch
 import torch.multiprocessing as mp
 import logging
 import triton
-from triton_dist.kernels.nvidia.gemm import (matmul, matmul_descriptor_persistent, matmul_persistent, matmul_tma,
-                                             matmul_tma_persistent)
 from triton_dist.profiler_utils import perf_func
-from triton_dist.utils import wait_until_max_gpu_clock_or_warning
+from triton_dist.utils import wait_until_max_gpu_clock_or_warning, is_cuda
 from triton_dist.tune import load_autotune_data, pretty_triton_config_repr
 
-MATMUL_FUNC = {
-    "matmul_torch": torch.matmul,
-    "matmul": matmul,
-    "matmul_tma": matmul_tma,
-    "matmul_persistent": matmul_persistent,
-    "matmul_tma_persistent": matmul_tma_persistent,
-    "matmul_descriptor_persistent": matmul_descriptor_persistent,
-}
+
+def get_matmul_function():
+    if is_cuda():
+        from triton_dist.kernels.nvidia.gemm import (matmul, matmul_descriptor_persistent, matmul_persistent,
+                                                     matmul_tma, matmul_tma_persistent)
+        return {
+            "matmul_torch": torch.matmul,
+            "matmul": matmul,
+            "matmul_tma": matmul_tma,
+            "matmul_persistent": matmul_persistent,
+            "matmul_tma_persistent": matmul_tma_persistent,
+            "matmul_descriptor_persistent": matmul_descriptor_persistent,
+        }
+    else:
+        from triton_dist.kernels.amd.gemm import matmul_persistent_triton as matmul_persistent, matmul_triton as matmul
+        return {"matmul": matmul, "matmul_persistent": matmul_persistent, "matmul_torch": torch.matmul}
+
+
+MATMUL_FUNC = get_matmul_function()
 
 DTYPE_MAP = {
     "float16": torch.float16,
@@ -93,7 +102,6 @@ def pretty_time(duration_ms):
 
 
 def perf_matmul(M, N, K, trans_b, dtype, func, iters=10, warmup_iters=5, verbose=False):
-
     wait_until_max_gpu_clock_or_warning()
     A = torch.randn(M, K, dtype=dtype, device="cuda")
     if trans_b:
@@ -124,8 +132,9 @@ def perf_matmuls(device_id, M_list, N, K, trans_b, dtype, impl, global_results, 
                  verbose=False):
     func = MATMUL_FUNC[impl]
     local_results = {}
-    import pynvml
-    pynvml.nvmlInit()
+    if is_cuda():
+        import pynvml
+        pynvml.nvmlInit()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
     with torch.cuda.device(device_id):
@@ -134,7 +143,9 @@ def perf_matmuls(device_id, M_list, N, K, trans_b, dtype, impl, global_results, 
                                            verbose=verbose)
 
     global_results[device_id] = local_results
-    pynvml.nvmlShutdown()
+    if is_cuda():
+        import pynvml
+        pynvml.nvmlShutdown()
     return local_results
 
 
@@ -372,7 +383,9 @@ def do_tune(args):
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = f"{gpu_name}_{timestamp}"
-    outfile = Path(f"autotune_{args.impl}_M_{args.M_range}_N_{N}_K_{K}_dtype_{args.dtype}_{suffix}.csv")
+    args.trans_a = False
+    trans_tag = "NT"[args.trans_a] + "NT"[args.trans_b]
+    outfile = Path(f"autotune_{args.impl}_M_{args.M_range}_N_{N}_K_{K}_dtype_{args.dtype}_{trans_tag}_{suffix}.csv")
     with open(outfile, "w") as f:
         f.write("M,N,K,duration_ms\n")
         for M in Ms:

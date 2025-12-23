@@ -37,7 +37,8 @@ from triton_dist.kernels.nvidia import (
 from triton_dist.kernels.nvidia.all_to_all_single_gemm import gemm_only
 from triton_dist.profiler_utils import group_profile
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import (finalize_distributed, initialize_distributed, is_fp8_dtype, dist_print, sleep_async)
+from triton_dist.utils import (finalize_distributed, initialize_distributed, is_fp8_dtype, dist_print, sleep_async,
+                               rand_tensor)
 
 
 def make_cuda_graph(mempool, func):
@@ -79,6 +80,36 @@ class PerfResult:
         return (f"{self.name}: total {self.total_ms:.3f} ms, {self.time1} {self.gemm_time_ms:.3f} ms"
                 f", {self.time2} {self.comm_time_ms:.3f} ms")
 
+
+def make_data(M, N, K, dtype, scale):
+    # scale = rank + 1  # Different scale for each rank
+    is_int8 = dtype == torch.int8
+    is_fp8 = is_fp8_dtype(dtype)
+    if is_int8:
+        input = torch.randint(-127, 127, (M, K), dtype=dtype, device="cuda")
+        weight = torch.randint(-127, 127, (N, K), dtype=dtype, device="cuda")
+        input_scale = rand_tensor((M, 1), dtype=torch.float32, device="cuda")
+        weight_scale = rand_tensor((1, N), dtype=torch.float32, device="cuda")
+    elif is_fp8:
+        # Generate FP8 tensors with controlled range
+        input_f16 = rand_tensor((M, K), dtype=torch.float16, device="cuda") * scale
+        weight_f16 = rand_tensor((N, K), dtype=torch.float16, device="cuda")
+        input = input_f16.to(dtype)
+        weight = weight_f16.to(dtype)
+        input_scale = rand_tensor((M, 1), dtype=torch.float32, device="cuda")
+        weight_scale = rand_tensor((1, N), dtype=torch.float32, device="cuda")
+    else:
+        input = rand_tensor((M, K), dtype=dtype, device="cuda") * scale
+        weight = rand_tensor((N, K), dtype=dtype, device="cuda")
+        input_scale = None
+        weight_scale = None
+    return input, weight, input_scale, weight_scale
+
+THRESHOLD_MAP = { # => (atol, rtol)
+    torch.int8: (0, 0),
+    torch.float8_e4m3fn: (1e-1, 5e-2),
+    torch.float8_e5m2: (1e-1, 1e-1),
+}
 
 DTYPE_MAP = {
     "int8": torch.int8,
@@ -341,29 +372,7 @@ def run_perf_test(args):
     M = (M // world_size) * world_size
 
     # Create test tensors using flux-style data generation
-    is_int8 = dtype == torch.int8
-    is_fp8 = is_fp8_dtype(dtype)
-
-    scale = rank + 1  # Different scale for each rank
-
-    if is_int8:
-        input = torch.randint(-127, 127, (M, K), dtype=dtype, device="cuda")
-        weight = torch.randint(-127, 127, (N, K), dtype=dtype, device="cuda")
-        input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-        weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-    elif is_fp8:
-        # Generate FP8 tensors with controlled range
-        input_f16 = (torch.rand((M, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-        weight_f16 = (torch.rand((N, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-        input = input_f16.to(dtype)
-        weight = weight_f16.to(dtype)
-        input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-        weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-    else:
-        input = (torch.rand((M, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-        weight = (torch.rand((N, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-        input_scale = None
-        weight_scale = None
+    input, weight, input_scale, weight_scale = make_data(M, N, K, dtype, (rank + 1) * 0.1)
 
     # Create context
     context = create_all_to_all_single_gemm_context(
@@ -380,10 +389,7 @@ def run_perf_test(args):
     torch_result = perf_torch(input, weight, input_scale, weight_scale, warmup=1, iters=1, sp_group=sp_group)
     triton_result = perf_triton(input, weight, input_scale, weight_scale, context, warmup=1, iters=1, sp_group=sp_group)
 
-    # Compare results
-    rtol = 1e-2 if not is_int8 else 0
-    atol = 1e-2 if not is_int8 else 0
-
+    atol, rtol = THRESHOLD_MAP[dtype]
     assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol)
 
 
@@ -403,29 +409,7 @@ def benchmark(args):
     dist_print(f"Benchmarking: M={M}, N={N}, K={K}, dtype={dtype}")
     dist_print(f"Warmup: {args.warmup}, Iterations: {args.iters}")
 
-    is_int8 = dtype == torch.int8
-    is_fp8 = is_fp8_dtype(dtype)
-
-    scale = rank + 1  # Different scale for each rank
-
-    if is_int8:
-        input = torch.randint(-127, 127, (M, K), dtype=dtype, device="cuda")
-        weight = torch.randint(-127, 127, (N, K), dtype=dtype, device="cuda")
-        input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-        weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-    elif is_fp8:
-        # Generate FP8 tensors with controlled range
-        input_f16 = (torch.rand((M, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-        weight_f16 = (torch.rand((N, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-        input = input_f16.to(dtype)
-        weight = weight_f16.to(dtype)
-        input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-        weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-    else:
-        input = (torch.rand((M, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-        weight = (torch.rand((N, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-        input_scale = None
-        weight_scale = None
+    input, weight, input_scale, weight_scale = make_data(M, N, K, dtype, (rank + 1) * 0.1)
 
     # Create context
     context = create_all_to_all_single_gemm_context(
@@ -449,8 +433,7 @@ def benchmark(args):
                                     sp_group)
 
     # check allclose
-    rtol = 1e-2 if not is_int8 else 0
-    atol = 1e-2 if not is_int8 else 0
+    atol, rtol = THRESHOLD_MAP[dtype]
     assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol)
 
     # Calculate FLOPS
@@ -495,8 +478,6 @@ def check_correctness(args):
 
     dtype = DTYPE_MAP[args.dtype]
     max_M, N, K = args.M, args.N, args.K
-    is_int8 = dtype == torch.int8
-    is_fp8 = is_fp8_dtype(dtype)
 
     dist_print(f"Running stress test: {args.check_rounds} rounds")
     dist_print(f"Max M={max_M}, N={N}, K={K}, dtype={dtype}")
@@ -516,25 +497,7 @@ def check_correctness(args):
         all_passed = True
         for _, M in enumerate(M_values):
             # Generate test data
-            scale = rank + 1
-
-            if is_int8:
-                input = torch.randint(-127, 127, (M, K), dtype=dtype, device="cuda")
-                weight = torch.randint(-127, 127, (N, K), dtype=dtype, device="cuda")
-                input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-                weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-            elif is_fp8:
-                input_f16 = (torch.rand((M, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-                weight_f16 = (torch.rand((N, K), dtype=torch.float16, device="cuda") * 2 - 1) * 0.01 * scale
-                input = input_f16.to(dtype)
-                weight = weight_f16.to(dtype)
-                input_scale = torch.rand((M, 1), dtype=torch.float32, device="cuda") * 2 - 1
-                weight_scale = torch.rand((1, N), dtype=torch.float32, device="cuda") * 2 - 1
-            else:
-                input = (torch.rand((M, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-                weight = (torch.rand((N, K), dtype=dtype, device="cuda") * 2 - 1) * 0.01 * scale
-                input_scale = None
-                weight_scale = None
+            input, weight, input_scale, weight_scale = make_data(M, N, K, dtype, (rank + 1) * 0.1)
 
             context = create_all_to_all_single_gemm_context(
                 max_m=M,
@@ -549,8 +512,7 @@ def check_correctness(args):
             torch_result = perf_torch(input, weight, input_scale, weight_scale, warmup=1, iters=1, sp_group=sp_group)
             triton_result = perf_triton(input, weight, input_scale, weight_scale, context, warmup=1, iters=1,
                                         sp_group=sp_group)
-            rtol = 1e-2 if not is_int8 else 0
-            atol = 1e-2 if not is_int8 else 0
+            atol, rtol = THRESHOLD_MAP[dtype]
             assert_allclose(triton_result.output, torch_result.output, rtol=rtol, atol=atol, verbose=False)
 
         if all_passed:
@@ -574,12 +536,9 @@ if __name__ == "__main__":
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
     NNODES = WORLD_SIZE // LOCAL_WORLD_SIZE if LOCAL_WORLD_SIZE > 0 else 1
     SP_GROUP = initialize_distributed(seed=args.seed)
-    torch.manual_seed(args.seed)
     is_s8 = DTYPE_MAP[args.dtype] == torch.int8
     is_fp8 = is_fp8_dtype(DTYPE_MAP[args.dtype])
     assert is_s8 or is_fp8
-    if is_fp8:
-        torch.use_deterministic_algorithms(False, warn_only=True)
 
     dist_print("=" * 80)
     dist_print("All-to-All Single GEMM Test")
