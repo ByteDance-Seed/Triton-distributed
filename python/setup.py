@@ -440,7 +440,9 @@ def build_rocshmem():
 
 
 def build_shmem():
-    if _is_hip_platform() or check_env_flag("TRITON_DISTRIBUTED_BUILD_PYROCSHMEM", "0"):
+    # Build rocshmem if: (HIP platform AND not mori_shmem) OR explicitly requested via env var
+    shmem_backend = os.getenv("TRITON_DIST_SHMEM_BACKEND", "").lower()
+    if (_is_hip_platform() and shmem_backend != "mori_shmem") or check_env_flag("TRITON_DISTRIBUTED_BUILD_PYROCSHMEM", "0"):
         build_rocshmem()  # (9, 4)
 
 

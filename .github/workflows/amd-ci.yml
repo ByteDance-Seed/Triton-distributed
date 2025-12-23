@@ -92,3 +92,39 @@ jobs:
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_e2e.py --bsz 4096 --seq_len 128 --model Qwen/Qwen3-32B --mode decode
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_e2e_inference.py --bsz 4096 --gen_len 128 --max_length 150
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_e2e_inference.py --bsz 4096 --gen_len 128 --max_length 150 --triton_dist
+  amd-mori-test:
+    name: Build and Test on AMD GPUs with MoRI SHMEM
+    runs-on: "amd-gfx942-mi325"
+    timeout-minutes: 45
+    container:
+        image: rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.5.1
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.triton
+    env:
+      TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
+      TRITON_BUILD_PROTON: "0"
+      TRITON_DIST_SHMEM_BACKEND: "mori_shmem"
+
+    steps:
+      - name: Install dependencies
+        run: |
+          rm -f /usr/local/bin/cmake
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
+          pip3 install -i https://test.pypi.org/simple hip-python==6.4.3.555.40
+          pip3 install pybind11
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+      - name: Build triton-distributed
+        run: |
+          pip3 install -e python --verbose --no-build-isolation --use-pep517
+      - name: Build mori shmem
+        run: |
+          bash ./scripts/build_mori_shmem.sh 
+      - name: Mori SHMEM API tests
+        run: |
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
