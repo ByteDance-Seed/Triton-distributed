@@ -197,7 +197,6 @@ def test_triton_decode_with_paged_kv(args) -> None:
 
         torch.testing.assert_close(output, ref_output, atol=0.05, rtol=1e-2), \
             f"{torch.max(torch.abs(output - ref_output))}"
-    ths_op.finalize()
     dist_print("Pass!", allowed_ranks=[0])
     ths_op.finalize()
 

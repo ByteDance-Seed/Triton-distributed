@@ -94,14 +94,14 @@ if command -v nvcc &> /dev/null; then
         flashinfer_whl_url="https://flashinfer.ai/whl/${parsed_cuda_slug}/${parsed_pytorch_slug}/"
         pip install flashinfer-python -i "$flashinfer_whl_url"
     fi
-    pip install flash-attn --no-build-isolation
+    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation
     echo "Finished installing CUDA-specific libraries."
 
 # --- AMD ROCm ---
 elif command -v hipcc &> /dev/null; then
     echo "AMD ROCm compiler (hipcc) found. Proceeding with ROCm-specific installations."
     echo "Note: flashinfer does not currently support ROCm and will be skipped."
-    pip install flash-attn --no-build-isolation
+    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation
     echo "Finished installing ROCm-specific libraries."
 else
     echo "NVIDIA CUDA compiler (nvcc) and AMD ROCm compiler (hipcc) not found."
