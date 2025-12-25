@@ -258,7 +258,6 @@ class EPAll2AllLayer(torch.nn.Module):
         self.nnodes = self.world_size // self.local_world_size
         self.node_id = self.rank // self.local_world_size
         self.is_intra_node = (self.world_size == self.local_world_size)
-        self.is_intra_node = False
 
         self.enable_local_combine = enable_local_combine and self.is_intra_node
         self.Alignment = 1024

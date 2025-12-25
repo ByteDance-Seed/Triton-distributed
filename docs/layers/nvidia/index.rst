@@ -22,6 +22,8 @@ Layer List
      - Sequence Parallel Flash Decode layer
    * - :doc:`ep_a2a_layer`
      - Expert Parallelism All-to-All layer
+   * - :doc:`ep_a2a_fused_layer`
+     - EP All-to-All fused layer (megakernel with token optimization)
    * - :doc:`ep_ll_a2a_layer`
      - Low-Latency Expert Parallelism All-to-All layer
    * - :doc:`gemm_allreduce_layer`
@@ -42,6 +44,7 @@ Layer List
    tp_moe
    sp_flash_decode
    ep_a2a_layer
+   ep_a2a_fused_layer
    ep_ll_a2a_layer
    gemm_allreduce_layer
    low_latency_allgather_layer

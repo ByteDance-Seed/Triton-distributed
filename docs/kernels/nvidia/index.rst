@@ -26,6 +26,8 @@ Kernel List
      - Expert Parallelism All-to-All for MoE models (inter-node)
    * - :doc:`ep_a2a_intra_node`
      - Expert Parallelism All-to-All (intra-node optimized)
+   * - :doc:`ep_all2all_fused`
+     - EP All-to-All fused megakernel (dispatch+groupgemm, groupgemm+combine)
    * - :doc:`low_latency_a2a_v2`
      - Low-Latency EP All-to-All with FP8 quantization
    * - :doc:`gemm_allreduce`
@@ -50,6 +52,7 @@ Kernel List
    flash_decode
    ep_a2a
    ep_a2a_intra_node
+   ep_all2all_fused
    low_latency_a2a_v2
    gemm_allreduce
    moe_reduce_rs
