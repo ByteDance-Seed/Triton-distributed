@@ -43,19 +43,24 @@ import numpy as np
 import packaging.version
 import torch
 import triton
-import triton.backends
 import triton_dist
 import dataclasses
+import shutil
 
 
 def is_cuda():
-    if torch.cuda.is_available() and (torch.version.hip is None):
+    """Checks if 'nvidia-smi' is available on the system's PATH."""
+    if shutil.which("nvidia-smi"):
         return True
+    else:
+        return False
 
 
 def is_hip():
-    if torch.cuda.is_available() and (torch.version.hip is not None):
+    if shutil.which("rocm-smi"):
         return True
+    else:
+        return False
 
 
 if is_cuda():

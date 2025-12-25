@@ -25,6 +25,18 @@
 # yapf: disable
 # forward import torch to load libtorch_cpu.so and libtorch_cuda.so
 import torch  # noqa: F401
+import triton  # noqa: F401
+from packaging.version import Version
 # yapf: enable
 from . import language  # noqa: F401
 from .jit import jit  # noqa: F401
+from .tools.monkey_inductor import apply_triton340_inductor_patch  # noqa: F401
+from .tools.monkey_inductor import TORCH_VERSION
+
+triton_version = Version(triton.__version__)
+require_patched_torch = (Version("2.7.0a0") <= TORCH_VERSION < Version("2.8.1"))
+
+if require_patched_torch and triton_version == Version("3.4.0"):
+    apply_triton340_inductor_patch()
+
+__all__ = ["language", "jit"]
