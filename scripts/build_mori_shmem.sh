@@ -7,6 +7,39 @@ export MORI_DIR=${MORI_DIR:-${SCRIPT_DIR}/../3rdparty/mori}
 export MORI_BUILD_DIR=${MORI_BUILD_DIR:-${MORI_DIR}/build}
 export ROCM_PATH=${ROCM_PATH:-/opt/rocm}
 
+# Function to detect GPU architecture
+detect_gpu_arch() {
+    local arch=""
+    
+    # Method 1: Try rocm_agent_enumerator
+    if [ -x "${ROCM_PATH}/bin/rocm_agent_enumerator" ]; then
+        arch=$(${ROCM_PATH}/bin/rocm_agent_enumerator | grep -v "gfx000" | grep "gfx" | head -1)
+    fi
+    
+    # Method 2: Try rocminfo if rocm_agent_enumerator failed
+    if [ -z "$arch" ] && command -v rocminfo &> /dev/null; then
+        arch=$(rocminfo | grep -oP 'gfx\w+' | head -1)
+    fi
+    
+    # Method 3: Check environment variable
+    if [ -z "$arch" ] && [ -n "$AMDGPU_TARGETS" ]; then
+        arch=$(echo "$AMDGPU_TARGETS" | tr ',' '\n' | grep "gfx" | head -1)
+    fi
+    
+    # Fallback to gfx942 if detection failed
+    if [ -z "$arch" ]; then
+        echo "Warning: Could not detect GPU architecture, defaulting to gfx942" >&2
+        arch="gfx942"
+    fi
+    
+    echo "$arch"
+}
+
+# Detect GPU architecture
+GPU_ARCH=$(detect_gpu_arch)
+echo "Detected GPU architecture: $GPU_ARCH"
+
+echo ""
 echo "=========================================="
 echo "Step 1: Build and install mori (including Python interface)"
 echo "=========================================="
@@ -15,7 +48,12 @@ echo "=========================================="
 echo "Installing mori..."
 cd "${MORI_DIR}"
 # pip install -r requirements-build.txt
-pip3 install . --no-build-isolation
+if pip3 install . --no-build-isolation; then
+    echo "pip3 install completed successfully."
+else
+    echo "Error: pip3 install failed. Aborting build." >&2
+    exit 1
+fi
 
 echo "Mori build and installation complete"
 
@@ -25,9 +63,9 @@ echo "Step 2: Build device BC file"
 echo "=========================================="
 
 # Source BC files from mori build (all components that make up mori_shmem)
-WRAPPER_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/shmem_device_api_wrapper-hip-amdgcn-amd-amdhsa-gfx942.bc"
-INIT_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/init-hip-amdgcn-amd-amdhsa-gfx942.bc"
-MEMORY_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/memory-hip-amdgcn-amd-amdhsa-gfx942.bc"
+WRAPPER_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/shmem_device_api_wrapper-hip-amdgcn-amd-amdhsa-${GPU_ARCH}.bc"
+INIT_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/init-hip-amdgcn-amd-amdhsa-${GPU_ARCH}.bc"
+MEMORY_BC="${MORI_BUILD_DIR}/src/shmem/CMakeFiles/mori_shmem.dir/memory-hip-amdgcn-amd-amdhsa-${GPU_ARCH}.bc"
 
 # Check if source BC files exist
 if [ ! -f "$WRAPPER_BC" ]; then

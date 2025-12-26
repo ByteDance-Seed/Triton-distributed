@@ -75,12 +75,12 @@ def get_shmem_backend():
 
 def is_rocshmem():
     """Check if current backend is ROCSHMEM"""
-    return is_hip() and get_shmem_backend() == 'rocshmem'
+    return bool(is_hip() and get_shmem_backend() == 'rocshmem')
 
 
 def is_mori_shmem():
     """Check if current backend is MORI SHMEM"""
-    return is_hip() and get_shmem_backend() == 'mori_shmem'
+    return bool(is_hip() and get_shmem_backend() == 'mori_shmem')
 
 
 if is_cuda():
@@ -107,7 +107,7 @@ elif is_hip():
     _shmem_backend = get_shmem_backend()
     if _shmem_backend == 'rocshmem':
         import pyrocshmem
-    elif _shmem_backend == 'mori':
+    elif _shmem_backend == 'mori_shmem':
         try:
             import mori.shmem as mori_shmem
         except ImportError:

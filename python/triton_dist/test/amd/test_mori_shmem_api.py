@@ -25,8 +25,6 @@
 
 import os
 import sys
-import time
-import shutil
 import torch
 import torch.distributed as dist
 
@@ -126,9 +124,6 @@ def test_mori_shmem_device():
 
     @triton_dist.jit
     def _mori_shmem_device(comm_buf):
-        mype = dl.rank()
-        npes = dl.num_ranks()
-
         mype = libshmem_device.my_pe()
         npes = libshmem_device.n_pes()
         tl.store(comm_buf, mype)
