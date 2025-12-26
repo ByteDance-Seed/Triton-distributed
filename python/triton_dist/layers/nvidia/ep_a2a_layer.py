@@ -589,4 +589,4 @@ class EPAll2AllLayer(torch.nn.Module):
             reduce_inter_node = reduce_buf.reshape(self.nnodes, self.max_tokens, self.hidden).sum(dim=0)
             return reduce_inter_node[:ep_a2a_layout_desc.num_dispatch_token_cur_rank]
         else:
-            return reduce_buf.reshape(self.max_tokens, self.hidden)[:ep_a2a_layout_desc.num_dispatch_token_cur_rank]
+            return reduce_buf.reshape(-1, self.hidden)[:ep_a2a_layout_desc.num_dispatch_token_cur_rank]
