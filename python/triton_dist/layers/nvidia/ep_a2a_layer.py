@@ -258,6 +258,7 @@ class EPAll2AllLayer(torch.nn.Module):
         self.nnodes = self.world_size // self.local_world_size
         self.node_id = self.rank // self.local_world_size
         self.is_intra_node = (self.world_size == self.local_world_size)
+        self.use_lagecy_kernel = not self.is_intra_node or self.use_aot
 
         self.enable_local_combine = enable_local_combine and self.is_intra_node
         self.Alignment = 1024
@@ -314,7 +315,7 @@ class EPAll2AllLayer(torch.nn.Module):
         local_splits_buf = self.a2a_ctx.local_splits_buf
         expert_indices_signal_buf = self.a2a_ctx.expert_indices_signal_buf
         # inter-node
-        if not self.is_intra_node or self.use_aot:
+        if self.use_lagecy_kernel:
             get_dispatch_send_reqs(exp_indices, send_reqs_for_nodes_rdma, self.experts_per_rank, self.local_world_size,
                                    self.num_sm, use_aot=self.use_aot)
 
@@ -360,7 +361,7 @@ class EPAll2AllLayer(torch.nn.Module):
         self.a2a_ctx.send_reqs_for_nodes_rdma.fill_(-1)
         self.a2a_ctx.full_splits_buf.fill_(0)
         self.a2a_ctx.topk_indices_buf_rdma.fill_(-1)
-        if self.is_intra_node:
+        if not self.use_lagecy_kernel:
             self.a2a_ctx.intra_node_dispatch_skipped_token_mapping_indices.fill_(-1)
             self.a2a_ctx.intra_node_dispatch_skipped_token_topk_mapping_indices.fill_(-1)
 
@@ -385,7 +386,7 @@ class EPAll2AllLayer(torch.nn.Module):
             assert token_dst_scatter_idx.is_contiguous()
             with_scatter_indices = True
 
-        if not self.is_intra_node or self.use_aot:
+        if self.use_lagecy_kernel:
             ep_dispatch_token_inplace(
                 self.a2a_ctx.send_reqs_for_nodes_rdma, self.a2a_ctx.signal_buf, recv_buf_offset_per_expert,
                 self.a2a_ctx.token_send_buf_rdma, output_buf,  # output
@@ -517,7 +518,7 @@ class EPAll2AllLayer(torch.nn.Module):
         grid = lambda meta: (self.num_sm, )
         current_stream = torch.cuda.current_stream()
         # inter-node
-        if not self.is_intra_node or self.use_aot:
+        if self.use_lagecy_kernel:
             counter_workspace = torch.zeros((self.nnodes, ), dtype=torch.int32, device=torch.cuda.current_device())
             ep_combine_token_inplace(
                 counter_workspace,
@@ -584,8 +585,8 @@ class EPAll2AllLayer(torch.nn.Module):
         self.ep_barrier_all(current_stream)
         reduce_buf = self.combine_token_intra_node_and_send(combine_input, ep_a2a_layout_desc)
         self.ep_barrier_all(current_stream)
-        if not self.is_intra_node:
+        if self.use_lagecy_kernel:
             reduce_inter_node = reduce_buf.reshape(self.nnodes, self.max_tokens, self.hidden).sum(dim=0)
             return reduce_inter_node[:ep_a2a_layout_desc.num_dispatch_token_cur_rank]
         else:
-            return reduce_buf
+            return reduce_buf.reshape(self.max_tokens, self.hidden)[:ep_a2a_layout_desc.num_dispatch_token_cur_rank]
