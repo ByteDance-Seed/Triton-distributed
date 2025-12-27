@@ -19,7 +19,7 @@ Performance
 
 .. code-block:: text
 
-   Benchmark: 4x H800 GPUs
+   Benchmark: 8x H800 GPUs
    - Tokens per rank: 128
    - TopK: 8
    - Hidden size: 7168
