@@ -522,13 +522,15 @@ class NVSHMEMHelper:
         return code
 
     @staticmethod
-    def get_jit_nvshmem_cubin(user_ptx: str, capability: int):
+    def get_jit_nvshmem_cubin(user_ptx: str, capability: int, metadata):
         from triton.backends.nvidia.compiler import sm_arch_from_capability, get_ptxas
-
+        num_warps = metadata["num_warps"]
         jit_code = NVSHMEMHelper.generate_sub_cu(user_ptx)
         NVSHMEM_HOME = NVSHMEMHelper.get_nvshmem_build_from_src_home()
         arch = sm_arch_from_capability(capability)
         suffix = "a" if capability >= 90 else ""
+        max_reg_per_block = 65536
+        maxnreg = max_reg_per_block // (num_warps * 32)
         with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cu') as fsrc, \
             tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ptx') as fptx, \
             tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cubin') as fbin:
@@ -539,10 +541,9 @@ class NVSHMEMHelper:
             nvcc, _ = get_nvcc()
             # nvshmem wrapper => ptx
             nvcc_cmd = [
-                nvcc, "-rdc=true", "-ccbin", "g++", NVCC_GENCODE, "-I",
+                nvcc, "-rdc=true", f"-maxrregcount={maxnreg}", "-ccbin", "g++", NVCC_GENCODE, "-I",
                 os.path.join(NVSHMEM_HOME, "include"), fsrc.name, "-ptx", "-c", "-o", fptx.name
             ]
-
             try:
                 subprocess.run(nvcc_cmd, check=True, close_fds=False)
             except subprocess.CalledProcessError as e:
@@ -550,8 +551,7 @@ class NVSHMEMHelper:
             fptx.flush()
             ptxas = get_ptxas().path
             # ptx => cubin
-            ptxas_cmd = [ptxas, "-c", fptx.name, f"--gpu-name={arch}", "-o", fbin.name]
-
+            ptxas_cmd = [ptxas, "-c", fptx.name, f"--gpu-name={arch}", f"-maxrregcount={maxnreg}", "-o", fbin.name]
             try:
                 subprocess.run(ptxas_cmd, check=True, close_fds=False)
             except subprocess.CalledProcessError as e:
@@ -560,12 +560,12 @@ class NVSHMEMHelper:
             return fbin.name
 
     @staticmethod
-    def get_nvshmem_cubin(user_ptx, capability):
+    def get_nvshmem_cubin(user_ptx, capability, metadata):
         aot_cubin_file = NVSHMEMHelper.get_aot_nvshmem_cubin(capability=capability)
         if os.path.exists(aot_cubin_file):
             return aot_cubin_file
         else:
-            cubin = NVSHMEMHelper.get_jit_nvshmem_cubin(user_ptx, capability)
+            cubin = NVSHMEMHelper.get_jit_nvshmem_cubin(user_ptx, capability, metadata)
             return cubin
 
 

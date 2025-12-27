@@ -51,6 +51,66 @@ def decode_tag(tag, num_groups):
     return block_idx, group_idx, task_type, is_start
 
 
+def _track_iter(profiler_buffer: np.ndarray, num_blocks, num_groups):
+    empty_count = 0
+    for i in range(len(profiler_buffer)):
+        if is_empty_slot(profiler_buffer[i]):
+            empty_count += 1
+            if empty_count > num_blocks * num_groups:
+                return
+            continue
+        empty_count = 0
+        tag, timestamp = profiler_buffer[i:i + 1].view(np.uint32)
+        tag = int(tag)
+        timestamp = int(timestamp)
+        block_idx, group_idx, task_type, is_start = decode_tag(tag, num_groups)
+        yield block_idx, group_idx, task_type, is_start, timestamp
+
+
+def _verify_and_reorg_tracks(profiler_buffer: np.ndarray, num_blocks, num_groups):
+    """
+    return List[(block_idx, group_idx, task_type, start_time, end_time)] sorted by start_time
+    """
+    tracks = {}
+    records = []
+    for block_idx, group_idx, task_type, is_start, timestamp in _track_iter(profiler_buffer, num_blocks, num_groups):
+        track_key = block_idx, group_idx, task_type
+        if is_start:
+            assert track_key not in tracks, f"track ({track_key}) is opened again when it's not closed"
+            tracks[track_key] = timestamp
+        else:
+            ts_start = tracks[track_key]
+            assert ts_start <= timestamp
+            records.append((block_idx, group_idx, task_type, ts_start, timestamp))
+            tracks.pop(track_key)
+
+    assert not tracks, "some records is not closed"
+    records.sort(key=lambda x: x[3])
+    return records
+
+
+class Tracker:
+    """ this tracker contains multiple tracks to support overlaped tracks"""
+
+    def __init__(self, parent, track_name):
+        self.parent = parent
+        self.tracks = []  # (track, track_ts_end)
+        self.grp = self.parent.create_group(track_name)
+
+    def track(self, ts_start, ts_end, annotation: str):
+        track = self._choose_track(ts_start, ts_end)
+        track.open(ts_start, annotation)
+        track.close(ts_end)
+
+    def _choose_track(self, ts_start, ts_end):
+        for index, (track, track_ts_end) in enumerate(self.tracks):
+            if track_ts_end <= ts_start:  # track is idle
+                self.tracks[index][1] = ts_end
+                return track
+        self.tracks.append([self.grp.create_track(), ts_end])
+        return self.tracks[-1][0]
+
+
 # adapt from flashinfer/flashinfer/profiler/__init__.py
 def export_to_perfetto_trace(profiler_buffer: torch.Tensor, task_names: List[str], file_name: str,
                              verbose: bool = False) -> None:
@@ -68,13 +128,12 @@ def export_to_perfetto_trace(profiler_buffer: torch.Tensor, task_names: List[str
 
     pid_map = {}
     track_map: Dict[Tuple[int, int, int], Any] = {}
-    begin_timestamp_map = {}
 
     block_idx_to_smid = {}
     profiler_buffer_host = profiler_buffer_host[1:]
     # for better view
     if num_groups == 1:
-        pid_master = tgen.create_group("tracks of all blocks")
+        pid_master = tgen.create_group("tracks of all SMs")
 
     for i in range(num_blocks):
         block_idx, sm_id = profiler_buffer_host[i:i + 1].view(dtype=torch.uint32)
@@ -89,44 +148,26 @@ def export_to_perfetto_trace(profiler_buffer: torch.Tensor, task_names: List[str
         print(f"block_idx_to_smid = {block_idx_to_smid}, {len(block_idx_to_smid)}")
 
     profiler_buffer_host = profiler_buffer_host[num_blocks:].numpy()
-    empty_count = 0
-    for i in range(len(profiler_buffer_host)):
-        if is_empty_slot(profiler_buffer_host[i]):
-            empty_count += 1
-            if empty_count > num_blocks * num_groups:
-                break
-            continue
-        empty_count = 0
-        tag, timestamp = profiler_buffer_host[i:i + 1].view(np.uint32)
-        tag = int(tag)
-        timestamp = int(timestamp)
-        block_idx, group_idx, task_type, is_start = decode_tag(tag, num_groups)
+    for block_idx, group_idx, task_type, ts_start, ts_end in _verify_and_reorg_tracks(
+            profiler_buffer_host, num_blocks, num_groups):
         sm_id = block_idx_to_smid[block_idx]
         if verbose:
             print(
-                f'tag = {tag}, block_idx = {block_idx}, task_type = {task_type}, is_start = {is_start}, timestamp = {timestamp}'
+                f'block_idx = {block_idx}, group_idx: {group_idx}, task_type = {task_type}, range =[{ts_start}, {ts_end}]'
             )
         # create trackers
         pid = pid_map[block_idx]
         cur_task_name = task_names[task_type]
+        track_key = (sm_id, )
 
-        if (block_idx, group_idx, task_type) in track_map:
-            track = track_map[(block_idx, group_idx, task_type)]
-        else:
-            assert is_start
+        if (track := track_map.get(track_key, None)) is None:
             if num_groups > 1:
-                track = pid.create_track(f"group_{group_idx}")
+                track = Tracker(pid, str(sm_id))
             else:
-                track = pid.create_track(f"block_{block_idx}_sm_{sm_id}_group_{group_idx}")
-            track_map[(block_idx, group_idx, task_type)] = track
-            begin_timestamp_map[(block_idx, group_idx, task_type)] = timestamp
+                track = Tracker(pid, str(sm_id))
+            track_map[track_key] = track
 
-        if is_start:
-            track.open(timestamp, cur_task_name)
-        else:
-            track.close(timestamp)
-            begin_timestamp = begin_timestamp_map[(block_idx, group_idx, task_type)]
-            assert begin_timestamp < timestamp, f"timestamp overflow, start = {begin_timestamp}, end = {timestamp}"
+        track.track(ts_start, ts_end, f"{cur_task_name}:{block_idx}")
 
     tgen.flush()
 

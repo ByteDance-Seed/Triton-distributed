@@ -27,7 +27,7 @@ import torch
 from torch import nn
 import torch.distributed
 
-from triton_dist.kernels.amd.all_gather_gemm import create_ag_gemm_intra_node_context, ag_gemm_intra_node
+from triton_dist.kernels.amd.allgather_gemm import create_ag_gemm_intra_node_context, ag_gemm_intra_node
 from triton_dist.kernels.amd.gemm_reduce_scatter import create_gemm_rs_intra_node_context, gemm_rs_intra_node
 
 from flash_attn import flash_attn_with_kvcache

@@ -1,509 +1,201 @@
-# AutoTuner of Triton-distributed
-## Triton Kernel AutoTuner
+# Triton-distributed 自动调优器
 
-对于单个 Triton kernel 的 tuning，用户可以直接使用 Triton 原有的接口 [`triton.autotune`](https://triton-lang.org/main/python-api/generated/triton.autotune.html) 。
+> **Language / 语言**: [English](autotuner.md) | [中文](autotuner-cn.md)
+
+Triton-distributed 提供两种自动调优机制：
+
+1. **`triton_dist.tune.autotune`** - 函数级自动调优器，用于调优带有配置空间的任意函数（推荐使用）
+2. **`triton_dist.autotuner.contextual_autotune`** - 上下文自动调优器，用于分布式调优包含 `triton.autotune` 装饰器的函数
+
+## 函数级自动调优器 (`triton_dist.tune.autotune`)
+
+这是 Triton-distributed 中推荐的函数调优方式。它提供：
+
+- 支持 `key_fn` 和 `prune_fn` 的配置空间
+- 自动缓存调优结果到 `~/.triton_dist/autotune/`
+- 硬件和软件版本跟踪
+- 通过进程组支持分布式调优
+- 基于共享内存等约束的自动配置裁剪
+
+### 基本用法
 
 ```python
-@triton.autotune(configs=[
-    triton.Config(kwargs={'BLOCK_SIZE': 128}, num_warps=4),
-    triton.Config(kwargs={'BLOCK_SIZE': 1024}, num_warps=8),
-  ],
-  key=['x_size'] # the two above configs will be evaluated anytime
-                 # the value of x_size changes
+import triton
+import triton_dist
+from triton_dist.tune import autotune
+
+# 定义配置空间
+def get_config_space():
+    return [
+        triton.Config({
+            "BLOCK_SIZE_M": BM,
+            "BLOCK_SIZE_N": BN,
+            "BLOCK_SIZE_K": BK,
+            "GROUP_SIZE_M": 8,
+        }, num_stages=s, num_warps=w)
+        for BM in [64, 128]
+        for BN in [128, 256]
+        for BK in [32, 64]
+        for s in [3, 4]
+        for w in [4, 8]
+    ]
+
+# 定义用于缓存的 key 函数
+def key_fn(A, B, *args, **kwargs):
+    return (A.shape, B.shape, A.dtype)
+
+# 可选：定义裁剪函数以跳过无效配置
+def prune_fn(config, A, B, *args, **kwargs):
+    # 跳过超出共享内存的配置
+    shared_mem = config["BLOCK_SIZE_M"] * config["BLOCK_SIZE_K"] * A.element_size()
+    return shared_mem < 48 * 1024  # 48KB 限制
+
+@autotune(
+    config_space=[{"gemm_config": c} for c in get_config_space()],
+    key_fn=key_fn,
+    prune_fn=prune_fn,
 )
-@triton.jit
-def some_kernel(x_ptr, x_size, BLOCK_SIZE: tl.constexpr):
+def my_gemm_function(A, B, gemm_config: triton.Config):
+    # 你的函数实现
     ...
 ```
 
-`triton.autotune` 会在 kernel 运行时开启 tuning 过程，tuning 时会遍历 `configs` 所指定的 tuning config，对于每个 config，运行若干次该 config 对应的 kernel，测量其运行时间，最后会选择平均运行时间最短的 config 作为最优的 config。最优 config 会被保存下来，用 `key` 所指定的参数索引。
-
-## Contextual/Global AutoTuner
-tuning 过程需要反复执行某一段代码，这通常要求该段代码是 side-effect-free 的，不会依赖于或者改变某些上下文状态/全局状态，重复执行多次都能成功执行并且产生相同的结果。`triton.autotune` 作用于单个 Triton kernel，有时候我们并不能保证单个 Triton kernel 是 side-effect-free 的。此外，在分布式场景下，不同 rank 的 tuning 结果需要汇总起来，从而选出一个相同的最优 config。因此，用户可能需要一个更通用的 AutoTuner。
-
-因此，我们为用户提供了 `triton_dist.autotuner.contextual_autotune` 接口（`ContextualAutotuner`），可以装饰任意一个无参数函数 `fn`（一个 [Thunk](https://en.wikipedia.org/wiki/Thunk)），该函数的子过程可能不是 side-effect-free 的，不能单独进行 tuning，但是该函数作为一个整体可以进行 tuning。`ContextualAutotuner` 接收 `is_dist` 参数来指定当前 tuning 是否为分布式场景。
-
-### Example
-
-下面是一个基础的 allgather-gemm 的代码，包含 `kernel_local_copy_and_barrier_all` 和  `kernel_consumer_gemm_persistent` 这两个 Triton kernel：
+### 函数级自动调优器参数
 
 ```python
-import os
-from typing import Optional, List
-from cuda import cuda, cudart
-import datetime
+triton_dist.tune.autotune(
+    config_space,    # 要调优的配置字典列表
+    key_fn,          # 从参数生成缓存 key 的函数
+    prune_fn=None,   # 可选的配置裁剪函数
+)
+```
 
-import torch
+**参数说明：**
+- `config_space`：包含可调参数的字典列表
+- `key_fn`：接受与被装饰函数相同参数的函数，返回用于缓存的可哈希 key
+- `prune_fn`：可选函数，返回 `True` 表示配置有效，返回 `False` 跳过该配置
+
+**调用自动调优函数：**
+
+```python
+# 启用自动调优的正常调用
+result = my_gemm_function(A, B)
+
+# 禁用自动调优（使用第一个配置）
+result = my_gemm_function(A, B, autotune=False)
+
+# 启用详细日志
+result = my_gemm_function(A, B, autotune_verbose=True)
+
+# 使用特定进程组进行分布式调优
+result = my_gemm_function(A, B, autotune_pg=my_process_group)
+```
+
+### 实际例子：AllGather GEMM
+
+来自 `python/triton_dist/kernels/nvidia/allgather_gemm.py`：
+
+```python
 import triton
-import triton.language as tl
-import triton_dist.language as dl
-from triton_dist.kernels.nvidia.common_ops import barrier_all
-from triton_dist.utils import init_nvshmem_by_torch_process_group
+import triton_dist
+from triton_dist.tune import to_hashable
 
-import nvshmem.bindings
-import nvshmem.core
-
-
-def CUDA_CHECK(err):
-    if isinstance(err, cuda.CUresult):
-        if err != cuda.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"Cuda Error: {err}: {cuda.cuGetErrorName(err)}")
-    elif isinstance(err, cudart.cudaError_t):
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
+def ag_gemm_config_space():
+    if is_cuda() and _is_hopper():
+        return [{"gemm_config": x} for x in get_config_space(True)]
     else:
-        raise RuntimeError(f"Unknown error type: {err}")
+        return [{"gemm_config": x} for x in get_config_space(False)]
 
+def key_fn(A, B, ctx, *args, **kwargs):
+    return (to_hashable(A), to_hashable(B), ctx.num_ranks, ctx.local_num_ranks)
 
-def cp_engine_producer_all_gather_full_mesh_push(
-    rank,
-    num_ranks,
-    local_tensor: torch.Tensor,
-    remote_tensor_buffers: List[torch.Tensor],
-    ag_stream: torch.cuda.Stream,
-    barrier_buffers: List[torch.Tensor],
+def prune_fn(config, A, B, ctx, *args, **kwargs):
+    gemm_config = config["gemm_config"]
+    # 裁剪超出共享内存的配置
+    if not prune_fn_by_shared_memory(config, A, *args, **kwargs):
+        return False
+    # 裁剪不符合 group size 的配置
+    if not prune_fn_by_group_size_m(config, A, B, *args, **kwargs):
+        return False
+    return True
+
+@triton_dist.tune.autotune(
+    config_space=ag_gemm_config_space(),
+    key_fn=key_fn,
+    prune_fn=prune_fn,
+)
+def ag_gemm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    ctx: AllGatherGEMMTensorParallelContext,
+    gemm_config: triton.Config,
+    straggler_option=None,
 ):
-    M_per_rank, N = local_tensor.shape
-
-    rank_orders = [(rank + i) % num_ranks for i in range(num_ranks)]
-
-    with torch.cuda.stream(ag_stream):
-        for src_rank in rank_orders:
-            if src_rank == rank:
-                continue
-            dst = remote_tensor_buffers[rank][
-                src_rank * M_per_rank : (src_rank + 1) * M_per_rank, :
-            ]
-            src = remote_tensor_buffers[src_rank][
-                src_rank * M_per_rank : (src_rank + 1) * M_per_rank, :
-            ]
-            dst.copy_(src)
-
-            (err,) = cuda.cuStreamWriteValue32(
-                ag_stream.cuda_stream,
-                barrier_buffers[rank][src_rank].data_ptr(),
-                1,
-                cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-            )
-            CUDA_CHECK(err)
-
-
-@triton.jit
-def kernel_local_copy_and_barrier_all(
-    rank,
-    num_ranks,
-    local_buf_ptr,
-    global_buf_ptr,
-    barrier_ptr,
-    M_per_rank,
-    N,
-    stride_local_m,
-    stride_local_n,
-    stride_global_m,
-    stride_global_n,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-):
-    sm_id = tl.program_id(axis=0)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    pid_m = sm_id // num_pid_n
-    pid_n = sm_id % num_pid_n
-
-    offs_m = tl.arange(0, BLOCK_SIZE_M)
-    offs_n = tl.arange(0, BLOCK_SIZE_N)
-    data_ptr = (
-        local_buf_ptr
-        + (pid_m * BLOCK_SIZE_M + offs_m[:, None]) * stride_local_m
-        + (pid_n * BLOCK_SIZE_N + offs_n[None, :]) * stride_local_n
-    )
-    dst_ptr = (
-        global_buf_ptr
-        + (rank * M_per_rank + pid_m * BLOCK_SIZE_M + offs_m[:, None]) * stride_global_m
-        + (pid_n * BLOCK_SIZE_N + offs_n[None, :]) * stride_global_n
-    )
-    mask_data = (pid_m * BLOCK_SIZE_M + offs_m[:, None] < M_per_rank) & (
-        pid_n * BLOCK_SIZE_N + offs_n[None, :] < N
-    )
-    mask_dst = (pid_m * BLOCK_SIZE_M + offs_m[:, None] < M_per_rank) & (
-        pid_n * BLOCK_SIZE_N + offs_n[None, :] < N
-    )
-
-    data = tl.load(data_ptr, mask=mask_data)
-    tl.store(dst_ptr, data, mask=mask_dst)
-
-
-def local_copy_and_barrier_all(
-    rank, num_ranks, local_data, global_data, comm_buf, barrier_ptr, M_per_rank, N
-):
-    barrier_all[(1,)](rank, num_ranks, comm_buf)
-    grid = lambda META: (
-        triton.cdiv(M_per_rank, META["BLOCK_SIZE_M"])
-        * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
-    kernel_local_copy_and_barrier_all[grid](
-        rank,
-        num_ranks,
-        local_data,
-        global_data,
-        barrier_ptr,
-        M_per_rank,
-        N,
-        local_data.stride(0),
-        local_data.stride(1),
-        global_data.stride(0),
-        global_data.stride(1),
-        128,
-        256,
-    )
-    barrier_ptr.fill_(0)
-    # global_data[rank * M_per_rank:(rank + 1) * M_per_rank, :].copy_(local_data)
-    (err,) = cuda.cuStreamWriteValue32(
-        torch.cuda.current_stream().cuda_stream,
-        barrier_ptr[rank].data_ptr(),
-        1,
-        cuda.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
-    )
-    CUDA_CHECK(err)
-    barrier_all[(1,)](rank, num_ranks, comm_buf)
-
-
-@triton.jit
-def kernel_consumer_gemm_persistent(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    M,
-    N,
-    K,
-    rank: tl.constexpr,
-    num_ranks: tl.constexpr,
-    ready_ptr,
-    comm_buf_ptr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    EPILOGUE_SUBTILE: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-):
-    # Matmul using TMA and device-side descriptor creation
-    dtype = c_ptr.dtype.element_ty
-    start_pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    num_tiles = num_pid_m * num_pid_n
-
-    a_desc = tl._experimental_make_tensor_descriptor(
-        a_ptr,
-        shape=[M, K],
-        strides=[K, 1],
-        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
-    )
-    b_desc = tl._experimental_make_tensor_descriptor(
-        b_ptr,
-        shape=[N, K],
-        strides=[K, 1],
-        block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
-    )
-    c_desc = tl._experimental_make_tensor_descriptor(
-        c_ptr,
-        shape=[M, N],
-        strides=[N, 1],
-        block_shape=[
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N if not EPILOGUE_SUBTILE else BLOCK_SIZE_N // 2,
-        ],
-    )
-
-    tiles_per_SM = num_tiles // NUM_SMS
-    if start_pid < num_tiles % NUM_SMS:
-        tiles_per_SM += 1
-
-    tile_id = start_pid - NUM_SMS
-    ki = -1
-
-    pid_m = 0
-    pid_n = 0
-    offs_am = 0
-    offs_bn = 0
-
-    M_per_rank = M // num_ranks
-    pid_ms_per_rank = tl.cdiv(M_per_rank, BLOCK_SIZE_M)
-
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    for _ in range(0, k_tiles * tiles_per_SM):
-        ki = tl.where(ki == k_tiles - 1, 0, ki + 1)
-        if ki == 0:
-            tile_id += NUM_SMS
-            group_id = tile_id // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + (tile_id % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-            # swizzle m
-            alpha = 0
-            beta = 0
-            pid_m = (
-                pid_m + ((((rank ^ alpha) + beta) % num_ranks) * pid_ms_per_rank)
-            ) % num_pid_m
-
-            offs_am = pid_m * BLOCK_SIZE_M
-            offs_bn = pid_n * BLOCK_SIZE_N
-
-            rank_beg = offs_am // M_per_rank
-            rank_end = (min(offs_am + BLOCK_SIZE_M, M) - 1) // M_per_rank
-            token = dl.wait(
-                ready_ptr + rank_beg, rank_end - rank_beg + 1, "gpu", "acquire"
-            )
-            a_desc = dl.consume_token(a_desc, token)
-
-        # You can also put the barrier here with a minor performance drop
-        # if needs_wait:
-        #     num_barriers_to_wait = num_barriers_wait_per_block
-        #     token = dl.wait(ready_ptr + (ki * BLOCK_SIZE_K) // (K // num_ranks), num_barriers_to_wait, "gpu", "acquire")
-        #     a_desc = dl.consume_token(a_desc, token)
-
-        offs_k = ki * BLOCK_SIZE_K
-
-        a = a_desc.load([offs_am, offs_k])
-        b = b_desc.load([offs_bn, offs_k])
-        accumulator = tl.dot(a, b.T, accumulator)
-
-        if ki == k_tiles - 1:
-            if EPILOGUE_SUBTILE:
-                acc = tl.reshape(accumulator, (BLOCK_SIZE_M, 2, BLOCK_SIZE_N // 2))
-                acc = tl.permute(acc, (0, 2, 1))
-                acc0, acc1 = tl.split(acc)
-                c0 = acc0.to(dtype)
-                c_desc.store([offs_am, offs_bn], c0)
-                c1 = acc1.to(dtype)
-                c_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], c1)
-            else:
-                c = accumulator.to(dtype)
-                c_desc.store([offs_am, offs_bn], c)
-
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-
-def ag_gemm_persistent(
-    a,
-    b,
-    c,
-    rank,
-    num_ranks,
-    workspace_tensors,
-    barrier_tensors,
-    comm_buf,
-    ag_stream=None,
-    BLOCK_M=128,
-    BLOCK_N=256,
-    BLOCK_K=64,
-    stages=3,
-):
-    # Check constraints.
-    assert a.shape[1] == b.shape[1], "Incompatible dimensions"  # b is transposed
-    assert a.dtype == b.dtype, "Incompatible dtypes"
-
-    M_per_rank, K = a.shape
-    M = M_per_rank * num_ranks
-    N_per_rank, K = b.shape
-
-    ag_stream = torch.cuda.Stream() if ag_stream is None else ag_stream
-    current_stream = torch.cuda.current_stream()
-    ag_stream.wait_stream(current_stream)
-
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
-    # TMA descriptors require a global memory allocation
-    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device="cuda", dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
-
-    cp_engine_producer_all_gather_full_mesh_push(
-        rank,
-        num_ranks,
-        a,
-        workspace_tensors,
-        ag_stream,
-        barrier_tensors,
-    )
-    grid = lambda META: (
-        min(
-            NUM_SMS,
-            triton.cdiv(M, META["BLOCK_SIZE_M"])
-            * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-        ),
-    )
-    kernel_consumer_gemm_persistent[grid](
-        workspace_tensors[rank],
-        b,
-        c,
-        M,
-        N_per_rank,
-        K,
-        rank,
-        num_ranks,
-        barrier_tensors[rank],
-        comm_buf,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        8,
-        False,
-        NUM_SMS=NUM_SMS,
-        num_stages=stages,
-        num_warps=8,
-    )
-
-    current_stream.wait_stream(ag_stream)
-
-
-def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
-    device = "cuda"
-    dtype = torch.float16
-    M = 999 * num_ranks
-    N = 1024
-    K = 1024
-
-    assert M % num_ranks == 0
-    assert N % num_ranks == 0
-    M_per_rank = M // num_ranks
-    N_per_rank = N // num_ranks
-
-    A = torch.randn([M_per_rank, K], dtype=dtype, device=device)
-    workspace = nvshmem_create_tensors([M, K], dtype=dtype, rank, num_ranks)
-    workspace = workspaces[rank]
-    B = torch.randn([N_per_rank, K], dtype=dtype, device=device)
-
-    barriers = nvshmem_create_tensor([num_ranks], dtype=torch.int32, rank, num_ranks)
-    barrier = barriers[rank]
-    barrier.fill_(0)
-
-    # at most 65536 blocks, each block world_size barriers
-    max_blocks = 65536
-    comm_buf = nvshmem_create_tensor([max_blocks * num_ranks], dtype=torch.int32)
-    comm_buf.fill_(0)
-    nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=current_stream)
-    torch.cuda.synchronize()
-
-    ag_stream = torch.cuda.Stream()
-
-    def run_ag_gemm_persistent():
-        C = torch.empty([M, N_per_rank], dtype=dtype, device=device)
-        # Use our own customized barrier kernel
-        local_copy_and_barrier_all(
-            rank,
-            num_ranks,
-            A,
-            workspace,
-            comm_buf,
-            barrier,
-            M_per_rank,
-            K,
-        )
-        ag_gemm_persistent(
-            A,
-            B,
-            C,
-            rank,
-            num_ranks,
-            workspaces,
-            barriers,
-            comm_buf,
-            ag_stream=ag_stream,
-        )
-        return C
-
-    current_stream = torch.cuda.current_stream()
-
-    A.copy_(torch.randn([M_per_rank, K], dtype=dtype, device=device))
-    B.copy_(torch.randn([N_per_rank, K], dtype=dtype, device=device))
-    workspace.copy_(torch.randn([M, K], dtype=dtype, device=device))
-    nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=current_stream)
-    torch.cuda.synchronize()
-    C = run_ag_gemm_persistent()
-
-    ag_A = torch.empty([M, K], dtype=dtype, device=device)
-    torch.distributed.all_gather_into_tensor(
-        ag_A,
-        A,
-        group=default_group,
-    )
-    C_golden = torch.matmul(ag_A, B.T)
-    for i in range(num_ranks):
-        torch.distributed.barrier(default_group)
-        if rank == i:
-            print(f"Rank {rank}")
-            if not torch.allclose(C_golden, C, atol=1e-3, rtol=1e-3):
-                print("Golden")
-                print(C_golden)
-                print("Output")
-                print(C)
-                print("Max diff", torch.max(torch.abs(C_golden - C)))
-                print("Avg diff", torch.mean(torch.abs(C_golden - C)))
-                print("Wrong Answer!")
-            else:
-                print("Pass!")
-
-
-def main():
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    torch.cuda.set_device(LOCAL_RANK)
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=RANK,
-        timeout=datetime.timedelta(seconds=1800),
-    )
-    assert torch.distributed.is_initialized()
-    TP_GROUP = torch.distributed.new_group(
-        ranks=list(range(WORLD_SIZE)), backend="nccl"
-    )
-    torch.distributed.barrier(TP_GROUP)
-
-    torch.cuda.synchronize()
-    init_nvshmem_by_torch_process_group(TP_GROUP)
-
-    test_ag_gemm_tma_intra_node(RANK, WORLD_SIZE, TP_GROUP)
-
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group()
-
-
-if __name__ == "__main__":
-    main()
+    """AllGather GEMM 实现"""
+    # 实现细节...
+    pass
 ```
 
-可以用下面的命令来测试上述代码：
+### 缓存行为
 
-```bash
-bash ./scripts/launch.sh <file_name>
-```
+自动调优器将结果缓存在 `~/.triton_dist/autotune/<function_name>/`：
+- 缓存文件为 JSON 格式，包含硬件/软件版本跟踪
+- 当硬件或软件版本变化时，结果会失效
+- 设置 `TRITON_DIST_AUTOTUNE_ALWAYS_TUNE=1` 可强制重新调优
 
-下面我们给 `kernel_consumer_gemm_persistent` 添加 `triton.autotune`，对 `kernel_consumer_gemm_persistent` 进行修改：
+### 环境变量
+
+| 变量 | 默认值 | 描述 |
+|------|--------|------|
+| `TRITON_DIST_AUTOTUNE_ALWAYS_TUNE` | `0` | 即使缓存存在也强制重新调优 |
+| `TRITON_DIST_AUTOTUNE_VERSION_CHECK` | `0` | 严格版本检查 |
+
+---
+
+## 上下文自动调优器 (`triton_dist.autotuner.contextual_autotune`)
+
+此自动调优器专为调优包含 `triton.autotune` 装饰的 Triton kernel 的函数设计。适用于以下场景：
+
+1. 函数包含多个带有 `triton.autotune` 装饰器的 Triton kernel
+2. Kernel 有副作用，无法单独调优
+3. 调优过程中需要分布式同步
+
+### 上下文自动调优器用法
 
 ```python
+from triton_dist.autotuner import contextual_autotune
+
+@contextual_autotune(is_dist=True, n_repeat=5, n_warmup=3)
+def my_distributed_function():
+    # 此函数包含 triton.autotune 装饰的 kernel
+    ...
+```
+
+### 上下文自动调优器参数
+
+```python
+triton_dist.autotuner.contextual_autotune(
+    is_dist=False,   # 启用分布式调优
+    n_repeat=5,      # 每个配置的计时迭代次数
+    n_warmup=3,      # 预热迭代次数
+)
+```
+
+### 示例：带有 Triton Autotune 的 AllGather GEMM
+
+```python
+import triton
+import triton_dist
+from triton_dist.autotuner import contextual_autotune
+
 def matmul_get_configs():
     return [
-        triton.Config(
-            {
-                "BLOCK_SIZE_M": BM,
-                "BLOCK_SIZE_N": BN,
-                "BLOCK_SIZE_K": BK,
-                "GROUP_SIZE_M": 8,
-            },
-            num_stages=s,
-            num_warps=w,
-        )
+        triton.Config({
+            "BLOCK_SIZE_M": BM,
+            "BLOCK_SIZE_N": BN,
+            "BLOCK_SIZE_K": BK,
+            "GROUP_SIZE_M": 8,
+        }, num_stages=s, num_warps=w)
         for BM in [128]
         for BN in [128, 256]
         for BK in [64, 128]
@@ -511,20 +203,14 @@ def matmul_get_configs():
         for w in [4, 8]
     ]
 
-
 @triton.autotune(configs=matmul_get_configs(), key=["M", "N", "K"])
-@triton.jit
+@triton_dist.jit
 def kernel_consumer_gemm_persistent(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    M,
-    N,
-    K,
+    a_ptr, b_ptr, c_ptr,
+    M, N, K,
     rank: tl.constexpr,
     num_ranks: tl.constexpr,
-    ready_ptr,
-    comm_buf_ptr,
+    ready_ptr, comm_buf_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -534,93 +220,64 @@ def kernel_consumer_gemm_persistent(
 ):
     ...
 
-def ag_gemm_persistent(
-    a,
-    b,
-    c,
-    rank,
-    num_ranks,
-    workspace_tensors,
-    barrier_tensors,
-    comm_buf,
-    ag_stream=None,
-    BLOCK_M=128,
-    BLOCK_N=256,
-    BLOCK_K=64,
-    stages=3,
-):
-    ...
-    grid = lambda META: (
-        min(
-            NUM_SMS,
-            triton.cdiv(M, META["BLOCK_SIZE_M"])
-            * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-        ),
-    )
-    kernel_consumer_gemm_persistent[grid](
-        workspace_tensors[rank],
-        b,
-        c,
-        M,
-        N_per_rank,
-        K,
-        rank,
-        num_ranks,
-        barrier_tensors[rank],
-        comm_buf,
-        # BLOCK_M,
-        # BLOCK_N,
-        # BLOCK_K,
-        # 8,
-        EPILOGUE_SUBTILE=False,
-        NUM_SMS=NUM_SMS,
-        # num_stages=stages,
-        # num_warps=8,
-    )
-
-    current_stream.wait_stream(ag_stream)
-```
-
-考虑到 `kernel_consumer_gemm_persistent` 是 `run_ag_gemm_persistent` 的一个子过程，而 `run_ag_gemm_persistent` 需要作为一个整体运行。为此，我们只需要用  `triton_dist.autotuner.contextual_autotune` 装饰 `run_ag_gemm_persistent` 函数（并且设 `is_dist=True`）：
-
-```python
-
-from triton_dist.autotuner import contextual_autotune
-
-def test_ag_gemm_tma_intra_node(rank, num_ranks, default_group):
-    ...
-
+def test_ag_gemm(rank, num_ranks, default_group):
+    # 设置 tensor...
+    
     @contextual_autotune(is_dist=True)
     def run_ag_gemm_persistent():
-        ...
-
-    ...
+        C = torch.empty([M, N_per_rank], dtype=dtype, device=device)
+        # 通信阶段
+        local_copy_and_barrier_all(...)
+        # 带有自动调优 kernel 的计算阶段
+        ag_gemm_persistent(A, B, C, rank, num_ranks, ...)
+        return C
+    
+    # 运行自动调优
+    C = run_ag_gemm_persistent()
 ```
 
-其中，rank-i 的 tuning 过程的 log 输出会打印在 `./.autotune_logs/rank-i.log` 中。
+### 工作原理
 
-更多的例子可以参考部分测试文件：[test_ag_gemm.py](../../python/triton_dist/test/nvidia/test_ag_gemm.py)、[test_moe_reduce_rs.py](../../python/triton_dist/test/nvidia/test_moe_reduce_rs.py)、[test_ag_moe.py](../../python/triton_dist/test/nvidia/test_ag_moe.py)，可以用如下命令进行测试：
+1. `ContextualAutotuner` 拦截对 `triton.autotune` 装饰的 kernel 的调用
+2. 它多次运行被装饰的函数，尝试不同的配置
+3. 每个配置都会被测量，选择最佳配置
+4. 在分布式模式下，结果会跨 rank 同步
+
+**调优过程：**
+
+| 调优迭代 | kernel-0 | kernel-1 |
+|----------|----------|----------|
+| 0 | config-0 (iter-0) | config-0 (iter-0) |
+| 1 | config-0 (iter-1) | config-0 (iter-1) |
+| 2 | config-1 (iter-0) | config-1 (iter-0) |
+| 3 | config-1 (iter-1) | config-1 (iter-1) |
+| 4 | **最佳配置** | config-2 (iter-0) |
+| 5 | **最佳配置** | config-2 (iter-1) |
+| 最终 | **最佳配置** | **最佳配置** |
+
+日志保存在 `./.autotune_logs/rank-{i}.log`。
+
+---
+
+## 选择合适的自动调优器
+
+| 使用场景 | 推荐 |
+|----------|------|
+| 调优带有配置空间的 Python 函数 | `triton_dist.tune.autotune` |
+| 包含 `triton.autotune` kernel 的函数 | `triton_dist.autotuner.contextual_autotune` |
+| 分布式 GEMM/通信 kernel | `triton_dist.tune.autotune` |
+| 简单 Triton kernel 调优 | `triton.autotune`（原生 Triton） |
+
+## 测试命令
 
 ```bash
+# 使用函数级自动调优测试
+bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_ag_gemm.py --case check
+
+# 使用上下文自动调优测试
 bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_ag_gemm.py --case correctness_tma_autotune
+
+# MoE 自动调优测试
 bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_moe_reduce_rs.py 8192 2048 1536 32 2 --check --autotune
 bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_ag_moe.py --M 2048 --autotune
 ```
-
-### Implementaiton
-
-`ContextualAutotuner` 会检测 `fn` 运行过程中被 `triton.autotune` 所装饰的并且触发 tuning 的 Triton kernel 并为其构建 tuning-context 来维护其当前的 tuning 状态。`ContextualAutotuner` 会多次运行 `fn`，每次运行过程中每个 Triton kernel 的一次调用都只会触发一次 kernel launch，该 kernel 对应的 tuning-context 会记录这次 launch 的测量时间以及 tuning 的进度，在该 kernel 的每个 config 都被充分测量之后，该 kernel 根据记录的测量时间来选出最优的 config 并保存。
-
-下面展示一个例子，假设 `fn` 每次运行过程中会各调用一次 kernel-0 和 kernel-1，kernel-0 一共有两个 tuning-config，kernel-1 有三个 tuning-config，每个 config 的测量次数为 2 次（进行两次 tuning-iter），则 `ContextualAutotuner` 的 tuning 过程就如下面表格所示：
-
-| Tuning-Iter                    |     |                                   |     |                                   |     |
-| ------------------------------ | --- | --------------------------------- | --- | --------------------------------- | --- |
-| 0                              | ... | kernel-0 (config-0 (iter-0))      | ... | kernel-1 (config-0 (iter-0))      | ... |
-| 1                              | ... | kernel-0 (config-0 (iter-1))      | ... | kernel-1 (config-0 (iter-1))      | ... |
-| 2                              | ... | kernel-0 (config-1 (iter-0))      | ... | kernel-1 (config-1 (iter-0))      | ... |
-| 3                              | ... | kernel-0 (config-1 (iter-1))      | ... | kernel-1 (config-1 (iter-1))      | ... |
-| 4                              | ... | kernel-0 (config-0 (best-config)) | ... | kernel-1 (config-2 (iter-0))      | ... |
-| 5                              | ... | kernel-0 (config-0 (best-config)) | ... | kernel-1 (config-2 (iter-1))      | ... |
-| final execution to get results | ... | kernel-0 (config-0 (best-config)) | ... | kernel-1 (config-1 (best-config)) | ... |
-
-注意，在 `ContextualAutotuner` 执行 Tuning-Iter-3 的时候，kernel-0 的所有 config 都已经测量完毕，选出了 config-0 作为 best-config，而 kernel-1 的 config 还没测量完毕，所以 `ContextualAutotuner` 会继续执行 `fn` 直到 kernel-1 也 tuning 结束。

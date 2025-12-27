@@ -1,7 +1,7 @@
 :orphan:
 
 End-to-End Integration
-=========
+======================
 
 Here you'll find a list of tutorials for implementing various distributed operations with Triton-Distributed. We recommend reading our **technical report** first to understand the design and implementation details before diving into these examples.
 

@@ -40,22 +40,27 @@ LAYER_CONFIGS = {
 
 
 def assert_allclose(x: torch.Tensor, y: torch.Tensor, rtol, atol, verbose=True, allow_nan: bool = False,
-                    allow_inf: bool = False):
+                    allow_inf: bool = False, fail_if_too_small: bool = False):
+    """
+    fail_if_too_small: if `x` or `y` is not much larger than `atol * 5`, raise error.
+    """
     if not allow_nan:
         if torch.any(x.isnan()):
-            print(f"x has nan: {x}")
-            raise RuntimeError
+            raise RuntimeError(f"x has nan: {x}")
         if torch.any(y.isnan()):
-            print(f"y has nan: {y}")
-            raise RuntimeError
+            raise RuntimeError(f"y has nan: {y}")
 
     if not allow_inf:
         if torch.any(x.isinf()):
-            print(f"x has inf: {x}")
-            raise RuntimeError
+            raise RuntimeError(f"x has inf: {x}")
         if torch.any(y.isinf()):
-            print(f"y has inf: {y}")
-            raise RuntimeError
+            raise RuntimeError(f"y has inf: {y}")
+
+    if fail_if_too_small:
+        if (x_abs_mean := torch.abs(x).float().mean()) < atol * 5:
+            raise RuntimeError(f"x is too small for atol: {x_abs_mean} vs atol {atol}")
+        if (y_abs_mean := torch.abs(y).float().mean()) < atol * 5:
+            raise RuntimeError(f"y is too small for atol: {y_abs_mean} vs atol {atol}")
 
     if not torch.allclose(x, y, rtol=rtol, atol=atol):
         print(f"shape of x: {x.shape}")

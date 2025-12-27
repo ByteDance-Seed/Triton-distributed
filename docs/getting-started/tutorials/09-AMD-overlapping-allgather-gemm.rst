@@ -16,7 +16,7 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch_amd.sh ./tutorials/09-AMD-overlapping-allgather-gemm.py
+    bash ./scripts/launch_amd.sh tutorials/09-AMD-overlapping-allgather-gemm.py
 
 
 Background
@@ -60,7 +60,7 @@ The differences from the gemm-only kernel are: (1) Each tile needs to wait for t
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def consumer_gemm_persistent_kernel(
         A,
         localA,

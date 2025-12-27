@@ -101,7 +101,7 @@ if __name__ == "__main__":
     _, ag_time_ms = perf_func(lambda: triton_all_gather(ag_buffer), iters, warmup_iters)
 
     gbps = ag_buffer.nbytes * 1e-9 / (ag_time_ms * 1e-3) * (WORLD_SIZE - 1) / WORLD_SIZE
-    print(f"RANK = {RANK}, Bandwith = {gbps} GB/S")
+    print(f"RANK = {RANK}, Bandwith = {gbps:0.2f} GB/S")
     nvshmem_free_tensor_sync(ag_buffer)
     nvshmem.core.finalize()
     torch.distributed.destroy_process_group()

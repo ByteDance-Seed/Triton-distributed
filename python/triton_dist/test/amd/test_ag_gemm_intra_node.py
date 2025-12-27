@@ -33,7 +33,7 @@ import random
 from triton_dist.profiler_utils import perf_func, group_profile
 from triton_dist.test.utils import assert_allclose
 from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
-from triton_dist.kernels.amd.all_gather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm_only, allgather
+from triton_dist.kernels.amd.allgather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm_only, allgather
 
 
 def make_cuda_graph(mempool, func):
@@ -123,13 +123,14 @@ class AGGemmIntraNode(torch.nn.Module):
     def gemm_only(self, A: torch.Tensor, weight: torch.Tensor, NUM_SMS: int):
         return gemm_only(A, weight, ctx=self.ctx, NUM_SMS=NUM_SMS)
 
-    def gemm_only_perf(self, A: torch.Tensor, weight: torch.Tensor, iters: int = 100, warmup_iters: int = 10):
+    def gemm_only_perf(self, A: torch.Tensor, weight: torch.Tensor, iters: int = 100, warmup_iters: int = 10,
+                       profile=False):
 
         barrier_ptr = self.ctx.barrier_tensors[self.ctx.rank]
         barrier_ptr.fill_(1)
         torch.cuda.synchronize()
         NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
-        with group_profile("gemm_only", True, group=self.tp_group):
+        with group_profile("gemm_only", profile, group=self.tp_group):
             _, gemm_perf = perf_func(partial(self.gemm_only, A, weight, NUM_SMS), iters=iters,
                                      warmup_iters=warmup_iters)
         barrier_ptr.fill_(0)
@@ -140,11 +141,12 @@ class AGGemmIntraNode(torch.nn.Module):
     def comm_only(self, input: torch.Tensor):
         return allgather(input, ctx=self.ctx)
 
-    def comm_only_perf(self, input: torch.Tensor, iters: int = 100, warmup_iters: int = 10):
+    def comm_only_perf(self, input: torch.Tensor, iters: int = 100, warmup_iters: int = 10, profile=False):
         for comm_sms_per_rank in range(
-                1, min(torch.cuda.get_device_properties(0).multi_processor_count // (self.world_size - 1), 17)):
+                1, min(torch.cuda.get_device_properties(0).multi_processor_count // (self.world_size - 1), 8)):
             self.ctx.comm_sms = comm_sms_per_rank * (self.world_size - 1)
-            _, comm_perf = perf_func(partial(self.comm_only, input), iters=iters, warmup_iters=warmup_iters)
+            with group_profile(f"comm_only_sm{self.ctx.comm_sms}", profile, group=self.tp_group):
+                _, comm_perf = perf_func(partial(self.comm_only, input), iters=iters, warmup_iters=warmup_iters)
             dist_print(f"comm only perf with {self.ctx.comm_sms} sms: ", comm_perf, need_sync=True,
                        allowed_ranks=list(range(self.world_size)))
         return comm_perf
@@ -267,9 +269,9 @@ def _make_data(M, N, K, has_bias, tp_group: torch.distributed.ProcessGroup):
 
     A = rand_tensor((local_M, K), dtype=input_dtype, device=current_device) * scale
     if args.transpose_weight:
-        B = rand_tensor((K, local_N), dtype=input_dtype, device=current_device).T * scale
+        B = rand_tensor((K, local_N), dtype=input_dtype, device=current_device).T
     else:
-        B = rand_tensor((local_N, K), dtype=input_dtype, device=current_device) * scale
+        B = rand_tensor((local_N, K), dtype=input_dtype, device=current_device)
     bias = None
     if has_bias:
         bias = rand_tensor((M, local_N), dtype=input_dtype, device=current_device)
@@ -299,10 +301,10 @@ if __name__ == "__main__":
     A, B, bias = _make_data(args.M, args.N, args.K, args.has_bias, TP_GROUP)
 
     if args.gemm_only_perf:
-        dist_ag_gemm_op.gemm_only_perf(A, B, iters=args.iters, warmup_iters=args.warmup)
+        dist_ag_gemm_op.gemm_only_perf(A, B, iters=args.iters, warmup_iters=args.warmup, profile=args.profile)
 
     elif args.comm_only_perf:
-        dist_ag_gemm_op.comm_only_perf(A, iters=args.iters, warmup_iters=args.warmup)
+        dist_ag_gemm_op.comm_only_perf(A, iters=args.iters, warmup_iters=args.warmup, profile=args.profile)
 
     else:
 
@@ -311,12 +313,13 @@ if __name__ == "__main__":
             run_stress_test(args, TP_GROUP)
 
         torch_output = torch_ag_gemm(A, B, bias, TP_GROUP)
-        dist_triton_output = dist_ag_gemm_op.forward(A, B, args.use_fused_kernel)
+        dist_triton_output = dist_ag_gemm_op.forward(A, B, args.use_fused_kernel, args.autotune)
 
         with group_profile("ag_gemm", args.profile, group=TP_GROUP):
 
-            _, dist_triton_perf = perf_func(partial(dist_ag_gemm_op.forward, A, B, args.use_fused_kernel),
-                                            iters=args.iters, warmup_iters=args.warmup)
+            _, dist_triton_perf = perf_func(
+                partial(dist_ag_gemm_op.forward, A, B, args.use_fused_kernel, args.autotune), iters=args.iters,
+                warmup_iters=args.warmup)
 
             _, torch_perf = perf_func(partial(torch_ag_gemm, A, B, bias, TP_GROUP), iters=args.iters,
                                       warmup_iters=args.warmup)

@@ -32,11 +32,13 @@ from triton_dist.models import ModelConfig
 from triton_dist.models.engine import Engine
 from triton_dist.models.utils import seed_everything
 
+DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16}
+
 
 def parse_args() -> Namespace:
     p = ArgumentParser()
     p.add_argument("--model", type=str, default="Qwen/Qwen3-32B")
-    p.add_argument("--dtype", default="bfloat16", type=str, help="data type")
+    p.add_argument("--dtype", default="bfloat16", choices=DTYPE_MAP.keys(), help="data type")
     p.add_argument("--bsz", type=int, default=8, help="Batch size for inference")
     p.add_argument("--gen_len", type=int, default=256, help="Length of generated tokens")
     p.add_argument("--max_length", type=int, default=384)
@@ -48,11 +50,6 @@ def parse_args() -> Namespace:
     p.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     return p.parse_args()
 
-
-DTYPE_MAP = {
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-}
 
 if __name__ == "__main__":
     args = parse_args()

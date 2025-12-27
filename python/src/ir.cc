@@ -230,6 +230,23 @@ void init_triton_distributed_ir(py::module &&m) {
              }
              return self.create<tensor::InsertOp>(scalar, dest, to_index);
            })
+      // GPU Ops
+      .def("create_laneid",
+           [](TritonOpBuilder &self) -> Value {
+             Value laneId =
+                 self.create<mlir::gpu::LaneIdOp>(/*upperBound=*/nullptr);
+             return self.create<arith::IndexCastOp>(
+                 self.getBuilder().getI32Type(), laneId);
+           })
+      .def("create_warp_shuffle",
+           [](TritonOpBuilder &self, Value &value, Value &offset, Value &width,
+              const int mode) -> Value {
+             mlir::gpu::ShuffleMode shflMode =
+                 static_cast<mlir::gpu::ShuffleMode>(mode);
+             auto shflOp = self.create<mlir::gpu::ShuffleOp>(value, offset,
+                                                             width, shflMode);
+             return shflOp.getShuffleResult();
+           })
 
       // Distributed Ops
       .def("create_distributed_wait",

@@ -24,60 +24,14 @@
 ################################################################################
 import triton
 import triton.language as tl
-from triton_dist.language.extra.cuda.language_extra import (
-    st,
-    pack_b32_v2,
-)
-
 from triton.language.core import to_tensor
-from triton.language import core
+
+from triton_dist.kernels.common_ops import globaltimer_lo, smid, fence, pack_b32_v2
 
 NUM_BITS_ID = 20  # global_id = block_id * num_blocks + group_id
 NUM_BITS_TASK_TYPE = 11
 NUM_BITS_EVENT = 1  # only start/end
 NUM_BITS_PAYLOAD = 32
-
-
-@core.extern
-def globaltimer_lo(_semantic=None):
-    return tl.inline_asm_elementwise(
-        asm="mov.u32 $0, %globaltimer_lo;",
-        constraints=("=r"),
-        args=[],
-        dtype=tl.uint32,
-        is_pure=False,
-        pack=1,
-        _semantic=_semantic,
-    )
-
-
-@core.extern
-def smid(_semantic=None):
-    return tl.inline_asm_elementwise(
-        asm="mov.u32 $0, %smid;",
-        constraints=("=r"),
-        args=[],
-        dtype=tl.uint32,
-        is_pure=False,
-        pack=1,
-        _semantic=_semantic,
-    )
-
-
-@core.extern
-def membar(scope: core.constexpr = core.constexpr("cta"), _semantic=None):
-    return tl.inline_asm_elementwise(
-        asm=f"""
-        membar.{scope.value};
-        mov.u32 $0, 0;
-        """,
-        constraints=("=r"),
-        args=[],
-        dtype=tl.uint32,
-        is_pure=False,
-        pack=1,
-        _semantic=_semantic,
-    )
 
 
 @tl.core._aggregate
@@ -110,11 +64,13 @@ class Profiler:
         # init global/block meta
         profiler_buffer = profiler_buffer.to(tl.pointer_type(tl.uint64))
         if ENABLE_PROFILING:
-            global_meta = pack_b32_v2(num_blocks, num_groups)
-            st(profiler_buffer, global_meta)
+            if pid == 0:
+                tl.store(profiler_buffer.to(tl.pi32_t), num_blocks)
+                tl.store(profiler_buffer.to(tl.pi32_t) + 1, num_groups)
 
-            block_meta = pack_b32_v2(pid, smid())
-            st(profiler_buffer + 1 + pid, block_meta)
+            pid_off = pid + 1
+            tl.store(profiler_buffer.to(tl.pi32_t) + pid_off * 2 + 0, pid)
+            tl.store(profiler_buffer.to(tl.pi32_t) + pid_off * 2 + 1, smid())
 
             profiler_buffer = profiler_buffer + 1 + num_blocks
         stride = num_blocks * num_groups
@@ -163,10 +119,10 @@ class Profiler:
     @triton.jit
     def record(self, is_start, task_type):
         if self.ENABLE_PROFILING:
-            membar("cta")
+            fence(semantic="sc", scope="cta")
             if self.is_leader:
                 entry = self.get_profile_entry(is_start, task_type)
-                st(self.buffer, entry)
+                tl.store(self.buffer, entry)
             self.buffer += self.stride
-            membar("cta")
+            fence(semantic="sc", scope="cta")
         return self

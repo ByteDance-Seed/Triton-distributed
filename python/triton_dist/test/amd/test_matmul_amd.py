@@ -765,21 +765,21 @@ for fp8_inputs in [False, True]:
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
             x_vals=[
-                ## GEMM RS
-                (8192, 4096, 11008),
-                (8192, 4096, 14336),
-                (8192, 3584, 14336),
-                (8192, 3584, 1792),
-                (8192, 4608, 36864),
-                (8192, 8192, 28672),
-                (8192, 8192, 29568),
-                ## AG GEMM
-                (8192, 11008, 4096),
-                (8192, 14336, 4096),
-                (8192, 28672, 8192),
-                (8192, 53248, 16384),
-                (8192, 14336, 4096),
-                (8192, 29568, 8192),
+                # ## GEMM RS
+                # (8192, 4096, 11008),
+                # (8192, 4096, 14336),
+                # (8192, 3584, 14336),
+                # (8192, 3584, 1792),
+                # (8192, 4608, 36864),
+                # (8192, 8192, 28672),
+                # (8192, 8192, 29568),
+                # ## AG GEMM
+                (8192, 1376, 4096),
+                # (8192, 14336, 4096),
+                # (8192, 28672, 8192),
+                # (8192, 53248, 16384),
+                # (8192, 14336, 4096),
+                # (8192, 29568, 8192),
             ],
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
@@ -844,8 +844,8 @@ def benchmark_streamk(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-print("StreamK GEMM")
-benchmark_streamk.run(show_plots=True, print_data=True)
+# print("StreamK GEMM")
+# benchmark_streamk.run(show_plots=True, print_data=True)
 
 
 @triton.testing.perf_report(configs)

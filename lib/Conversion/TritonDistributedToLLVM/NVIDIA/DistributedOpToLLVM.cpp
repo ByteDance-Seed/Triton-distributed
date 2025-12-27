@@ -96,10 +96,18 @@ public:
   using OpAdaptor = typename DistOp::Adaptor;
 
   GenericOpToNVSHMEMDevice(const LLVMTypeConverter &converter,
-                           const PatternBenefit &benefit, StringRef calleeName,
-                           StringRef libname = "", StringRef libpath = "")
+                           const PatternBenefit &benefit,
+                           StringRef calleeNameBase, StringRef libname = "",
+                           StringRef libpath = "")
       : ConvertOpToLLVMPattern<DistOp>(converter, benefit),
-        calleeName(calleeName), libname(libname), libpath(libpath) {}
+        calleeName(calleeNameBase), libname(libname), libpath(libpath) {
+    // control whether to use NVSHMEM wrapper
+    bool use_nvshmem_wrapper =
+        mlir::triton::tools::getBoolEnv("TRITON_DIST_SHMEM_WRAPPER");
+    // currently nvshmem bitcode does not support ibgda, so use ptx wrapper
+    if (use_nvshmem_wrapper)
+      calleeName += "_wrapper";
+  }
 
   LogicalResult
   matchAndRewrite(DistOp op, OpAdaptor adaptor,
@@ -114,6 +122,9 @@ public:
         op->getNumResults() == 0
             ? voidTy
             : this->getTypeConverter()->convertType(op->getResult(0).getType());
+    if (StringRef(calleeName).starts_with("nvshmem_n_pes") or
+        StringRef(calleeName).starts_with("nvshmem_my_pe"))
+      newOperands = ValueRange();
     auto nvshmemOp = CreateNVSHMEMOp(rewriter, op, calleeName, libname, libpath,
                                      newOperands, retType);
     auto newResult = nvshmemOp->getResult(0);
@@ -127,7 +138,7 @@ public:
   }
 
 private:
-  StringRef calleeName;
+  std::string calleeName;
   StringRef libname;
   StringRef libpath;
 };

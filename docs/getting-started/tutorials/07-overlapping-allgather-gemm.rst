@@ -13,7 +13,8 @@ In doing so, you will learn about:
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch.sh ./tutorials/07-overlapping-allgather-gemm.py
+    source ./scripts/setenv.sh
+    bash ./scripts/launch.sh tutorials/07-overlapping-allgather-gemm.py
 
 GEMM Kernel
 -----------
@@ -36,7 +37,7 @@ For instance, in an AllGather GEMM example, we can achieve overlapping computati
         return ret
 
 
-    @triton.jit(launch_metadata=_matmul_launch_metadata)
+    @triton_dist.jit(launch_metadata=_matmul_launch_metadata)
     def kernel_consumer_gemm_persistent(a_ptr, b_ptr, c_ptr,  #
                                         M, N, K,  #
                                         rank: tl.constexpr, num_ranks: tl.constexpr, ready_ptr, comm_buf_ptr,
@@ -201,7 +202,7 @@ Let's declare a function to perform internode communication.
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def nvshmem_device_producer_p2p_put_block_kernel(
         ag_buffer_ptr,  # *Pointer* to allgather output vector. The rank-th index has been loaded with local tensor
         signal_buffer_ptr,  # *Pointer* to signal barrier.

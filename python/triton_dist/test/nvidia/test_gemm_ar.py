@@ -32,9 +32,23 @@ from typing import Optional
 
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import (dist_print, generate_data, initialize_distributed, nvshmem_barrier_all_on_stream,
-                               finalize_distributed, sleep_async)
+from triton_dist.utils import (dist_print, initialize_distributed, nvshmem_barrier_all_on_stream, finalize_distributed,
+                               sleep_async, rand_tensor)
 from triton_dist.layers.nvidia import GemmARLayer
+
+
+def _make_data(M):
+    global scale
+    scale = RANK + 1
+    if input_dtype == torch.int8:
+        scale_factor = 1
+    else:
+        scale_factor = 0.01 * scale
+    device = torch.cuda.current_device()
+    A = rand_tensor((M, local_K), dtype=input_dtype, device=device) * scale_factor
+    weight = rand_tensor((args.N, local_K), dtype=input_dtype, device=device)
+    bias = rand_tensor((M, args.N), dtype=input_dtype, device=device) if args.has_bias else None
+    return A, weight, bias
 
 
 def torch_gemm_ar(
@@ -215,23 +229,6 @@ if __name__ == "__main__":
         scale_b = None
 
     scale = 0
-
-    def _make_data(M):
-        global scale
-        scale = random.randint(1, 1000)
-        if input_dtype == torch.int8:
-            scale_factor = 1
-        else:
-            scale_factor = 0.01 * scale
-        data_config = [
-            ((M, local_K), input_dtype, (scale_factor, 0)),  # A
-            ((args.N, local_K), input_dtype, (scale_factor, 0)),  # B
-            (  # bias
-                None if not args.has_bias else ((M, args.N), input_dtype, (1, 0))),
-        ]
-        generator = generate_data(data_config)
-        A, weight, bias = next(generator)
-        return A, weight, bias
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     NUM_GEMM_SMS = NUM_SMS - args.num_comm_sms

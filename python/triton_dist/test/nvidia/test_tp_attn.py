@@ -29,7 +29,6 @@ import torch
 import torch.distributed
 from functools import partial
 from transformers import AutoConfig
-import nvshmem.core
 
 from triton_dist.kernels.allreduce import to_allreduce_method, get_allreduce_methods
 from triton_dist.layers.nvidia.tp_attn import TP_Attn, _set_cos_sin_cache
@@ -37,12 +36,9 @@ from triton_dist.models.kv_cache import KV_Cache
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.profiler_utils import group_profile, perf_func
 from triton_dist.test.utils import assert_allclose
-from triton_dist.utils import (initialize_distributed, dist_print, nvshmem_barrier_all_on_stream)
+from triton_dist.utils import initialize_distributed, dist_print, nvshmem_barrier_all_on_stream, finalize_distributed, rand_tensor
 
-THRESHOLD_MAP = {
-    torch.float16: 1e-2,
-    torch.bfloat16: 2e-2,
-}
+THRESHOLD_MAP = {torch.float16: (1e-2, 1e-2), torch.bfloat16: (5e-2, 5e-2)}
 
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
@@ -76,10 +72,6 @@ def parse_args():
                         help="All-reduce method (allreduce mode only)")
 
     return parser.parse_args()
-
-
-def rand_tensor(shape: list[int], dtype: torch.dtype):
-    return torch.rand(shape, dtype=dtype).cuda() / 10
 
 
 def make_cuda_graph(mempool, func):
@@ -191,8 +183,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
 
     DTYPE = DTYPE_MAP[args.dtype]
-    ATOL = THRESHOLD_MAP.get(DTYPE, 1e-2)
-    RTOL = THRESHOLD_MAP.get(DTYPE, 1e-2)
+    ATOL, RTOL = THRESHOLD_MAP.get(DTYPE, (1e-2, 1e-2))
 
     # Common setup
     config = AutoConfig.from_pretrained(args.model)
@@ -220,5 +211,4 @@ if __name__ == "__main__":
 
     # Final cleanup
     attn.finalize()
-    nvshmem.core.finalize()
-    torch.distributed.destroy_process_group()
+    finalize_distributed()

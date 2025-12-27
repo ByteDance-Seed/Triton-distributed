@@ -34,7 +34,7 @@ import triton
 from triton_dist.layers.amd.tp_mlp import TP_MLP
 from triton_dist.models.utils import init_model_cpu
 from triton_dist.profiler_utils import group_profile, perf_func
-from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed
+from triton_dist.utils import dist_print, initialize_distributed, finalize_distributed, rand_tensor
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
@@ -44,6 +44,8 @@ THRESHOLD_MAP = {
     torch.int8: 0,
     torch.int32: 0,
 }
+
+DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16}
 
 
 def check_allclose(out: torch.Tensor, golden: torch.Tensor, atol=1e-3, rtol=1e-3):
@@ -58,13 +60,6 @@ def check_allclose(out: torch.Tensor, golden: torch.Tensor, atol=1e-3, rtol=1e-3
         dist_print(f"❗ [RANK {RANK}] Max difference: {max_diff.item()} (atol={atol}, rtol={rtol})")
         dist_print(f"Output: {out}\nGolden: {golden}", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
         assert False, f"❌ [RANK {RANK}] Output mismatch."
-
-
-def rand_tensor(shape: list[int], dtype: torch.dtype):
-    if dtype in [torch.int32, torch.int8]:
-        return torch.randint(-127, 128, shape, dtype=dtype).cuda()
-    else:
-        return torch.rand(shape, dtype=dtype).cuda() / 10
 
 
 def make_cuda_graph(mempool, func):
@@ -87,7 +82,7 @@ def parse_args():
     parser.add_argument("--model", default="Qwen/Qwen3-32B", type=str, help="HuggingFace model name")
     parser.add_argument("--warmup", default=20, type=int, help="warmup iterations")
     parser.add_argument("--iters", default=100, type=int, help="perf iterations")
-    parser.add_argument("--dtype", default="bfloat16", type=str, help="data type")
+    parser.add_argument("--dtype", default="bfloat16", choices=DTYPE_MAP.keys(), help="data type")
 
     parser.add_argument("--profile", default=False, action="store_true", help="dump torch.profiler.profile")
     parser.add_argument("--ag_gemm_persistent", default=False, action="store_true")
@@ -97,11 +92,6 @@ def parse_args():
 
     return parser.parse_args()
 
-
-DTYPE_MAP = {
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-}
 
 if __name__ == "__main__":
     args = parse_args()
@@ -236,7 +226,7 @@ if __name__ == "__main__":
 
         # benchmark gemm rs
         N, K = mlp.down_proj.size()
-        x = rand_tensor([M, K], dtype=DTYPE)
+        x = rand_tensor([M, K], dtype=DTYPE) / 10
         check_allclose(mlp.torch_gemm_rs(x), mlp.dist_triton_gemm_rs(x), atol=ATOL, rtol=RTOL)
         if os.getenv('CUDA_GRAPH') in ['1', 'true', 'True']:
             mempool = torch.cuda.graph_pool_handle()

@@ -8,7 +8,8 @@ In this tutorial, you will write a multi-node reduce-scatter operation.
 .. code-block:: bash
 
     # To run this tutorial
-    bash ./scripts/launch.sh ./tutorials/06-inter-node-reduce-scatter.py
+    source ./scripts/setenv.sh
+    bash ./scripts/launch.sh tutorials/06-inter-node-reduce-scatter.py
 
 
 Kernel
@@ -16,7 +17,7 @@ Kernel
 
 .. code-block:: Python
 
-    @triton.jit
+    @triton_dist.jit
     def kernel_inter_node_p2p_for_same_local_rank(offset, local_world_size, M_per_rank, N, input,  # [M, N]
                                                 output,  # [M, N]
                                                 ):

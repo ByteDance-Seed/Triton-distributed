@@ -16,8 +16,7 @@ else
     echo "Found NVSHMEM_HOME from Python nvidia-nvshmem-cu12: $NVSHMEM_HOME"
   else
     # 3. Fallback to ldconfig
-    NVSHMEM_HOME=$(ldconfig -p | grep 'libnvshmem_host' | awk '{print $NF}' | xargs dirname | head -n 1)
-
+    NVSHMEM_HOME=$(ldconfig -p | grep 'libnvshmem_host' | awk '{print $NF}' | xargs -r dirname | head -n 1)
     if [ -n "$NVSHMEM_HOME" ]; then
       echo "Found NVSHMEM_HOME from ldconfig: $NVSHMEM_HOME"
     else

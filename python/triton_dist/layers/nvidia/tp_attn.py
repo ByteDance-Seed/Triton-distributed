@@ -64,7 +64,8 @@ def layer_norm(
     w: torch.Tensor,
 ):
     """Applies RMS Normalization using flashinfer."""
-    return flashinfer.norm.rmsnorm(hidden_states.view(-1, hidden_states.size(-1)), w, eps).view_as(hidden_states)
+    return flashinfer.norm.rmsnorm(hidden_states.contiguous().view(-1, hidden_states.size(-1)), w,
+                                   eps).view_as(hidden_states)
 
 
 def _set_cos_sin_cache(inv_freq: torch.Tensor, max_length: int):

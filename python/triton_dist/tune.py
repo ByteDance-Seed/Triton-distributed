@@ -338,7 +338,6 @@ class AutoTuner:
         with pretty_triton_config_repr(), set_stream_handler_log_level(
                 logging.INFO if autotune_verbose else logging.WARNING):
             config_space = self.config_space
-
             if dups := AutoTuner._has_duplicate_kwargs(kwargs, config_space[0]):
                 if autotune_allow_arg_overwrite:
                     warnings.warn(
@@ -453,6 +452,7 @@ class AutoTuner:
 
             # Benchmarking using torch.cuda.Event for GPU, with a fallback to timeit for CPU.
             try:
+                logger.info(f"tune with config {config}")
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
 

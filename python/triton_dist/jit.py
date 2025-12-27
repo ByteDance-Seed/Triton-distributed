@@ -200,7 +200,7 @@ def nvidia_stages_inspection_hook(self, stages, options, language, capability):
                     f"-L{NVSHMEMHelper.get_nvshmem_lib()}",
                     "-lnvshmem_device",
                     fbin,
-                    NVSHMEMHelper.get_nvshmem_cubin(src, capability).__str__(),
+                    NVSHMEMHelper.get_nvshmem_cubin(src, capability, metadata).__str__(),
                     "-o",
                     fbin_combined,
                 ]

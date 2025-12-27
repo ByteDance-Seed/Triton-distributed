@@ -30,6 +30,7 @@ ALIGNMENT_MAP = {"i32": 4, "i64": 8}
 
 LD_SEMANTIC = ["acquire", "monotonic"]
 ST_SEMANTIC = ["monotonic", "release"]
+FENCE_SEMANTIC = ["acquire", "release", "acq_rel", "seq_cst"]
 ALL_SEMANTIC = ["acquire", "monotonic", "release", "acq_rel"]
 # LLVM IR has no unsigned data type. so only signed here
 DTYPES = ["i32", "i64"]
@@ -91,6 +92,11 @@ define linkonce hidden {dtype} @__atom_cas_{success_semantic}_{failure_semantic}
   %10 = cmpxchg ptr addrspace(1) %0, {dtype} %1, {dtype} %2 {scope_attr} {success_semantic} {failure_semantic}, align {alignment}
   %11 = extractvalue {{ {dtype}, i1 }} %10, 0
   ret {dtype} %11
+}}
+"""
+FENCE_TEMPLACE = """define linkonce hidden void @__extra_fence_{semantic}_{scope}() local_unnamed_addr {{
+  fence syncscope("{scope}") {semantic}
+  ret void
 }}
 """
 
@@ -156,6 +162,15 @@ def gen_atomic_cas():
                     ))
 
 
+def gen_fence():
+    for semantic in FENCE_SEMANTIC:
+        for scope in SCOPES:
+            print(FENCE_TEMPLACE.format(
+                semantic=semantic,
+                scope=scope,
+            ))
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", action="store_true", default=False, help="file path to save llvm ir to")
@@ -169,5 +184,6 @@ with redirect_stdout(open(args.out) if args.out else sys.stdout):
     gen_store()
     gen_atomic_add()
     gen_atomic_cas()
+    gen_fence()
 
 # print("done")

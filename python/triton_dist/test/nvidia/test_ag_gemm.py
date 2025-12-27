@@ -82,9 +82,9 @@ def make_data(M, N, K, dtype: torch.dtype, trans_b, tp_group: torch.distributed.
     current_device = torch.cuda.current_device()
     A = rand_tensor([M_per_rank, K], dtype=dtype, device=current_device) * scale
     if trans_b:
-        B = rand_tensor([N_per_rank, K], dtype=dtype, device=current_device).T * scale
+        B = rand_tensor([N_per_rank, K], dtype=dtype, device=current_device).T
     else:
-        B = rand_tensor([K, N_per_rank], dtype=dtype, device=current_device) * scale
+        B = rand_tensor([K, N_per_rank], dtype=dtype, device=current_device)
 
     return A, B
 

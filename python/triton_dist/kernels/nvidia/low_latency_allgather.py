@@ -28,11 +28,11 @@ from typing import List
 
 import triton.language as tl
 import triton_dist
-from triton_dist.language.extra import libshmem_device
+from triton_dist.kernels.common_ops import pack_b32_v2
 
+from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.cuda.language_extra import (
     __syncthreads,
-    pack_b32_v2,
     tid,
     ntid,
     load_v4_u32,
