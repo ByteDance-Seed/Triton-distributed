@@ -18,6 +18,7 @@ CLANG_FLAGS=(
     -std=c++20
     -emit-llvm
     --offload-arch=${BITCODE_LIB_ARCH}
+    -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem
     -I${ROCSHMEM_INSTALL_DIR}/include
     -I${ROCSHMEM_INSTALL_DIR}/../
     -I${ROCSHMEM_SRC}/src
