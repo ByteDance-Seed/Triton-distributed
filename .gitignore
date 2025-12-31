@@ -78,3 +78,5 @@ hf_configs
 tmp*
 *.whl
 *.zip
+
+*zst*

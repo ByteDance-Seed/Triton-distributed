@@ -177,20 +177,24 @@ def run_performance_test(model, run_type, kv_cache, args, tp_group):
                                         WORLD_SIZE, dim=0)[RANK].contiguous() if args.mode == 'ag_rs' else input_ids
     triton_func = partial(model.inference, triton_func_input, position_ids, kv_cache, True)
 
-    # Create CUDA graphs BEFORE profiling to exclude compilation overhead.
-    mempool = torch.cuda.graph_pool_handle()
+    use_cuda_graph = not os.environ.get("EP_MOE", "0") == "1"
+    triton_dist_graph = None
     torch_graph = None
-    if model.model_type == 'dense':
-        model.set_fwd(mode='torch')
-        torch_graph = make_cuda_graph(mempool, torch_func)
+    mempool = None
+    if use_cuda_graph:
+        # Create CUDA graphs BEFORE profiling to exclude compilation overhead.
+        mempool = torch.cuda.graph_pool_handle()
+        if model.model_type == 'dense':
+            model.set_fwd(mode='torch')
+            torch_graph = make_cuda_graph(mempool, torch_func)
 
-    if args.mode == 'ag_rs':
-        model.set_fwd(mode='triton_dist')
-    elif args.mode == 'allreduce':
-        model.set_fwd(mode='triton_dist_AR')
-    elif args.mode == 'gemm_ar':
-        model.set_fwd(mode='triton_dist_gemm_ar')
-    triton_dist_graph = make_cuda_graph(mempool, triton_func)
+        if args.mode == 'ag_rs':
+            model.set_fwd(mode='triton_dist')
+        elif args.mode == 'allreduce':
+            model.set_fwd(mode='triton_dist_AR')
+        elif args.mode == 'gemm_ar':
+            model.set_fwd(mode='triton_dist_gemm_ar')
+        triton_dist_graph = make_cuda_graph(mempool, triton_func)
 
     # Run benchmark using the pre-compiled graphs.
     with group_profile(f"e2e_{run_type}", args.profile, group=tp_group):
@@ -203,7 +207,16 @@ def run_performance_test(model, run_type, kv_cache, args, tp_group):
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
         # Benchmark Triton
-        _, dist_triton_perf = perf_func(triton_dist_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+        if triton_dist_graph:
+            _, dist_triton_perf = perf_func(triton_dist_graph.replay, iters=args.iters, warmup_iters=args.warmup)
+        else:
+            if args.mode == 'ag_rs':
+                model.set_fwd(mode='triton_dist')
+            elif args.mode == 'allreduce':
+                model.set_fwd(mode='triton_dist_AR')
+            elif args.mode == 'gemm_ar':
+                model.set_fwd(mode='triton_dist_gemm_ar')
+            _, dist_triton_perf = perf_func(triton_func, iters=args.iters, warmup_iters=args.warmup)
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
 
     # Print results
@@ -215,9 +228,7 @@ def run_performance_test(model, run_type, kv_cache, args, tp_group):
                need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
 
     # Cleanup
-    if torch_graph:
-        del torch_graph
-    del triton_dist_graph, mempool
+    del torch_graph, triton_dist_graph, mempool
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ class TritonDistFusedEpMoeFunction(torch.autograd.Function):
 
         token_splits_this_rank = ep_a2a_layout_desc.recv_buf_tokens_per_expert[ep_rank]
 
-        assert ep_group.size() == 8  # only for intra-node
+        assert ep_group.size() <= 8  # only for intra-node
         optim_config = get_moe_optim_config(use_mega=True)
         profile_config = get_triton_dist_moe_profile_enabled()
 

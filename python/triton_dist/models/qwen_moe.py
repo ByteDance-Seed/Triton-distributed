@@ -26,6 +26,7 @@
 import torch
 import torch.nn.functional as F
 import gc
+import os
 from transformers import AutoConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeDecoderLayer
 from triton_dist.models.kv_cache import KV_Cache
@@ -36,6 +37,7 @@ if not torch.cuda.is_available():
 try:
     if torch.version.cuda:
         from triton_dist.layers.nvidia.tp_moe import TP_MoE
+        from triton_dist.layers.nvidia.ep_moe import EP_MoE
         from triton_dist.layers.nvidia.tp_attn import TP_Attn, layer_norm, _set_cos_sin_cache
         PLATFORM = 'nvidia'
     elif torch.version.hip:
@@ -57,7 +59,7 @@ class Qwen3MoELayer:
     def __init__(self, layer_idx, group) -> None:
 
         self.attn: TP_Attn = None
-        self.mlp: TP_MoE = None
+        self.mlp: TP_MoE | EP_MoE = None
         self.input_norm_eps = None
         self.input_norm_w = None
         self.post_norm_eps = None
@@ -65,9 +67,18 @@ class Qwen3MoELayer:
 
         self.layer_idx = layer_idx
         self.group = group
+        self.use_ep = os.environ.get("EP_MOE", "0") == "1"
+        self.mode = 'torch'
+        self.rank = None
+        self.world_size = None
 
     def init_parameters(self, hf_layer: Qwen3MoeDecoderLayer, rank: int, world_size: int):
-        self.mlp = TP_MoE(rank=rank, world_size=world_size, group=self.group)
+        self.rank = rank
+        self.world_size = world_size
+        if self.use_ep:
+            self.mlp = EP_MoE(rank=rank, world_size=world_size, group=self.group)
+        else:
+            self.mlp = TP_MoE(rank=rank, world_size=world_size, group=self.group)
         self.mlp._init_parameters(hf_layer.mlp)
 
         self.attn = TP_Attn(rank=rank, world_size=world_size, group=self.group)
@@ -79,6 +90,7 @@ class Qwen3MoELayer:
         self.post_norm_w = hf_layer.post_attention_layernorm.weight.detach().cuda()
 
     def set_fwd(self, mode: str = 'torch'):
+        self.mode = mode
         if mode == 'triton_dist':
             self.attn.fwd = self.attn.dist_triton_fwd
             self.mlp.fwd = self.mlp.dist_triton_fwd
@@ -100,7 +112,14 @@ class Qwen3MoELayer:
         residual = hidden_states
         # mlp
         hidden_states = layer_norm(hidden_states, self.post_norm_eps, self.post_norm_w)
-        hidden_states = self.mlp.fwd(hidden_states)
+        if self.use_ep and self.mode == 'torch':
+            bsz = hidden_states.size(0)
+            bsz_per_rank = bsz // self.world_size
+            hidden_states_slice = hidden_states[bsz_per_rank * self.rank:bsz_per_rank * (self.rank + 1), :]
+            hidden_states_slice = self.mlp.fwd(hidden_states_slice)
+            torch.distributed.all_gather_into_tensor(hidden_states, hidden_states_slice, group=self.group)
+        else:
+            hidden_states = self.mlp.fwd(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -133,6 +152,7 @@ class Qwen3MoE:
         self.set_fwd()
         self.use_ar = False
         self.model_type = 'moe'
+        self.use_ep = os.environ.get("EP_MOE", "0") == "1"
 
     def set_fwd(self, mode: str = 'torch'):
         for layer in self.layers:
@@ -168,12 +188,16 @@ class Qwen3MoE:
         self.ag_internode_stream = torch.cuda.Stream()
         self.layers[0].attn._init_ctx(max_M=max_M, ag_intranode_stream=self.ag_intranode_stream,
                                       ag_internode_stream=self.ag_internode_stream)
-        self.layers[0].mlp._init_ctx(M=max_M)
+        if os.environ.get("EP_MOE", "0") == "1":
+            self.layers[0].mlp._init_ctx(EP_GROUP=self.group, max_tokens_per_rank=max_M)
+        else:
+            self.layers[0].mlp._init_ctx(M=max_M)
         for layer in self.layers[1:]:
             layer.attn.ag_ctx = self.layers[0].attn.ag_ctx
             layer.attn.rs_ctx = self.layers[0].attn.rs_ctx
-            layer.mlp.ag_ctx = self.layers[0].mlp.ag_ctx
-            layer.mlp.rs_ctx = self.layers[0].mlp.rs_ctx
+            if not self.use_ep:
+                layer.mlp.ag_ctx = self.layers[0].mlp.ag_ctx
+                layer.mlp.rs_ctx = self.layers[0].mlp.rs_ctx
 
         self.use_ar = False
 
