@@ -80,6 +80,8 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
             cp_res = hip.hipMemcpy(res[1], ctx_tensor.data_ptr(), ctx_opaque_bytes,
                                    hip.hipMemcpyKind.hipMemcpyHostToDevice)
             HIP_CHECK(cp_res)
+        else:
+            hip.hipGetLastError() # Discard the last error
     else:
         raise ValueError("Unsupported device type for shmem kernel module init hook.")
 
