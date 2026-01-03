@@ -3,20 +3,20 @@
 import os
 import torch
 
-import triton
+import triton_dist
 import triton.language as tl
 import pyrocshmem
-from triton.language.extra.hip.libdevice import (thread_idx, __syncthreads)
+from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import finalize_distributed, initialize_distributed, NVSHMEM_SIGNAL_DTYPE
 
-@triton.jit(do_not_specialize=["my_pe", "dst_pe"])
+@triton_dist.jit(do_not_specialize=["my_pe", "dst_pe"])
 def simple_put_signal_test(data, message, nelem, sig_addr, my_pe, dst_pe, ctx):
     libshmem_device.set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
-    tid = thread_idx(0);
+    thread_id = tid(0)
 
-    if tid == 0 and pid == 0:
+    if thread_id == 0 and pid == 0:
         if my_pe == 0:
             libshmem_device.ulong_put_signal(data, message, nelem, sig_addr, 1, libshmem_device.ROCSHMEM_SIGNAL_SET, dst_pe)
         else:
