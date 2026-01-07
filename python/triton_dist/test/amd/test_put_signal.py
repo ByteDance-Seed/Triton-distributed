@@ -39,12 +39,13 @@ dst_pe = (RANK + 1) % WORLD_SIZE
 
 message = pyrocshmem.rocshmem_create_tensor((elems,), torch.uint64)
 data = pyrocshmem.rocshmem_create_tensor((elems,), torch.uint64)
-sig_addr = pyrocshmem.rocshmem_malloc(NVSHMEM_SIGNAL_DTYPE.itemsize)
+sig_addr = pyrocshmem.rocshmem_create_tensor((1,), NVSHMEM_SIGNAL_DTYPE)
 
 for i in range(elems):
     message[i] = RANK
 
-message.zero_()
+sig_addr.zero_()
+data.zero_()
 torch.cuda.synchronize()
 
 print(RANK, '->', dst_pe)
@@ -61,5 +62,7 @@ for i in range(elems):
 
 print(message[0], sig_addr)
 print("Test pass: ", passed)
+
+torch.distributed.barrier()
 
 finalize_distributed()

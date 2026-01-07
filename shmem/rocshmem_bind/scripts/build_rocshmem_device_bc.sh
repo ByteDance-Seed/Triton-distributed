@@ -11,7 +11,7 @@ export OMPI_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 pushd ${ROCSHMEM_INSTALL_DIR}/lib
 
 export BITCODE_LIB_ARCH=gfx942
-CLANG="${ROCM_PATH}/lib/llvm/bin/clang++"
+CLANG="${ROCM_CXX:-${ROCM_PATH}/lib/llvm/bin/clang++}"
 CLANG_FLAGS=(
     -x hip
     --cuda-device-only
@@ -25,7 +25,7 @@ CLANG_FLAGS=(
     -I${OMPI_DIR}/include
 )
 
-LINKER="${ROCM_PATH}/lib/llvm/bin/llvm-link"
+LINKER="${ROCM_LD:-${ROCM_PATH}/lib/llvm/bin/llvm-link}"
 OUTPUT_DIR="${ROCSHMEM_INSTALL_DIR}/lib"
 
 declare -A SOURCE_MAP
