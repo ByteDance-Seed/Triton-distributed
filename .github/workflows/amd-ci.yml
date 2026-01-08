@@ -118,7 +118,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: 'recursive'
       - name: Build triton-distributed
         run: |
           pip3 install -e python --verbose --no-build-isolation --use-pep517
@@ -128,3 +128,4 @@ jobs:
       - name: Mori SHMEM API tests
         run: |
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py

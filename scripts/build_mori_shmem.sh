@@ -48,7 +48,7 @@ echo "=========================================="
 echo "Installing mori..."
 cd "${MORI_DIR}"
 # pip install -r requirements-build.txt
-if pip3 install . --no-build-isolation; then
+if pip3 install . --no-build-isolation --verbose; then
     echo "pip3 install completed successfully."
 else
     echo "Error: pip3 install failed. Aborting build." >&2

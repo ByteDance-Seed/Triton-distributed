@@ -43,14 +43,20 @@ bool useROCSHMEMLibrary(StringRef libname) {
   return libname == "librocshmem_device";
 }
 
+bool useMORISHMEMLibrary(StringRef libname) {
+  return libname == "libmori_shmem_device";
+}
+
+// Generic pattern to convert distributed ops to SHMEM device library calls
+// Supports both ROCSHMEM and MORI SHMEM backends
 template <typename DistOp>
-class GenericOpToROCSHMEMDevice : public ConvertOpToLLVMPattern<DistOp> {
+class GenericOpToSHMEMDevice : public ConvertOpToLLVMPattern<DistOp> {
 public:
   using OpAdaptor = typename DistOp::Adaptor;
 
-  GenericOpToROCSHMEMDevice(const LLVMTypeConverter &converter,
-                            const PatternBenefit &benefit, StringRef calleeName,
-                            StringRef libname = "", StringRef libpath = "")
+  GenericOpToSHMEMDevice(const LLVMTypeConverter &converter,
+                         const PatternBenefit &benefit, StringRef calleeName,
+                         StringRef libname = "", StringRef libpath = "")
       : ConvertOpToLLVMPattern<DistOp>(converter, benefit),
         calleeName(calleeName), libname(libname), libpath(libpath) {}
 
@@ -82,9 +88,12 @@ public:
   }
 
 private:
-  StringRef calleeName;
-  StringRef libname;
-  StringRef libpath;
+  // StringRef calleeName;
+  // StringRef libname;
+  // StringRef libpath;
+  std::string calleeName;
+  std::string libname;
+  std::string libpath;
 };
 
 class ExternCallConversion
@@ -167,13 +176,15 @@ public:
   }
 };
 
+// Register conversion patterns for distributed ops to SHMEM device calls
+// Works with both ROCSHMEM and MORI SHMEM backends
 template <typename... Args>
-void registerGenericOpToROCSHMEMDevice(RewritePatternSet &patterns,
-                                       LLVMTypeConverter &typeConverter,
-                                       PatternBenefit benefit,
-                                       StringRef calleeName, StringRef libname,
-                                       StringRef libpath) {
-  patterns.add<GenericOpToROCSHMEMDevice<Args>...>(
+void registerGenericOpToSHMEMDevice(RewritePatternSet &patterns,
+                                    LLVMTypeConverter &typeConverter,
+                                    PatternBenefit benefit,
+                                    StringRef calleeName, StringRef libname,
+                                    StringRef libpath) {
+  patterns.add<GenericOpToSHMEMDevice<Args>...>(
       typeConverter, benefit, calleeName, libname, libpath);
 }
 
@@ -315,19 +326,24 @@ struct ConsumeTokenOpConversion
 void mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     PatternBenefit benefit, const TargetInfo &targetInfo,
-    std::string ROCSHMEMLibname, std::string ROCSHMEMLibpath) {
+    std::string SHMEMLibname, std::string SHMEMLibpath) {
   patterns.add<WaitOpConversion, ConsumeTokenOpConversion>(typeConverter,
                                                            benefit);
 
-  // convert to rocshmem device func call
-  registerGenericOpToROCSHMEMDevice<triton::distributed::GetRankOp>(
-      patterns, typeConverter, benefit, "rocshmem_my_pe_wrapper",
-      ROCSHMEMLibname, ROCSHMEMLibpath);
-  registerGenericOpToROCSHMEMDevice<triton::distributed::GetNumRanksOp>(
-      patterns, typeConverter, benefit, "rocshmem_n_pes_wrapper",
-      ROCSHMEMLibname, ROCSHMEMLibpath);
-  registerGenericOpToROCSHMEMDevice<triton::distributed::SymmAtOp>(
-      patterns, typeConverter, benefit, "rocshmem_ptr_wrapper", ROCSHMEMLibname,
-      ROCSHMEMLibpath);
+  bool useMoriShmem = useMORISHMEMLibrary(SHMEMLibname);
+  
+  std::string myPeWrapper = useMoriShmem ? "mori_shmem_my_pe" : "rocshmem_my_pe_wrapper";
+  std::string nPesWrapper = useMoriShmem ? "mori_shmem_n_pes" : "rocshmem_n_pes_wrapper";
+  std::string ptrWrapper = useMoriShmem ? "mori_shmem_ptr" : "rocshmem_ptr_wrapper";
+
+  registerGenericOpToSHMEMDevice<triton::distributed::GetRankOp>(
+      patterns, typeConverter, benefit, myPeWrapper,
+      SHMEMLibname, SHMEMLibpath);
+  registerGenericOpToSHMEMDevice<triton::distributed::GetNumRanksOp>(
+      patterns, typeConverter, benefit, nPesWrapper,
+      SHMEMLibname, SHMEMLibpath);
+  registerGenericOpToSHMEMDevice<triton::distributed::SymmAtOp>(
+      patterns, typeConverter, benefit, ptrWrapper, SHMEMLibname,
+      SHMEMLibpath);
   patterns.add<ExternCallConversion>(typeConverter, benefit);
 }

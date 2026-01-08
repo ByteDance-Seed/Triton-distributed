@@ -49,32 +49,7 @@ if os.path.exists(_triton_python_path):
 
 from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed, get_triton_dist_world
 import mori.shmem as mori_shmem
-
-
-# Simple helper to wrap mori shmem pointer as torch tensor
-class MoriShmemBuffer:
-    def __init__(self, ptr, nbytes, dtype: torch.dtype):
-        self.ptr = ptr
-        self.nbytes = nbytes
-        self.dtype = dtype
-        self.__cuda_array_interface__ = {
-            "data": (self.ptr, False),
-            "shape": (self.nbytes,),
-            "typestr": "<i1",  # uint8
-            "strides": None,
-            "version": 3,
-        }
-
-def mori_shmem_create_tensor(shape, dtype):
-    """Create a torch tensor backed by mori shmem memory"""
-    nbytes = torch.tensor(shape).prod().item() * dtype.itemsize
-    torch.cuda.synchronize()
-    ptr = mori_shmem.shmem_malloc(nbytes)
-    assert ptr != 0, "mori_shmem.shmem_malloc failed"
-    buffer = MoriShmemBuffer(ptr, nbytes, dtype)
-    tensor = torch.as_tensor(buffer, device="cuda").view(dtype).view(shape)
-    tensor._mori_ptr = ptr  # Keep reference to free later
-    return tensor
+from mori.shmem import mori_shmem_create_tensor
 
 
 def test_mori_shmem_basic():
@@ -138,6 +113,25 @@ def test_mori_shmem_device():
 
         libshmem_device.int_p(ptr, mype, peer)
 
+    @triton_dist.jit
+    def _mori_shmem_get_put_symm_at(local_ptr):
+        """Test dl.symm_at() - get remote pointer and read/write data"""
+        mype = dl.rank()
+        npes = dl.num_ranks()
+        pid = tl.program_id(axis=0)
+        boffset = pid + tl.arange(0, 4)
+
+        # Read from all other ranks using dl.symm_at()
+        for i in range(1, npes):
+            src_rank = (mype + i) % npes
+            # Use dl.symm_at() to get remote pointer
+            remote_ptr = dl.symm_at(local_ptr, src_rank)
+            rank_offset = src_rank * 4
+            # Load from remote memory
+            val = tl.load(remote_ptr + rank_offset + boffset)
+            # Store to local memory
+            tl.store(local_ptr + rank_offset + boffset, val)
+
 
     print("**test_mori_shmem_device start!")
 
@@ -197,6 +191,47 @@ def test_mori_shmem_device():
     # Cleanup
     if hasattr(put_buf, '_mori_ptr'):
         mori_shmem.shmem_free(put_buf._mori_ptr)
+
+    # Test dl.symm_at() for remote memory access
+    print("**test_mori_shmem_symm_at start!")
+    
+    nelems_per_rank = 4
+    n_elements = npes * nelems_per_rank
+    
+    # Create symmetric buffer for all ranks
+    symm_buf = mori_shmem_create_tensor((n_elements,), torch.int32)
+    ref_tensor = torch.arange(n_elements, dtype=torch.int32).cuda()
+    
+    # Each rank initializes its own portion
+    symm_buf[nelems_per_rank * mype:nelems_per_rank * (mype + 1)].copy_(
+        ref_tensor[nelems_per_rank * mype:nelems_per_rank * (mype + 1)]
+    )
+    
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    
+    # Use dl.symm_at() to read from all other ranks
+    _mori_shmem_get_put_symm_at[(1,)](symm_buf)
+    
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    torch.cuda.synchronize()
+    
+    print(f"mype#{mype} symm_at result: {symm_buf}")
+    
+    try:
+        torch.testing.assert_close(symm_buf, ref_tensor, atol=0, rtol=0)
+    except Exception as e:
+        print(f"❌ _mori_shmem_get_put_symm_at #{mype} failed")
+        print(f"   Expected: {ref_tensor}")
+        print(f"   Got:      {symm_buf}")
+        raise e
+    else:
+        print(f"✅ _mori_shmem_get_put_symm_at #{mype} pass - dl.symm_at() works correctly!")
+    
+    # Cleanup
+    if hasattr(symm_buf, '_mori_ptr'):
+        mori_shmem.shmem_free(symm_buf._mori_ptr)
 
 if __name__ == "__main__":
 

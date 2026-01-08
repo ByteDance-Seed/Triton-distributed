@@ -50,6 +50,9 @@
 #include "triton/Analysis/Allocation.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Membar.h"
+#include <algorithm>
+#include <cstdlib>
+
 namespace mlir {
 namespace triton {
 #define GEN_PASS_DEF_CONVERTAMDDISTRIBUTEDTOLLVM
@@ -164,9 +167,26 @@ struct ConvertAMDDistributedToLLVM
     mlir::populateGpuToROCDLConversionPatterns(
         typeConverter, patterns, mlir::gpu::amd::HIP, *maybeChipset);
 
-    // Distributed ops
+    // Distributed ops - determine SHMEM backend from environment variable
+    std::string shmemLibname = "librocshmem_device";  // default to rocshmem
+    std::string shmemLibpath = "";
+    
+    // Check environment variable to determine backend
+    const char* shmemBackendEnv = std::getenv("TRITON_DIST_SHMEM_BACKEND");
+    if (shmemBackendEnv != nullptr) {
+      std::string shmemBackend(shmemBackendEnv);
+      // Convert to lowercase for case-insensitive comparison
+      std::transform(shmemBackend.begin(), shmemBackend.end(), 
+                     shmemBackend.begin(), ::tolower);
+      
+      if (shmemBackend == "mori_shmem") {
+        shmemLibname = "libmori_shmem_device";
+      }
+    }
+    
     mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
-        typeConverter, patterns, commonBenefit, targetInfo);
+        typeConverter, patterns, commonBenefit, targetInfo, 
+        shmemLibname, shmemLibpath);
 
     // SIMT ops
     mlir::triton::populateSIMTOpToLLVMPatterns(typeConverter, targetInfo,

@@ -66,7 +66,7 @@ def team_n_pes(team):
 
 
 @_shmem_module.dispatch
-def int_p(dest, value, pe):
+def int_p(dest, value, pe, qp_id=0):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
@@ -151,6 +151,9 @@ def team_sync_warp(team):
 def quiet():
     ...
 
+@_shmem_module.dispatch
+def quiet_pe():
+    ...
 
 @_shmem_module.dispatch
 def fence():
@@ -243,7 +246,7 @@ def putmem_wg(dest, source, bytes, pe):
 
 
 @_shmem_module.dispatch
-def putmem_nbi(dest, source, bytes, pe):
+def putmem_nbi(dest, source, bytes, pe, qp_id=0):
     ...
 
 
@@ -511,3 +514,28 @@ ROCSHMEM_CMP_LE = 5
 # ROCSHMEM_SIGNAL_OPS (enum)
 ROCSHMEM_SIGNAL_SET = 0
 ROCSHMEM_SIGNAL_ADD = 1
+
+# MoRI SHMEM atomicType (enum) - Not all types are currently supported.
+MORI_AMO_ACK = 1
+MORI_AMO_INC = 2
+MORI_AMO_SET = 3
+MORI_AMO_ADD = 4
+MORI_AMO_AND = 5
+MORI_AMO_OR = 6
+MORI_AMO_XOR = 7
+MORI_AMO_SIGNAL = 8
+MORI_SIGNAL_SET = 9
+MORI_SIGNAL_ADD = 10
+MORI_AMO_SIGNAL_SET = MORI_SIGNAL_SET
+MORI_AMO_SIGNAL_ADD = MORI_SIGNAL_ADD
+MORI_AMO_END_OF_NONFETCH = 13
+MORI_AMO_FETCH = 14
+MORI_AMO_FETCH_INC = 15
+MORI_AMO_FETCH_ADD = 16
+MORI_AMO_FETCH_AND = 17
+MORI_AMO_FETCH_OR = 18
+MORI_AMO_FETCH_XOR = 19
+MORI_AMO_SWAP = 20
+MORI_AMO_COMPARE_SWAP = 21
+MORI_AMO_OP_SENTINEL = sys.maxsize
+
