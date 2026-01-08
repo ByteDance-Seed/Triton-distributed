@@ -25,7 +25,8 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update -y && apt install -y libopenmpi-dev
+          rm -f /usr/local/bin/cmake
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
           pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
@@ -48,6 +49,10 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
           # gemm rs
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
+          # mori shmem api tests
+          TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
+          # mori shmem bw tests
+          TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py
   amd-e2e-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
@@ -62,6 +67,7 @@ jobs:
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
       PYTHON: "python3"
       TRITON_BUILD_PROTON: "0"
+      TRITON_DIST_SHMEM_BACKEND: "rocshmem"
 
     steps:
       - name: Install dependencies
