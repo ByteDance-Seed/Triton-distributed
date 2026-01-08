@@ -163,7 +163,6 @@ def init_rocshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     assert _TRITON_DIST_WORLD is None, "TRITON_DIST_WORLD has already been initialized"
     _TRITON_DIST_WORLD = pg
 
-    import pyrocshmem
     pyrocshmem.init_rocshmem_by_uniqueid(pg)
 
 
@@ -172,8 +171,6 @@ def init_mori_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     global _TRITON_DIST_WORLD
     assert _TRITON_DIST_WORLD is None, "TRITON_DIST_WORLD has already been initialized"
     _TRITON_DIST_WORLD = pg
-
-    import mori.shmem as mori_shmem
 
     rank, nranks = pg.rank(), pg.size()
     if rank == 0:
