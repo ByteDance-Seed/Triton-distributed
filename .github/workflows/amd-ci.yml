@@ -32,7 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: 'recursive'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -78,7 +78,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: 'recursive'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
