@@ -31,6 +31,9 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/TargetInfo.h"
+#ifdef USE_MACA
+#include "third_party/metax/lib/TritonMETAXGPUToLLVM/TargetInfo.h"
+#endif
 #include "triton/Conversion/MLIRTypes.h"
 
 namespace mlir {
@@ -80,6 +83,21 @@ createConvertBuiltinFuncToLLVMExtPass(bool ftz);
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertAMDDistributedToLLVMPass(StringRef targetArch, bool ftz);
+
+#ifdef USE_MACA
+namespace METAX {
+void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                         RewritePatternSet &patterns,
+                                         PatternBenefit benefit,
+                                         const TargetInfo &targetInfo,
+                                         std::string MXSHMEMLibname = "",
+                                         std::string MXSHMEMLibpath = "");
+} // namespace METAX
+
+std::unique_ptr<OperationPass<ModuleOp>>
+createConvertMETAXDistributedToLLVMPass(int32_t computeCapability);
+#endif // USE_MACA
+
 } // namespace triton
 } // namespace mlir
 

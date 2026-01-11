@@ -62,6 +62,12 @@ def is_hip():
     else:
         return False
 
+def is_maca():
+    if shutil.which("mx-smi"):
+        return True
+    else:
+        return False
+
 
 if is_cuda():
     import nvshmem
@@ -83,6 +89,9 @@ elif is_hip():
         get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
     )
+elif is_maca():
+    from maca import maca, macart
+    import pymxshmem
 else:
     raise Exception("either CUDA or HIP platform is supported")
 
@@ -363,6 +372,12 @@ def HIP_CHECK(call_result):
             raise RuntimeError(f"HIP Error: {str(err)}")
     return result
 
+def MACA_CHECK(err):
+    if isinstance(err, macart.mcError_t):
+        if err != macart.mcError_t.mcSuccess:
+            raise RuntimeError(f"MACA Error: {err}: {macart.mcGetErrorString(err)}")
+    else:
+        raise RuntimeError(f"Unknown error type: {err}")    
 
 def get_cpu_info_linux():
     vendor = None
@@ -527,6 +542,23 @@ def get_rocshmem_hash():
         rocshmem_hash = hashlib.sha256(f.read(1024 * 1024)).hexdigest()
     return rocshmem_hash
 
+def _get_mxshmem_libdevice():
+    mxshmem_device_bc_path_user_specify = os.getenv("TRITON_MXSHMEM_LIBDEVICE_PATH", None)
+    if mxshmem_device_bc_path_user_specify is not None:
+        mxshmem_lib_dir = Path(mxshmem_device_bc_path_user_specify)
+    else:
+        try:
+            import triton.backends.metax
+            mxshmem_lib_dir = Path(triton.backends.metax.__path__[0]) / "lib"
+        except Exception:
+            pass
+    return mxshmem_lib_dir / "libmxshmem_device.bc"
+
+def get_mxshmem_hash():
+    mxshmem_libdevice = _get_mxshmem_libdevice()
+    with open(mxshmem_libdevice, "rb") as f:
+        mxshmem_hash = hashlib.sha256(f.read(1024 * 1024)).hexdigest()
+    return mxshmem_hash
 
 @functools.lru_cache()
 def get_shmem_version():
@@ -540,8 +572,12 @@ def get_shmem_version():
 def get_shmem_hash():
     if is_cuda():
         return get_nvshmem_hash()
-
-    return get_rocshmem_hash()
+    elif is_hip():
+        return get_rocshmem_hash()
+    elif is_maca():
+        return get_mxshmem_hash()
+    else:
+        assert "backend shmem hash not supported!"
 
 
 @functools.lru_cache()

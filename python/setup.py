@@ -72,6 +72,14 @@ def _is_hip_platform():
         print("--- HIP/ROCm platform NOT detected ---")
         return False
 
+def _is_maca_platform():
+    """Checks if 'mx-smi' is available on the system's PATH."""
+    if shutil.which("mx-smi"):
+        print("--- MACA platform detected (mx-smi found) ---")
+        return True
+    else:
+        print("--- MACA platform NOT detected ---")
+        return False
 
 @dataclass
 class Backend:
@@ -396,6 +404,18 @@ def download_and_copy(name, src_func, dst_path, variable, version, url_func):
     else:
         shutil.copy(src_path, dst_path)
 
+# ------ MACA extension ------
+def get_pymaca_project():
+    pymaca_dir = os.path.join(get_base_dir(),"3rdparty", "pymaca")
+    return pymaca_dir
+
+def get_pymaca_cmake_dir(project_name):
+    plat_name = sysconfig.get_platform()
+    python_version = sysconfig.get_python_version()
+    dir_name = f"cmake.{plat_name}-{sys.implementation.name}-{python_version}"
+    cmake_dir = Path(get_base_dir()) / "python" / "build" / dir_name / project_name
+    cmake_dir.mkdir(parents=True, exist_ok=True)
+    return cmake_dir
 
 # ---- cmake extension ----
 
@@ -438,11 +458,23 @@ def build_rocshmem():
     extra_args = ["--arch", ROCM_ARCH] if ROCM_ARCH != "" else []
     subprocess.check_call(["bash", f"{rocshmem_bind_dir}/build.sh"] + extra_args)
 
+def build_mxshmem():
+    mxshmem_bind_dir = os.path.join(get_base_dir(), "shmem", "mxshmem_bind")
+    mxshmem_dir = os.path.join(get_base_dir(), "3rdparty", "mxshmem")
+    if not os.path.exists(mxshmem_dir) or len(os.listdir(mxshmem_dir)) == 0:
+        # subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"])
+        raise RuntimeError("MXSHMEM is empty. Please `git submodule update --init --recursive`")
+    if not os.path.exists(mxshmem_bind_dir):
+        raise RuntimeError("MXSHMEM bind source directory not found")
+
+    extra_args = []
+    subprocess.check_call(["bash", f"{mxshmem_bind_dir}/build.sh"] + extra_args)
 
 def build_shmem():
     if _is_hip_platform() or check_env_flag("TRITON_DISTRIBUTED_BUILD_PYROCSHMEM", "0"):
         build_rocshmem()  # (9, 4)
-
+    if _is_maca_platform() or check_env_flag("TRITON_DISTRIBUTED_BUILD_PYMXSHMEM", "0"):
+        build_mxshmem()
 
 class SHMEMBuildOnly(Command):
     description = "Helper for SHMEM build only"
@@ -470,6 +502,26 @@ class CMakeBuild(build_ext):
     def finalize_options(self):
         build_ext.finalize_options(self)
 
+    def build_pymaca_project(self, ext, project_dir):
+        project_name = os.path.basename(project_dir)
+        if not os.path.exists(project_dir):
+            raise RuntimeError(f"{project_name} source directory not found")
+        try:
+            out = subprocess.check_output(["cmake", "--version"])
+        except OSError:
+            raise RuntimeError(f"cmake must be installed to build {project_name}")
+        env = os.environ.copy()
+        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
+        cmake_dir = get_pymaca_cmake_dir(project_name)
+        cmake_args = ["-DUSE_MACA=ON", "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir,
+                      "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable]
+        cmake_args += ["-B", cmake_dir]
+        max_jobs = "8"
+        build_args = ['-j' + max_jobs]
+        env["PYTHONPATH"] = ""
+        subprocess.check_call(["cmake", project_dir] + cmake_args, cwd=cmake_dir, env=env)
+        subprocess.check_call(["make"] + build_args, cwd=cmake_dir)
+    
     def run(self):
         # We creates symbolic links for each file in backend separately. Since the nvshmem bitcode is moved to nvidia/lib,
         # it needs to be built first.
@@ -477,6 +529,11 @@ class CMakeBuild(build_ext):
         for ext in self.extensions:
             if isinstance(ext, CMakeExtension):
                 self.build_extension_cmake(ext)
+
+            if _is_maca_platform() and check_env_flag("TRITON_USE_MACA", "OFF"): 
+                pymaca_project = get_pymaca_project()
+                print(f"build pymaca:{pymaca_project}", file=sys.stderr)
+                self.build_pymaca_project(ext, pymaca_project)
 
         all_extensions = self.extensions
         self.extensions = [ext for ext in self.extensions if not isinstance(ext, CMakeExtension)]
@@ -603,6 +660,12 @@ class CMakeBuild(build_ext):
         cmake_args_append = os.getenv("TRITON_APPEND_CMAKE_ARGS")
         if cmake_args_append is not None:
             cmake_args += shlex.split(cmake_args_append)
+
+        # USE MACA
+        if _is_maca_platform() and check_env_flag("TRITON_USE_MACA", "OFF"):  # Default OFF
+            cmake_args += ["-DTRITON_USE_MACA=ON"]
+        else:
+            cmake_args += ["-DTRITON_USE_MACA=OFF"]
 
         env = os.environ.copy()
         cmake_dir = get_cmake_dir()
@@ -879,6 +942,7 @@ def get_packages():
             "triton_dist/kernels",
             "triton_dist/kernels/nvidia",
             "triton_dist/kernels/amd",
+            "triton_dist/kernels/metax",
             "triton_dist/language",
             "triton_dist/language/extra",
             "triton_dist/layers",

@@ -35,7 +35,7 @@ import triton
 from triton.runtime.errors import PTXASError
 from triton.runtime.jit import JITFunction, KernelInterface
 from triton import knobs
-from triton_dist.utils import is_cuda, is_hip, HIP_CHECK
+from triton_dist.utils import is_cuda, is_hip, is_maca, HIP_CHECK
 
 T = TypeVar("T")
 
@@ -80,6 +80,10 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
             cp_res = hip.hipMemcpy(res[1], ctx_tensor.data_ptr(), ctx_opaque_bytes,
                                    hip.hipMemcpyKind.hipMemcpyHostToDevice)
             HIP_CHECK(cp_res)
+    elif is_maca():
+        if "mxshmem" in kernel.asm['ttir']:
+            import pymxshmem
+            pymxshmem.mxshmemx_mcmodule_init(kernel_module)
     else:
         raise ValueError("Unsupported device type for shmem kernel module init hook.")
 
@@ -107,7 +111,12 @@ def get_shmem_extern_lib() -> Dict[str, str]:
         # func name need to contain the lib name
         extern_libs = {"rocshmem": str(rocshmem_lib), "extra": str(libdevice_extra_lib)}
         return extern_libs
-
+    
+    elif is_maca():
+        from .utils import _get_mxshmem_libdevice
+        mxshmem_lib = _get_mxshmem_libdevice()
+        extern_libs =  {"libshmem": str(mxshmem_lib)}
+        return extern_libs
     else:
         raise NotImplementedError("Unsupported device type to get shmem bitcode lib path.")
 

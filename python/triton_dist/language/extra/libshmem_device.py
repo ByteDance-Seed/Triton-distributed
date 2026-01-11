@@ -23,15 +23,17 @@
 #
 ################################################################################
 from .utils import ModuleProxy
-from triton_dist.utils import is_cuda, is_hip
+from triton_dist.utils import is_cuda, is_hip, is_maca
 import triton_dist.language.extra.cuda.libnvshmem_device as libnvshmem_device
 import triton_dist.language.extra.hip.librocshmem_device as librocshmem_device
+import triton_dist.language.extra.maca.libmxshmem_device as libmxshmem_device
 
 import sys
 
 _shmem_module = ModuleProxy([
     (is_cuda, libnvshmem_device),
     (is_hip, librocshmem_device),
+    (is_maca, libmxshmem_device),
 ])
 
 
