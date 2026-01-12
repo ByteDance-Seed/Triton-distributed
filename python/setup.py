@@ -515,7 +515,7 @@ class CMakeBuild(build_ext):
         if not os.path.exists(project_dir):
             raise RuntimeError(f"{project_name} source directory not found")
         try:
-            out = subprocess.check_output(["cmake", "--version"])
+            subprocess.check_output(["cmake", "--version"])
         except OSError:
             raise RuntimeError(f"cmake must be installed to build {project_name}")
         env = os.environ.copy()

@@ -52,7 +52,7 @@ def mxshmem_deps():
 
 
 @pathlib_wrapper
-def deps():
+def depends():
     maca_path = os.getenv("MACA_PATH")
     include_dirs = [os.path.join(maca_path, "include")]
     library_dirs = [
@@ -67,7 +67,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CppExtension for PyTorch support"""
     include_dirs, library_dirs, libraries = [], [], []
 
-    deps = [mxshmem_deps(), deps()]
+    deps = [mxshmem_deps(), depends()]
 
     for include_dir, library_dir, library in deps:
         include_dirs += include_dir

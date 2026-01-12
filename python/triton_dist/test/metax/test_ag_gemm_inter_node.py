@@ -67,10 +67,6 @@ def perf_test_gemm_only(M, config):
     ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch.distributed.all_gather_into_tensor(ag_buffer, A, TP_GROUP)
 
-    ctx = create_ag_gemm_inter_node_context(A, B, RANK, WORLD_SIZE, max_M=M, BLOCK_M=config["BM"], BLOCK_N=config["BN"],
-                                            BLOCK_K=config["BK"], stages=config["stage"], ag_stream=torch.cuda.Stream(),
-                                            gemm_stream=torch.cuda.Stream(), autotune=args.autotune)
-
     def triton_func():
         return gemm(ag_buffer, B)
 

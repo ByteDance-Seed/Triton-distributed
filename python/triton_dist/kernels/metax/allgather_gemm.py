@@ -41,7 +41,6 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 
-
 def cp_engine_producer_all_gather_full_mesh_push(
     rank,
     num_ranks,
@@ -947,8 +946,6 @@ def ag_gemm_inter_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
 
     local_rank = rank % local_world_size
     n_nodes = num_ranks // local_world_size
-    num_ag_sms = n_nodes - 1 if copy_engine_dispatch else (local_world_size + n_nodes - 2)
-    num_gemm_sms = torch.cuda.get_device_properties("cuda").multi_processor_count - num_ag_sms
 
     ag_stream = torch.cuda.Stream() if ag_stream is None else ag_stream
     gemm_stream = torch.cuda.current_stream() if gemm_stream is None else gemm_stream
@@ -1347,7 +1344,7 @@ def gemm(a, b, BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=4, pipeline="cpasyn
     c = torch.empty([M, N], dtype=a.dtype, device=a.device)
 
     grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
-    compiled = kernel_consumer_gemm_triton[grid](
+    kernel_consumer_gemm_triton[grid](
         a,
         b,
         c,  #

@@ -219,7 +219,6 @@ register_test("perf_no_tma")(lambda args: test_perf_ag_gemm_tma_intra_node(args,
 def test_perf_ag_gemm_golden(args, use_triton=False):
     device = "cuda"
     dtype = torch.float16
-    rank = args.rank
     num_ranks = args.num_ranks
     if args.shape_id:
         shape_config = configs[args.shape_id]
