@@ -14,7 +14,7 @@ if(TRITON_USE_MACA)
         DistributedIR
         TritonGPUIR
         TritonGPUTransforms
-)
+    )
 else()
     add_triton_library(TritonDistributedToTritonGPU
         TritonDistributedToTritonGPU.cpp
@@ -33,5 +33,5 @@ else()
         SIMTIR
         TritonGPUIR
         TritonGPUTransforms
-)
+    )
 endif()

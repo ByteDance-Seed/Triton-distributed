@@ -25,7 +25,7 @@ option(USE_TRITON_DISTRIBUTED_AOT "Build the Triton Distributed with AOT" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
-option(TRITON_USE_MACA "Build the Triton Distributed with MACA backends" OFF)
+option(TRITON_USE_MACA "Build the Triton Distributed with MACA backend" OFF)
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -92,7 +92,7 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
 
-if (TRITON_USE_MACA)
+if(TRITON_USE_MACA)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_MACA")
 endif()
 
@@ -165,7 +165,7 @@ include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablege
 # backend
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
-if (TRITON_USE_MACA)
+if(TRITON_USE_MACA)
   include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/metax/include)
 endif()
 
@@ -193,7 +193,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
                                       ${PYTHON_DIST_SRC_PATH}/passes.cc
                                       ${PYTHON_DIST_SRC_PATH}/ir.cc)
-  if (TRITON_USE_MACA)
+  if(TRITON_USE_MACA)
     target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
   else()
     target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
@@ -237,7 +237,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(csrc)
   endif()
   # build proton dialect
-  if (NOT TRITON_USE_MACA)
+  if(NOT TRITON_USE_MACA)
     list(APPEND TRITON_PLUGIN_NAMES "proton")
     add_subdirectory(3rdparty/triton/third_party/proton/dialect)
   endif()
@@ -284,7 +284,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     pybind11::headers
 
   )
-  if (TRITON_USE_MACA)
+  if(TRITON_USE_MACA)
     list(APPEND TRITON_LIBRARIES
         MLIRMACADialect
         MLIRGPUToMACATransforms
@@ -324,7 +324,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
 
-  if (TRITON_USE_MACA)
+  if(TRITON_USE_MACA)
     add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                     ${PYTHON_SRC_PATH}/ir.cc
                     ${PYTHON_SRC_PATH}/passes.cc
