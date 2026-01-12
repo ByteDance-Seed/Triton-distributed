@@ -1,15 +1,11 @@
 import os
-import re
-import shutil
-import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
 
 import setuptools
-import torch
 from torch.utils.cpp_extension import BuildExtension
 from glob import glob
 import sysconfig
+
 USE_MACA = True if os.getenv('MACA_PATH') else False
 
 # Project directory root
@@ -22,6 +18,7 @@ virtual_env = sysconfig.get_config_var('base')
 install_so_path = os.path.relpath(site_packages_dir, virtual_env)
 install_so_path = os.path.join(install_so_path, PACKAGE_NAME)
 
+
 def get_package_version():
     return "0.0.1"
 
@@ -30,17 +27,24 @@ def pathlib_wrapper(func):
 
     def wrapper(*kargs, **kwargs):
         include_dirs, library_dirs, libraries = func(*kargs, **kwargs)
-        return map(str, include_dirs), map(str, library_dirs), map(str, libraries)
+        return map(str, include_dirs), map(str,
+                                           library_dirs), map(str, libraries)
 
     return wrapper
 
 
 @pathlib_wrapper
 def mxshmem_deps():
-    mxshmem_home = Path(os.environ.get("MXSHMEM_HOME", root_path / "../../../3rdparty/mxshmem/build/src"))
+    mxshmem_home = Path(
+        os.environ.get("MXSHMEM_HOME",
+                       root_path / "../../../3rdparty/mxshmem/build/src"))
     # include_dirs = [mxshmem_home / "include", "/home/bxiong/mcTriton/third_party/triton_dist/3rdparty/mxshmem/src/include", "/home/bxiong/mcTriton/third_party/triton_dist/3rdparty/mxshmem/src/include_internal"]
     # library_dirs = ["/home/bxiong/mcTriton/third_party/triton_dist/3rdparty/mxshmem/build/src"]
-    include_dirs = [mxshmem_home / "include", root_path / "../../../3rdparty/mxshmem/src/include", root_path / "../../../3rdparty/mxshmem/src/include_internal"]
+    include_dirs = [
+        mxshmem_home / "include",
+        root_path / "../../../3rdparty/mxshmem/src/include",
+        root_path / "../../../3rdparty/mxshmem/src/include_internal"
+    ]
     library_dirs = [mxshmem_home]
     print("include_dirs:", include_dirs)
     libraries = ["mxshmem_host", "mxshmem_device"]
@@ -51,7 +55,10 @@ def mxshmem_deps():
 def deps():
     maca_path = os.getenv("MACA_PATH")
     include_dirs = [os.path.join(maca_path, "include")]
-    library_dirs = [os.path.join(maca_path, "lib"), os.path.join(maca_path, "lib/stubs")]
+    library_dirs = [
+        os.path.join(maca_path, "lib"),
+        os.path.join(maca_path, "lib/stubs")
+    ]
     libraries = ["mcruntime"]
     return include_dirs, library_dirs, libraries
 
@@ -99,7 +106,10 @@ def main():
             "_pymxshmem",
         ],
     )
-    print("packages are:", packages,)
+    print(
+        "packages are:",
+        packages,
+    )
     # Configure package
     setuptools.setup(
         name=PACKAGE_NAME,

@@ -14,7 +14,8 @@ except Exception as e:
     raise e
 
 
-def broadcast_cpu(tensor: torch.Tensor, src: int, group: torch.distributed.ProcessGroup):
+def broadcast_cpu(tensor: torch.Tensor, src: int,
+                  group: torch.distributed.ProcessGroup):
     if not tensor.is_cuda:
         tensor_gpu = tensor.cuda()
         torch.distributed.broadcast(tensor_gpu, src=src, group=group)

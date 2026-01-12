@@ -111,11 +111,11 @@ def get_shmem_extern_lib() -> Dict[str, str]:
         # func name need to contain the lib name
         extern_libs = {"rocshmem": str(rocshmem_lib), "extra": str(libdevice_extra_lib)}
         return extern_libs
-    
+
     elif is_maca():
         from .utils import _get_mxshmem_libdevice
         mxshmem_lib = _get_mxshmem_libdevice()
-        extern_libs =  {"libshmem": str(mxshmem_lib)}
+        extern_libs = {"libshmem": str(mxshmem_lib)}
         return extern_libs
     else:
         raise NotImplementedError("Unsupported device type to get shmem bitcode lib path.")

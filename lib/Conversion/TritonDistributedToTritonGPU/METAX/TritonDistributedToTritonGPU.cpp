@@ -30,25 +30,25 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-//#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+// #include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 // TODO: MACA DIST support triton version > 3.0
-//#include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
+// #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
 #include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
-//#include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
+// #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
 
 #define GEN_PASS_CLASSES
 #include "TritonDistributed/Conversion/TritonDistributedToTritonGPU/Passes.h.inc"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
-//#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+// #include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
 
 #define DEBUG_TYPE "convert-triton-to-tritongpu"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -649,11 +649,12 @@ void populateDistributedPatterns(TritonGPUTypeConverter &typeConverter,
 //   Attribute sharedMemorySpace =
 //       triton::gpu::SharedMemorySpaceAttr::get(tensorTy.getContext());
 //   MemDescType newMemDescType =
-//       MemDescType::get(tensorTy.getShape(), tensorTy.getElementType(), encoding,
+//       MemDescType::get(tensorTy.getShape(), tensorTy.getElementType(),
+//       encoding,
 //                        sharedMemorySpace, /*mutableMemory=*/true);
-//   Value alloc = rewriter.create<triton::gpu::LocalAllocOp>(loc, newMemDescType);
-//   rewriter.create<triton::gpu::LocalStoreOp>(loc, val, alloc);
-//   return alloc;
+//   Value alloc = rewriter.create<triton::gpu::LocalAllocOp>(loc,
+//   newMemDescType); rewriter.create<triton::gpu::LocalStoreOp>(loc, val,
+//   alloc); return alloc;
 // };
 
 // struct SIMTExecRegionPattern
@@ -668,8 +669,8 @@ void populateDistributedPatterns(TritonGPUTypeConverter &typeConverter,
 //     rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
 //                                 newOp.getRegion().end());
 
-//     // ops in simt region still use distributed tensor, will be promoted later.
-//     if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
+//     // ops in simt region still use distributed tensor, will be promoted
+//     later. if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
 //                                            *getTypeConverter()))) {
 //       return rewriter.notifyMatchFailure(op, "could not convert body types");
 //     }
@@ -709,7 +710,8 @@ void populateDistributedPatterns(TritonGPUTypeConverter &typeConverter,
 //             isa<SharedMemorySpaceAttr>(memDescType.getMemorySpace())) {
 //           Type oldDistType =
 //               typeConverter->convertType(op->getResult(i).getType());
-//           Value output = rewriter.create<LocalLoadOp>(op->getLoc(), oldDistType,
+//           Value output = rewriter.create<LocalLoadOp>(op->getLoc(),
+//           oldDistType,
 //                                                       curResult);
 //           newResults[i] = output;
 //         }
@@ -948,19 +950,23 @@ Value unrealizedCastMaterialization(OpBuilder &builder, Type type,
 //             getDefaultBlockedEncoding(this->context, shape, this->numWarps,
 //                                       this->threadsPerWarp, this->numCTAs);
 //         tensorType =
-//             RankedTensorType::get(shape, tensorType.getElementType(), encoding);
+//             RankedTensorType::get(shape, tensorType.getElementType(),
+//             encoding);
 //       }
 //       auto encoding = getSharedEncoding(tensorType);
 //       Attribute sharedMemorySpace =
 //           triton::gpu::SharedMemorySpaceAttr::get(tensorType.getContext());
 //       MemDescType memDescType =
-//           MemDescType::get(tensorType.getShape(), tensorType.getElementType(),
-//                            encoding, sharedMemorySpace, /*mutableMemory=*/true);
+//           MemDescType::get(tensorType.getShape(),
+//           tensorType.getElementType(),
+//                            encoding, sharedMemorySpace,
+//                            /*mutableMemory=*/true);
 //       return memDescType;
 //     });
 
 //     // Add encoding for tensor pointer
-//     addConversion([this](triton::PointerType ptrType) -> triton::PointerType {
+//     addConversion([this](triton::PointerType ptrType) -> triton::PointerType
+//     {
 //       // Check whether tensor pointer `tt.ptr<tensor<>>`
 //       auto pointeeTensorType =
 //           dyn_cast<RankedTensorType>(ptrType.getPointeeType());
@@ -1280,7 +1286,7 @@ public:
 
     // triton distributed extension
     target.addDynamicallyLegalDialect<tensor::TensorDialect,
-                                      //triton::simt::SIMTDialect,
+                                      // triton::simt::SIMTDialect,
                                       triton::distributed::DistributedDialect>(
         [&](Operation *op) {
           bool hasLegalRegions = true;
@@ -1379,7 +1385,8 @@ public:
       ConvertLayoutOp::getCanonicalizationPatterns(cleanUpPatterns, context);
       // TODO: MACA DIST 3.0 dont support applyPatternsGreedily
       // if (applyPatternsGreedily(getOperation(), std::move(cleanUpPatterns))
-      if (applyPatternsAndFoldGreedily(getOperation(), std::move(cleanUpPatterns))
+      if (applyPatternsAndFoldGreedily(getOperation(),
+                                       std::move(cleanUpPatterns))
               .failed()) {
         signalPassFailure();
       }

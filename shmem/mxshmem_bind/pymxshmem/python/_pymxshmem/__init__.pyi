@@ -37,7 +37,8 @@ def mxshmemx_get_uniqueid() -> bytes:
     ...
 
 
-def mxshmemx_init_attr_with_uniqueid(rank: np.int32, nranks: np.int32, unique_id: bytes) -> None:
+def mxshmemx_init_attr_with_uniqueid(rank: np.int32, nranks: np.int32,
+                                     unique_id: bytes) -> None:
     ...
 
 
@@ -58,9 +59,11 @@ def mxshmem_ptr(ptr, peer):
 
 
 # torch related
-def mxshmem_create_tensor(shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor:
+def mxshmem_create_tensor(shape: Sequence[int],
+                          dtype: torch.dtype) -> torch.Tensor:
     ...
 
 
-def mxshmem_create_tensor_list_intra_node(shape: Sequence[int], dtype: torch.dtype) -> List[torch.Tensor]:
+def mxshmem_create_tensor_list_intra_node(
+        shape: Sequence[int], dtype: torch.dtype) -> List[torch.Tensor]:
     ...

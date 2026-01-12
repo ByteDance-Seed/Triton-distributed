@@ -1,6 +1,4 @@
 import torch
-import triton
-import triton.language as tl
 from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.metax import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm
 
@@ -132,6 +130,7 @@ configs = {
     "GPT-3-175B": {"M": 8192, "N": 49152, "K": 12288, "BM": 128, "BN": 256, "BK": 64, "Stage": 3},
 }
 
+
 @register_test("perf_tma")
 def test_perf_ag_gemm_tma_intra_node(args, autotune=False, use_tma=True):
     device = "cuda"
@@ -169,8 +168,8 @@ def test_perf_ag_gemm_tma_intra_node(args, autotune=False, use_tma=True):
 
     chunk_nums = max(M_per_rank // 1024, 1)
     ctx = create_ag_gemm_intra_node_context(A, B, rank, num_ranks, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                            stages=stages, num_chunks_per_rank=chunk_nums, for_correctness=False, ag_stream=ag_stream,
-                                            gemm_stream=gemm_stream, serial=False, autotune=False)
+                                            stages=stages, num_chunks_per_rank=chunk_nums, for_correctness=False,
+                                            ag_stream=ag_stream, gemm_stream=gemm_stream, serial=False, autotune=False)
 
     def func():
         return ag_gemm_intra_node(A, B, ctx=ctx, use_tma=use_tma)
@@ -215,6 +214,7 @@ def test_perf_ag_gemm_tma_intra_node(args, autotune=False, use_tma=True):
 register_test("perf_tma_autotune")(lambda args: test_perf_ag_gemm_tma_intra_node(args, autotune=True))
 register_test("perf_no_tma")(lambda args: test_perf_ag_gemm_tma_intra_node(args, use_tma=False))
 
+
 @register_test("perf_golden")
 def test_perf_ag_gemm_golden(args, use_triton=False):
     device = "cuda"
@@ -242,6 +242,7 @@ def test_perf_ag_gemm_golden(args, use_triton=False):
     C_golden = torch.empty([M, N_per_rank], dtype=dtype, device=device)
 
     if use_triton:
+
         def func():
             torch.distributed.all_gather_into_tensor(
                 ag_A,
@@ -249,9 +250,11 @@ def test_perf_ag_gemm_golden(args, use_triton=False):
                 group=args.default_group,
             )
             return gemm(ag_A, B)
+
         def gemm():
             return gemm(ag_A, B)
     else:
+
         def func():
             torch.distributed.all_gather_into_tensor(
                 ag_A,
@@ -259,6 +262,7 @@ def test_perf_ag_gemm_golden(args, use_triton=False):
                 group=args.default_group,
             )
             return torch.matmul(ag_A, B.T)
+
         def gemm():
             return torch.matmul(ag_A, B.T)
 
@@ -284,8 +288,9 @@ def test_perf_ag_gemm_golden(args, use_triton=False):
         prof_dir = f"prof/trace_ag_gemm_intra_node_blas_{M}x{N}x{K}"
     os.makedirs(prof_dir, exist_ok=True)
     profiler.export_chrome_trace(f"{prof_dir}/rank{RANK}.json")
-    
+
     return perf
+
 
 register_test("perf_nccltriton")(lambda args: test_perf_ag_gemm_golden(args, use_triton=True))
 

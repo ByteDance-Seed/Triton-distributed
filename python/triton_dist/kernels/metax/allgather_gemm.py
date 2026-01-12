@@ -31,17 +31,15 @@ import triton_dist.language as dl
 from triton_dist.language.extra.maca import libmxshmem_device as libshmem_device
 from triton_dist.language.extra.language_extra import tid, __syncthreads
 import pymxshmem
-import copy
 import time
 from typing import Optional, List
-from maca import maca, macart 
+from maca import macart
 from dataclasses import dataclass
 from triton_dist.utils import MACA_CHECK
 from triton_dist.kernels.metax.utils import get_numa_world_size, has_fullmesh_mxlink_ngpus
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
-from triton_dist.kernels.common_ops import wait_eq, set_signal
 
 
 def cp_engine_producer_all_gather_full_mesh_push(
@@ -68,40 +66,39 @@ def cp_engine_producer_all_gather_full_mesh_push(
             time.sleep(3)
 
         # if full mesh
-        dst_arr = [None] * num_chunks_per_rank * (num_ranks-1)
-        src_arr = [None] * num_chunks_per_rank * (num_ranks-1)
-        engine = [None] * num_chunks_per_rank * (num_ranks-1)
-        count = [None] * num_chunks_per_rank * (num_ranks-1)
-        write_flag = [None] * num_chunks_per_rank * (num_ranks-1)
-        write_value = [None] * num_chunks_per_rank * (num_ranks-1)
+        dst_arr = [None] * num_chunks_per_rank * (num_ranks - 1)
+        src_arr = [None] * num_chunks_per_rank * (num_ranks - 1)
+        engine = [None] * num_chunks_per_rank * (num_ranks - 1)
+        count = [None] * num_chunks_per_rank * (num_ranks - 1)
+        write_flag = [None] * num_chunks_per_rank * (num_ranks - 1)
+        write_value = [None] * num_chunks_per_rank * (num_ranks - 1)
         for chunk_idx in range(num_chunks_per_rank):
             chunk_offset = chunk_idx * M_per_chunk
-            
+
             for rank_idx, src_rank in enumerate(rank_orders):
                 rank_base = rank * M_per_rank
-                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset + M_per_chunk, :]
+                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset +
+                                                      M_per_chunk, :]
                 src = local_tensor[chunk_offset:chunk_offset + M_per_chunk, :]
-                
-                req_idx = chunk_idx * (num_ranks-1) + rank_idx
+
+                req_idx = chunk_idx * (num_ranks - 1) + rank_idx
                 dst_arr[req_idx] = dst.data_ptr()
                 src_arr[req_idx] = src.data_ptr()
                 engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngineDefault
                 count[req_idx] = M_per_chunk * K * ele_byte
                 write_flag[req_idx] = barrier_buffers[src_rank][rank * num_chunks_per_rank + chunk_idx].data_ptr()
                 write_value[req_idx] = signal_t
-                
-        (err,) = macart.mcExtBatchCopyFlagAndWait(
-                    dst_arr,                # dst addr
-                    src_arr,                # src addr
-                    engine,                 # cp engine
-                    count,                  # data size
-                    write_flag,             # barrier addr
-                    write_value,            # barrier value
-                    [],
-                    [],
-                    ag_stream.cuda_stream   # stream
-                )
+
+        (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                   src_arr,  # src addr
+                                                   engine,  # cp engine
+                                                   count,  # data size
+                                                   write_flag,  # barrier addr
+                                                   write_value,  # barrier value
+                                                   [], [], ag_stream.cuda_stream  # stream
+                                                   )
         MACA_CHECK(err)
+
 
 def cp_engine_producer_all_gather_numa_node_push(
     rank,
@@ -116,9 +113,9 @@ def cp_engine_producer_all_gather_numa_node_push(
     for_correctness=False,
     signal_t=None,
 ):
-    local_rank = rank % numa_world_size         # numa node内的rank
-    n_numa_nodes = num_ranks // numa_world_size # numa node个数
-    numa_id = rank // numa_world_size           # rank 所在的numa id
+    local_rank = rank % numa_world_size  # numa node内的rank
+    n_numa_nodes = num_ranks // numa_world_size  # numa node个数
+    numa_id = rank // numa_world_size  # rank 所在的numa id
     M_per_rank, K = local_tensor.shape
     M_per_chunk = M_per_rank // num_chunks_per_rank
     ele_byte = torch.finfo(local_tensor.dtype).bits // 8
@@ -126,84 +123,83 @@ def cp_engine_producer_all_gather_numa_node_push(
 
     with torch.cuda.stream(internode_ag_stream):
         # inter_numa_node_p2p
-        inter_dst_arr = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        inter_src_arr = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        inter_engine = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        inter_count = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        inter_write_flag = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        inter_write_value = [None] * num_chunks_per_rank * (n_numa_nodes-1)
-        
+        inter_dst_arr = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+        inter_src_arr = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+        inter_engine = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+        inter_count = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+        inter_write_flag = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+        inter_write_value = [None] * num_chunks_per_rank * (n_numa_nodes - 1)
+
         rank_base = rank * M_per_rank
         for chunk_idx in range(num_chunks_per_rank):
             chunk_offset = chunk_idx * M_per_chunk
             for i in range(1, n_numa_nodes):
                 p2p_send_rank = local_rank + (numa_id - i + n_numa_nodes) % n_numa_nodes * numa_world_size
-                dst = remote_tensor_buffers[p2p_send_rank][rank_base + chunk_offset:rank_base + chunk_offset + M_per_chunk, :]
+                dst = remote_tensor_buffers[p2p_send_rank][rank_base + chunk_offset:rank_base + chunk_offset +
+                                                           M_per_chunk, :]
                 src = local_tensor[chunk_offset:chunk_offset + M_per_chunk, :]
 
-                req_idx = chunk_idx * (n_numa_nodes-1) + (i-1)
+                req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                 inter_dst_arr[req_idx] = dst.data_ptr()
                 inter_src_arr[req_idx] = src.data_ptr()
                 inter_engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
                 inter_count[req_idx] = M_per_chunk * K * ele_byte
-                inter_write_flag[req_idx] = barrier_buffers[p2p_send_rank][rank * num_chunks_per_rank + chunk_idx].data_ptr()
+                inter_write_flag[req_idx] = barrier_buffers[p2p_send_rank][rank * num_chunks_per_rank +
+                                                                           chunk_idx].data_ptr()
                 inter_write_value[req_idx] = signal_t
-        (err,) = macart.mcExtBatchCopyFlagAndWait(
-                    inter_dst_arr,                # dst addr
-                    inter_src_arr,                # src addr
-                    inter_engine,                 # cp engine
-                    inter_count,                  # data size
-                    inter_write_flag,             # barrier addr
-                    inter_write_value,            # barrier value
-                    [],
-                    [],
-                    internode_ag_stream.cuda_stream   # stream
-                )
+        (err, ) = macart.mcExtBatchCopyFlagAndWait(inter_dst_arr,  # dst addr
+                                                   inter_src_arr,  # src addr
+                                                   inter_engine,  # cp engine
+                                                   inter_count,  # data size
+                                                   inter_write_flag,  # barrier addr
+                                                   inter_write_value,  # barrier value
+                                                   [], [], internode_ag_stream.cuda_stream  # stream
+                                                   )
         MACA_CHECK(err)
-    
+
     with torch.cuda.stream(intranode_ag_stream):
         # intra numa node, local numa node data:
         rank_orders = [(local_rank - i + numa_world_size) % numa_world_size for i in range(1, numa_world_size)]
-        engines = [macart.mcParallelCopyEngine.ParallelCopyEngine1, macart.mcParallelCopyEngine.ParallelCopyEngine2,
-                   macart.mcParallelCopyEngine.ParallelCopyEngine3, macart.mcParallelCopyEngine.ParallelCopyEngine4]
+        engines = [
+            macart.mcParallelCopyEngine.ParallelCopyEngine1, macart.mcParallelCopyEngine.ParallelCopyEngine2,
+            macart.mcParallelCopyEngine.ParallelCopyEngine3, macart.mcParallelCopyEngine.ParallelCopyEngine4
+        ]
         engines_size = len(engines)
-        
-        intra_dst_arr = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_src_arr = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_engine = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_count = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_write_flag = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_write_value = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_wait_flag = [None] * num_chunks_per_rank * (numa_world_size-1)
-        intra_wait_value = [None] * num_chunks_per_rank * (numa_world_size-1)
+
+        intra_dst_arr = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_src_arr = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_engine = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_count = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_write_flag = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_write_value = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_wait_flag = [None] * num_chunks_per_rank * (numa_world_size - 1)
+        intra_wait_value = [None] * num_chunks_per_rank * (numa_world_size - 1)
         rank_base = rank * M_per_rank
-        
+
         for chunk_idx in range(num_chunks_per_rank):
             chunk_offset = chunk_idx * M_per_chunk
             for rank_idx, src_local_rank in enumerate(rank_orders):
                 src_rank = src_local_rank + numa_id * numa_world_size
-                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset + M_per_chunk, :]
+                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset +
+                                                      M_per_chunk, :]
                 src = local_tensor[chunk_offset:chunk_offset + M_per_chunk, :]
-                
-                req_idx = chunk_idx * (numa_world_size-1) + rank_idx
+
+                req_idx = chunk_idx * (numa_world_size - 1) + rank_idx
                 intra_dst_arr[req_idx] = dst.data_ptr()
                 intra_src_arr[req_idx] = src.data_ptr()
                 intra_engine[req_idx] = engines[req_idx % engines_size]
                 intra_count[req_idx] = M_per_chunk * K * ele_byte
                 intra_write_flag[req_idx] = barrier_buffers[src_rank][rank * num_chunks_per_rank + chunk_idx].data_ptr()
                 intra_write_value[req_idx] = signal_t
-        
-        (err,) = macart.mcExtBatchCopyFlagAndWait(
-                    intra_dst_arr,                # dst addr
-                    intra_src_arr,                # src addr
-                    intra_engine,                 # cp engine
-                    intra_count,                  # data size
-                    intra_write_flag,             # barrier addr
-                    intra_write_value,            # barrier value
-                    [],
-                    [],
-                    intranode_ag_stream.cuda_stream   # stream
-                )
+
+        (err, ) = macart.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
+                                                   intra_src_arr,  # src addr
+                                                   intra_engine,  # cp engine
+                                                   intra_count,  # data size
+                                                   intra_write_flag,  # barrier addr
+                                                   intra_write_value,  # barrier value
+                                                   [], [], intranode_ag_stream.cuda_stream  # stream
+                                                   )
         MACA_CHECK(err)
 
         p2p_recv_rank = local_rank + (numa_id + 1 + n_numa_nodes) % n_numa_nodes * numa_world_size
@@ -213,31 +209,34 @@ def cp_engine_producer_all_gather_numa_node_push(
                 src_rank = src_local_rank + numa_id * numa_world_size
                 rank_base = p2p_recv_rank * M_per_rank
                 src = remote_tensor_buffers[rank][rank_base + chunk_offset:rank_base + chunk_offset + M_per_chunk, :]
-                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset + M_per_chunk, :]
-                req_idx = chunk_idx * (numa_world_size-1) + rank_idx
+                dst = remote_tensor_buffers[src_rank][rank_base + chunk_offset:rank_base + chunk_offset +
+                                                      M_per_chunk, :]
+                req_idx = chunk_idx * (numa_world_size - 1) + rank_idx
                 intra_dst_arr[req_idx] = dst.data_ptr()
                 intra_src_arr[req_idx] = src.data_ptr()
                 intra_engine[req_idx] = engines[req_idx % engines_size]
                 intra_count[req_idx] = M_per_chunk * K * ele_byte
-                intra_write_flag[req_idx] = barrier_buffers[src_rank][p2p_recv_rank * num_chunks_per_rank + chunk_idx].data_ptr()
+                intra_write_flag[req_idx] = barrier_buffers[src_rank][p2p_recv_rank * num_chunks_per_rank +
+                                                                      chunk_idx].data_ptr()
                 intra_write_value[req_idx] = signal_t
-                intra_wait_flag[req_idx] = barrier_buffers[rank][p2p_recv_rank * num_chunks_per_rank + chunk_idx].data_ptr()
+                intra_wait_flag[req_idx] = barrier_buffers[rank][p2p_recv_rank * num_chunks_per_rank +
+                                                                 chunk_idx].data_ptr()
                 intra_wait_value[req_idx] = signal_t
-        
-        (err,) = macart.mcExtBatchCopyFlagAndWait(
-                    intra_dst_arr,                # dst addr
-                    intra_src_arr,                # src addr
-                    intra_engine,                 # cp engine
-                    intra_count,                  # data size
-                    intra_write_flag,             # barrier addr
-                    intra_write_value,            # barrier value
-                    intra_wait_flag,              # wait addr
-                    intra_wait_value,             # wait value
-                    intranode_ag_stream.cuda_stream   # stream
-                )
+
+        (err, ) = macart.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
+                                                   intra_src_arr,  # src addr
+                                                   intra_engine,  # cp engine
+                                                   intra_count,  # data size
+                                                   intra_write_flag,  # barrier addr
+                                                   intra_write_value,  # barrier value
+                                                   intra_wait_flag,  # wait addr
+                                                   intra_wait_value,  # wait value
+                                                   intranode_ag_stream.cuda_stream  # stream
+                                                   )
         MACA_CHECK(err)
-    
+
     intranode_ag_stream.wait_stream(internode_ag_stream)
+
 
 @triton_dist.jit
 def mxshmem_device_producer_all_gather_2d_put_block_kernel(
@@ -336,9 +335,10 @@ def mxshmem_device_producer_p2p_put_block_kernel(
         )
 
 
-def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tensor], signal_buffer: list[torch.Tensor], numa_world_size,
-                         signal_target, rank, num_chunks_per_rank, local_world_size, world_size, intranode_ag_stream=None,
-                         internode_ag_stream=None, cpengine_dispatch=False, signal_t=None, numanode_ag_stream=None):
+def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tensor], signal_buffer: list[torch.Tensor],
+                         numa_world_size, signal_target, rank, num_chunks_per_rank, local_world_size, world_size,
+                         intranode_ag_stream=None, internode_ag_stream=None, cpengine_dispatch=False, signal_t=None,
+                         numanode_ag_stream=None):
     local_rank = rank % local_world_size
     n_nodes = world_size // local_world_size
     node_rank = rank // local_world_size
@@ -370,40 +370,43 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
         with torch.cuda.stream(internode_ag_stream):
             if n_numa_nodes > 1:
                 # numanode comm with local tensor
-                arr_size = num_chunks_per_rank*(n_numa_nodes-1)
-                dst_arr = [None]*arr_size
-                src_arr = [None]*arr_size
-                engine = [None]*arr_size
-                count = [None]*arr_size
-                write_flag = [None]*arr_size
-                write_value = [None]*arr_size
+                arr_size = num_chunks_per_rank * (n_numa_nodes - 1)
+                dst_arr = [None] * arr_size
+                src_arr = [None] * arr_size
+                engine = [None] * arr_size
+                count = [None] * arr_size
+                write_flag = [None] * arr_size
+                write_value = [None] * arr_size
                 rank_base = rank * M_per_rank
                 for chunk_idx in range(num_chunks_per_rank):
                     chunk_offset = chunk_idx * M_per_chunk
                     for i in range(1, n_numa_nodes):
                         p2p_send_rank = local_numa_rank + (numa_id - i + n_numa_nodes) % n_numa_nodes * numa_world_size
-                        dst = ag_buffer[p2p_send_rank].data_ptr() + (rank_base + chunk_offset) * N * local_tensor.element_size()
-                        src = ag_buffer[local_rank].data_ptr() + (rank_base + chunk_offset) * N * local_tensor.element_size()
-                        req_idx = chunk_idx * (n_numa_nodes-1) + (i-1)
+                        dst = ag_buffer[p2p_send_rank].data_ptr() + (rank_base +
+                                                                     chunk_offset) * N * local_tensor.element_size()
+                        src = ag_buffer[local_rank].data_ptr() + (rank_base +
+                                                                  chunk_offset) * N * local_tensor.element_size()
+                        req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                         dst_arr[req_idx] = dst
                         src_arr[req_idx] = src
                         engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
                         count[req_idx] = M_per_chunk * N * local_tensor.element_size()
-                        write_flag[req_idx] = signal_buffer[p2p_send_rank].data_ptr() + (rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                        write_flag[req_idx] = signal_buffer[p2p_send_rank].data_ptr() + (
+                            rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                         write_value[req_idx] = signal_t
 
-                (err,) = macart.mcExtBatchCopyFlagAndWait(
-                            dst_arr,                # dst addr
-                            src_arr,                # src addr
-                            engine,                 # cp engine
-                            count,                  # data size
-                            write_flag,             # barrier addr
-                            write_value,            # barrier value
-                            [],             # barrier addr
-                            [],            # barrier value
-                            #numanode_ag_stream.cuda_stream   # stream
-                            internode_ag_stream.cuda_stream   # stream
-                         )
+                (err, ) = macart.mcExtBatchCopyFlagAndWait(
+                    dst_arr,  # dst addr
+                    src_arr,  # src addr
+                    engine,  # cp engine
+                    count,  # data size
+                    write_flag,  # barrier addr
+                    write_value,  # barrier value
+                    [],  # barrier addr
+                    [],  # barrier value
+                    #numanode_ag_stream.cuda_stream   # stream
+                    internode_ag_stream.cuda_stream  # stream
+                )
                 MACA_CHECK(err)
             # internode comm
             grid = lambda META: (int(n_nodes - 1) * num_chunks_per_rank, )
@@ -425,68 +428,74 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                 for node_id in range(n_nodes):
                     if node_id != node_rank:
                         # numanode comm with inter tensor
-                        arr_size = num_chunks_per_rank*(n_numa_nodes-1)
-                        dst_arr = [None]*arr_size
-                        src_arr = [None]*arr_size
-                        engine = [None]*arr_size
-                        count = [None]*arr_size
-                        wait_flag = [None]*arr_size
-                        wait_value = [None]*arr_size
-                        write_flag = [None]*arr_size
-                        write_value = [None]*arr_size
+                        arr_size = num_chunks_per_rank * (n_numa_nodes - 1)
+                        dst_arr = [None] * arr_size
+                        src_arr = [None] * arr_size
+                        engine = [None] * arr_size
+                        count = [None] * arr_size
+                        wait_flag = [None] * arr_size
+                        wait_value = [None] * arr_size
+                        write_flag = [None] * arr_size
+                        write_value = [None] * arr_size
                         rank_idx = local_rank + node_id * local_world_size
                         rank_base = rank_idx * M_per_rank
                         for chunk_idx in range(num_chunks_per_rank):
                             chunk_offset = chunk_idx * M_per_chunk
                             for i in range(1, n_numa_nodes):
-                                p2p_send_rank = local_numa_rank + (numa_id - i + n_numa_nodes) % n_numa_nodes * numa_world_size
-                                dst = ag_buffer[p2p_send_rank].data_ptr() + (rank_base + chunk_offset) * N * local_tensor.element_size() 
-                                src = ag_buffer[local_rank].data_ptr() + (rank_base + chunk_offset) * N * local_tensor.element_size()
-                                req_idx = chunk_idx * (n_numa_nodes-1) + (i-1)
+                                p2p_send_rank = local_numa_rank + (numa_id - i +
+                                                                   n_numa_nodes) % n_numa_nodes * numa_world_size
+                                dst = ag_buffer[p2p_send_rank].data_ptr() + (
+                                    rank_base + chunk_offset) * N * local_tensor.element_size()
+                                src = ag_buffer[local_rank].data_ptr() + (
+                                    rank_base + chunk_offset) * N * local_tensor.element_size()
+                                req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                                 dst_arr[req_idx] = dst
                                 src_arr[req_idx] = src
                                 engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
                                 count[req_idx] = M_per_chunk * N * local_tensor.element_size()
-                                wait_flag[req_idx] = signal_buffer[local_rank].data_ptr() + (rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                                wait_flag[req_idx] = signal_buffer[local_rank].data_ptr() + (
+                                    rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                                 wait_value[req_idx] = signal_t
-                                write_flag[req_idx] = signal_buffer[p2p_send_rank].data_ptr() + (rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                                write_flag[req_idx] = signal_buffer[p2p_send_rank].data_ptr() + (
+                                    rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                                 write_value[req_idx] = signal_t
 
-                        (err,) = macart.mcExtBatchCopyFlagAndWait(
-                                    dst_arr,                # dst addr
-                                    src_arr,                # src addr
-                                    engine,                 # cp engine
-                                    count,                  # data size
-                                    write_flag,             # barrier addr
-                                    write_value,            # barrier value
-                                    wait_flag,             # barrier addr
-                                    wait_value,            # barrier value
-                                    #numanode_ag_stream.cuda_stream   # stream
-                                    internode_ag_stream.cuda_stream   # stream
-                                 )
+                        (err, ) = macart.mcExtBatchCopyFlagAndWait(
+                            dst_arr,  # dst addr
+                            src_arr,  # src addr
+                            engine,  # cp engine
+                            count,  # data size
+                            write_flag,  # barrier addr
+                            write_value,  # barrier value
+                            wait_flag,  # barrier addr
+                            wait_value,  # barrier value
+                            #numanode_ag_stream.cuda_stream   # stream
+                            internode_ag_stream.cuda_stream  # stream
+                        )
                         MACA_CHECK(err)
         if n_numa_nodes > 1:
-            engine_list = [macart.mcParallelCopyEngine.ParallelCopyEngine1,
-                           macart.mcParallelCopyEngine.ParallelCopyEngine2,
-                           macart.mcParallelCopyEngine.ParallelCopyEngine3,
-                           macart.mcParallelCopyEngine.ParallelCopyEngine4]
-        else:                   
+            engine_list = [
+                macart.mcParallelCopyEngine.ParallelCopyEngine1, macart.mcParallelCopyEngine.ParallelCopyEngine2,
+                macart.mcParallelCopyEngine.ParallelCopyEngine3, macart.mcParallelCopyEngine.ParallelCopyEngine4
+            ]
+        else:
             engine_list = [macart.mcParallelCopyEngine.ParallelCopyEngineDefault]
         with torch.cuda.stream(intranode_ag_stream):
             idx = 0
-            arr_size = num_chunks_per_rank*(numa_world_size-1)
-            dst_arr = [None]*arr_size
-            src_arr = [None]*arr_size
-            engine = [None]*arr_size
-            count = [None]*arr_size
-            wait_flag = [None]*arr_size
-            wait_value = [None]*arr_size
-            write_flag = [None]*arr_size
-            write_value = [None]*arr_size
+            arr_size = num_chunks_per_rank * (numa_world_size - 1)
+            dst_arr = [None] * arr_size
+            src_arr = [None] * arr_size
+            engine = [None] * arr_size
+            count = [None] * arr_size
+            wait_flag = [None] * arr_size
+            wait_value = [None] * arr_size
+            write_flag = [None] * arr_size
+            write_value = [None] * arr_size
             # intranode comm with local tensor
             for chunk_idx in range(num_chunks_per_rank):
                 for i in range(1, numa_world_size):
-                    local_dst_rank = numa_id * numa_world_size + (local_numa_rank + numa_world_size - i) % numa_world_size
+                    local_dst_rank = numa_id * numa_world_size + (local_numa_rank + numa_world_size -
+                                                                  i) % numa_world_size
                     segment = (rank * M_per_rank + chunk_idx * M_per_chunk) * N
                     src_ptr = ag_buffer[local_rank].data_ptr() + segment * local_tensor.element_size()
                     dst_ptr = ag_buffer[local_dst_rank].data_ptr() + segment * local_tensor.element_size()
@@ -494,33 +503,31 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                     src_arr[idx] = src_ptr
                     engine[idx] = engine_list[idx % len(engine_list)]
                     count[idx] = M_per_chunk * N * local_tensor.element_size()
-                    write_flag[idx] = signal_buffer[local_dst_rank].data_ptr() + (rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                    write_flag[idx] = signal_buffer[local_dst_rank].data_ptr() + (
+                        rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                     write_value[idx] = signal_t
                     idx += 1
 
-            if idx > 0:        
-                (err,) = macart.mcExtBatchCopyFlagAndWait(
-                            dst_arr,                # dst addr
-                            src_arr,                # src addr
-                            engine,                 # cp engine
-                            count,                  # data size
-                            write_flag,             # barrier addr
-                            write_value,            # barrier value
-                            [],
-                            [],
-                            intranode_ag_stream.cuda_stream   # stream
-                         )
+            if idx > 0:
+                (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                           src_arr,  # src addr
+                                                           engine,  # cp engine
+                                                           count,  # data size
+                                                           write_flag,  # barrier addr
+                                                           write_value,  # barrier value
+                                                           [], [], intranode_ag_stream.cuda_stream  # stream
+                                                           )
                 MACA_CHECK(err)
 
-            arr_size = num_chunks_per_rank*(numa_world_size-1)*(n_nodes * n_numa_nodes-1)
-            dst_arr = [None]*arr_size
-            src_arr = [None]*arr_size
-            engine = [None]*arr_size
-            count = [None]*arr_size
-            wait_flag = [None]*arr_size
-            wait_value = [None]*arr_size
-            write_flag = [None]*arr_size
-            write_value = [None]*arr_size
+            arr_size = num_chunks_per_rank * (numa_world_size - 1) * (n_nodes * n_numa_nodes - 1)
+            dst_arr = [None] * arr_size
+            src_arr = [None] * arr_size
+            engine = [None] * arr_size
+            count = [None] * arr_size
+            wait_flag = [None] * arr_size
+            wait_value = [None] * arr_size
+            write_flag = [None] * arr_size
+            write_value = [None] * arr_size
             idx = 0
             # intranode comm with numanode & internode tensor, first numanode second internode.
             for i in range(1, n_nodes * n_numa_nodes):
@@ -531,29 +538,31 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                     recv_segment = (recv_rank * M_per_rank + chunk_idx * M_per_chunk) * N
                     src_ptr = ag_buffer[local_rank].data_ptr() + recv_segment * local_tensor.element_size()
                     for j in range(1, numa_world_size):
-                        local_dst_rank = numa_id * numa_world_size + (local_numa_rank + numa_world_size - j) % numa_world_size
+                        local_dst_rank = numa_id * numa_world_size + (local_numa_rank + numa_world_size -
+                                                                      j) % numa_world_size
                         dst_ptr = ag_buffer[local_dst_rank].data_ptr() + recv_segment * local_tensor.element_size()
                         dst_arr[idx] = dst_ptr
                         src_arr[idx] = src_ptr
                         engine[idx] = engine_list[idx % len(engine_list)]
                         count[idx] = M_per_chunk * N * local_tensor.element_size()
-                        write_flag[idx] = signal_buffer[local_dst_rank].data_ptr() + (recv_rank* num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                        write_flag[idx] = signal_buffer[local_dst_rank].data_ptr() + (
+                            recv_rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                         write_value[idx] = signal_t
-                        wait_flag[idx] = signal_buffer[local_rank].data_ptr() + (recv_rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
+                        wait_flag[idx] = signal_buffer[local_rank].data_ptr() + (
+                            recv_rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                         wait_value[idx] = signal_t
                         idx += 1
-            if idx > 0:        
-                (err,) = macart.mcExtBatchCopyFlagAndWait(
-                            dst_arr,                # dst addr
-                            src_arr,                # src addr
-                            engine,                 # cp engine
-                            count,                  # data size
-                            write_flag,             # barrier addr
-                            write_value,            # barrier value
-                            wait_flag,             # barrier addr
-                            wait_value,            # barrier value
-                            intranode_ag_stream.cuda_stream   # stream
-                         )
+            if idx > 0:
+                (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                           src_arr,  # src addr
+                                                           engine,  # cp engine
+                                                           count,  # data size
+                                                           write_flag,  # barrier addr
+                                                           write_value,  # barrier value
+                                                           wait_flag,  # barrier addr
+                                                           wait_value,  # barrier value
+                                                           intranode_ag_stream.cuda_stream  # stream
+                                                           )
                 MACA_CHECK(err)
 
         intranode_ag_stream.wait_stream(internode_ag_stream)
@@ -609,6 +618,7 @@ def local_copy_and_barrier_all(rank, num_ranks, local_data, global_data, comm_bu
     # set_signal(barrier_ptr[rank].data_ptr(), 1, torch.cuda.current_stream(), is_internode)
     barrier_ptr[rank].fill_(1)
 
+
 @triton_dist.jit(do_not_specialize=["rank"])
 def kernel_consumer_gemm(
     # Pointers to matrices
@@ -642,7 +652,7 @@ def kernel_consumer_gemm(
     needs_wait: tl.constexpr,
     ready_value: tl.constexpr = 1,
     local_world_size: tl.constexpr = 8,
-    nnodes : tl.constexpr = 1,
+    nnodes: tl.constexpr = 1,
     num_chunks_per_rank: tl.constexpr = 1,
     nnumas: tl.constexpr = 1,
     numa_world_size: tl.constexpr = 8,
@@ -698,14 +708,14 @@ def kernel_consumer_gemm(
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, c, mask=c_mask)        
+        tl.store(c_ptrs, c, mask=c_mask)
     else:
         # block idx start from current rank
         if nnodes == 1:
             m_offset = M_per_rank * rank
             pid_m_offset = tl.cdiv(m_offset, BLOCK_SIZE_M)
             pid_m = (pid_m + pid_m_offset) % num_pid_m
-        elif nnumas == 1:    
+        elif nnumas == 1:
             node_id = rank // local_world_size
             m_rank = pid_m // pid_ms_per_rank
             pid_m_intra_rank = pid_m - m_rank * pid_ms_per_rank
@@ -789,9 +799,10 @@ def kernel_consumer_gemm(
         tl.store(c_ptrs, c, mask=c_mask)
 
 
-def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chunks_per_rank, workspace_tensors, barrier_tensors, comm_buf,
-                          for_correctness=False, ag_stream=None, gemm_stream=None, internode_ag_stream=None, serial=False, BLOCK_M=128,
-                          BLOCK_N=128, BLOCK_K=128, stages=4, pipeline="cpasync", autotune=False, use_pull=True, signal_t=None):
+def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chunks_per_rank, workspace_tensors,
+                          barrier_tensors, comm_buf, for_correctness=False, ag_stream=None, gemm_stream=None,
+                          internode_ag_stream=None, serial=False, BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=4,
+                          pipeline="cpasync", autotune=False, use_pull=True, signal_t=None):
     """no-tma allgather gemm for intra-node
 
     Allgather global matrix A and do matmul with local matrix B, produces local matrix C
@@ -841,9 +852,8 @@ def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
     gemm_stream.wait_stream(current_stream)
     internode_ag_stream.wait_stream(current_stream)
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),)
-    
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]), )
+
     def call_ag(use_pull):
         if fullmesh_nodes_num == 1:
             cp_engine_producer_all_gather_full_mesh_push(
@@ -880,37 +890,12 @@ def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
         call_ag(use_pull)
     with torch.cuda.stream(gemm_stream):
         compiled = kernel_consumer_gemm[grid](
-                workspace_tensors[rank][:M],
-                b,
-                c,  #
-                a,
-                rank,
-                num_ranks,
-                barrier_tensors[rank],
-                M,
-                N_per_rank,
-                K,  #
-                workspace_tensors[rank][:M].stride(0),
-                workspace_tensors[rank][:M].stride(1),
-                b.stride(1),
-                b.stride(0),
-                c.stride(0),
-                c.stride(1),
-                BLOCK_M,
-                BLOCK_N,
-                BLOCK_K,
-                8,
-                False,
-                True,
-                num_stages=stages,
-                num_warps=4,
-                pipeline=pipeline,
-                scenario="noaddropt",
-                num_chunks_per_rank=num_chunks_per_rank,
-                nnodes=fullmesh_nodes_num,
-                local_world_size=fullmesh_world_size
-            )
-
+            workspace_tensors[rank][:M], b, c,  #
+            a, rank, num_ranks, barrier_tensors[rank], M, N_per_rank, K,  #
+            workspace_tensors[rank][:M].stride(0), workspace_tensors[rank][:M].stride(1), b.stride(1), b.stride(0),
+            c.stride(0), c.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, 8, False, True, num_stages=stages, num_warps=4,
+            pipeline=pipeline, scenario="noaddropt", num_chunks_per_rank=num_chunks_per_rank, nnodes=fullmesh_nodes_num,
+            local_world_size=fullmesh_world_size)
 
     current_stream.wait_stream(ag_stream)
     current_stream.wait_stream(gemm_stream)
@@ -918,10 +903,10 @@ def ag_gemm_intra_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
     return compiled
 
 
-def ag_gemm_inter_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chunks_per_rank, workspace_tensors, barrier_tensors, comm_buf,
-                          ag_stream=None, internode_ag_stream=None, gemm_stream=None, BLOCK_M=128,
-                          BLOCK_N=128, BLOCK_K=128, stages=4, pipeline="cpasync", local_world_size=8, signal_target=1,
-                          signal_t=None, copy_engine_dispatch=False):
+def ag_gemm_inter_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chunks_per_rank, workspace_tensors,
+                          barrier_tensors, comm_buf, ag_stream=None, internode_ag_stream=None, gemm_stream=None,
+                          BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=4, pipeline="cpasync", local_world_size=8,
+                          signal_target=1, signal_t=None, copy_engine_dispatch=False):
     """allgather gemm for inter-node
 
     Allgather global matrix A and do matmul with local matrix B, produces local matrix C
@@ -973,15 +958,14 @@ def ag_gemm_inter_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
     internode_ag_stream.wait_stream(current_stream)
     numa_nodes_num = max(local_world_size // fullmesh_world_size, 1)
 
-    inter_node_allgather(a, workspace_tensors, barrier_tensors, fullmesh_world_size, signal_target, rank, num_chunks_per_rank, local_world_size, num_ranks,
-                         ag_stream, internode_ag_stream, copy_engine_dispatch, signal_t=signal_t, numanode_ag_stream=None)
+    inter_node_allgather(a, workspace_tensors, barrier_tensors, fullmesh_world_size, signal_target, rank,
+                         num_chunks_per_rank, local_world_size, num_ranks, ag_stream, internode_ag_stream,
+                         copy_engine_dispatch, signal_t=signal_t, numanode_ag_stream=None)
 
     compiled = None
     with torch.cuda.stream(gemm_stream):
 
-        grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]),
-        )
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N_per_rank, META["BLOCK_SIZE_N"]), )
         compiled = kernel_consumer_gemm[grid](
             workspace_tensors[local_rank][:M],
             b,
@@ -1025,16 +1009,17 @@ def ag_gemm_inter_node_op(a, b, c, rank, num_ranks, fullmesh_world_size, num_chu
 def get_intranode_fullmesh_world_size(num_ranks):
     # get numa_world_size and fullmesh_world_size
     try:
-        numa_world_size = get_numa_world_size() # expensive so only do once
+        numa_world_size = get_numa_world_size()  # expensive so only do once
     except AssertionError:
         numa_world_size = num_ranks
-    
+
     fullmesh_world_size = numa_world_size
     while (fullmesh_world_size > 1 and not has_fullmesh_mxlink_ngpus(fullmesh_world_size)):
         fullmesh_world_size //= 2
-    
+
     return fullmesh_world_size
-    
+
+
 @dataclass
 class AllGatherGEMMTensorParallelContext:
     rank: int
@@ -1076,9 +1061,10 @@ class AllGatherGEMMTensorParallelContext:
         self.autotune = autotune
         self.fullmesh_world_size = fullmesh_world_size
 
+
 def create_ag_gemm_intra_node_context(tensor_A, tensor_B, rank, num_ranks, max_M=2**14, max_blocks=65536, BLOCK_M=128,
-                                      BLOCK_N=256, BLOCK_K=64, stages=3, num_chunks_per_rank=1, for_correctness=False, ag_stream=None,
-                                      gemm_stream=None, serial=False, autotune=False, use_tma=False):
+                                      BLOCK_N=256, BLOCK_K=64, stages=3, num_chunks_per_rank=1, for_correctness=False,
+                                      ag_stream=None, gemm_stream=None, serial=False, autotune=False, use_tma=False):
     """create context for allgather gemm intra-node
 
     Args:
@@ -1117,14 +1103,14 @@ def create_ag_gemm_intra_node_context(tensor_A, tensor_B, rank, num_ranks, max_M
     else:
         comm_buf = None
     # workspaces = pymxshmem.mxshmem_create_tensor_list_intra_node([max_M, K], dtype)
-    symm_ag_a = symm_mem.empty([M_per_rank*num_ranks, K], dtype=dtype, device=tensor_A.device)
+    symm_ag_a = symm_mem.empty([M_per_rank * num_ranks, K], dtype=dtype, device=tensor_A.device)
     symm_mem_hdl = symm_mem.rendezvous(symm_ag_a, group=dist.group.WORLD)
     workspaces = []
     for r in range(num_ranks):
         if r == rank:
             workspaces.append(symm_ag_a)
         else:
-            workspaces.append(symm_mem_hdl.get_buffer(r, [M_per_rank*num_ranks, K], dtype, 0))
+            workspaces.append(symm_mem_hdl.get_buffer(r, [M_per_rank * num_ranks, K], dtype, 0))
 
     barriers[rank].fill_(0)
     current_stream = torch.cuda.current_stream()
@@ -1132,27 +1118,12 @@ def create_ag_gemm_intra_node_context(tensor_A, tensor_B, rank, num_ranks, max_M
     torch.cuda.synchronize()
 
     ret = AllGatherGEMMTensorParallelContext(
-        rank=rank,
-        num_ranks=num_ranks,
-        local_rank=rank,
-        num_chunks_per_rank=num_chunks_per_rank,
-        num_local_ranks=num_ranks,
-        workspace_tensors=workspaces,
-        barrier_tensors=barriers,
-        fake_barrier_tensor=fake_barrier,
-        comm_buf=comm_buf,
-        for_correctness=for_correctness,
-        ag_stream=ag_stream,
-        internode_ag_stream=torch.cuda.Stream(),
-        gemm_stream=gemm_stream,
-        serial=serial,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        stages=stages,
-        autotune=autotune,
-        fullmesh_world_size=get_intranode_fullmesh_world_size(num_ranks)
-    )
+        rank=rank, num_ranks=num_ranks, local_rank=rank, num_chunks_per_rank=num_chunks_per_rank,
+        num_local_ranks=num_ranks, workspace_tensors=workspaces, barrier_tensors=barriers,
+        fake_barrier_tensor=fake_barrier, comm_buf=comm_buf, for_correctness=for_correctness, ag_stream=ag_stream,
+        internode_ag_stream=torch.cuda.Stream(), gemm_stream=gemm_stream, serial=serial, BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, stages=stages, autotune=autotune,
+        fullmesh_world_size=get_intranode_fullmesh_world_size(num_ranks))
 
     return ret
 
@@ -1173,26 +1144,28 @@ def ag_gemm_intra_node(a, b, ctx=None, rank=None, num_ranks=None, use_tma=True):
     if ctx is None:
         assert rank is not None and num_ranks is not None
         ctx = create_ag_gemm_intra_node_context(a, b, rank, num_ranks)
-    
+
     M_per_rank, K = a.shape
     N_per_rank, _ = b.shape
     C = torch.empty([ctx.num_ranks * M_per_rank, N_per_rank], dtype=a.dtype, device=a.device)
 
-    use_pull = False # default cp_engine_allgather_push
+    use_pull = False  # default cp_engine_allgather_push
     ctx.barrier_tensors[ctx.rank].fill_(0)
     current_stream = torch.cuda.current_stream()
 
     signal_t = 1
-    ctx.barrier_tensors[ctx.rank][ctx.rank * ctx.num_chunks_per_rank:(ctx.rank+1) * ctx.num_chunks_per_rank].fill_(signal_t)
+    ctx.barrier_tensors[ctx.rank][ctx.rank * ctx.num_chunks_per_rank:(ctx.rank + 1) *
+                                  ctx.num_chunks_per_rank].fill_(signal_t)
     # flush L2
     pymxshmem.flush_l2c(current_stream.cuda_stream)
     # make sure local copy and flush_l2c finished on all devices
     pymxshmem.mxshmem_barrier_all_on_stream(current_stream.cuda_stream)
 
-    ag_gemm_intra_node_op(a, b, C, ctx.rank, ctx.num_ranks, ctx.fullmesh_world_size, ctx.num_chunks_per_rank, ctx.workspace_tensors, ctx.barrier_tensors,
-                            ctx.comm_buf, for_correctness=ctx.for_correctness, ag_stream=ctx.ag_stream,
-                            gemm_stream=ctx.gemm_stream, internode_ag_stream=ctx.internode_ag_stream, 
-                            serial=ctx.serial, autotune=ctx.autotune, use_pull=use_pull, signal_t=signal_t)
+    ag_gemm_intra_node_op(a, b, C, ctx.rank, ctx.num_ranks, ctx.fullmesh_world_size, ctx.num_chunks_per_rank,
+                          ctx.workspace_tensors, ctx.barrier_tensors, ctx.comm_buf, for_correctness=ctx.for_correctness,
+                          ag_stream=ctx.ag_stream, gemm_stream=ctx.gemm_stream,
+                          internode_ag_stream=ctx.internode_ag_stream, serial=ctx.serial, autotune=ctx.autotune,
+                          use_pull=use_pull, signal_t=signal_t)
 
     pymxshmem.mxshmem_barrier_all_on_stream(current_stream.cuda_stream)
 
@@ -1200,9 +1173,9 @@ def ag_gemm_intra_node(a, b, ctx=None, rank=None, num_ranks=None, use_tma=True):
 
 
 def create_ag_gemm_inter_node_context(tensor_A, tensor_B, rank, num_ranks, num_local_ranks=8, max_M=2**14,
-                                      max_blocks=65536, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3, num_chunks_per_rank=1,
-                                      for_correctness=False, ag_stream=None, gemm_stream=None, serial=False,
-                                      autotune=False, use_tma=False):
+                                      max_blocks=65536, BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3,
+                                      num_chunks_per_rank=1, for_correctness=False, ag_stream=None, gemm_stream=None,
+                                      serial=False, autotune=False, use_tma=False):
     """create context for allgather gemm inter-node
 
     Args:
@@ -1234,7 +1207,7 @@ def create_ag_gemm_inter_node_context(tensor_A, tensor_B, rank, num_ranks, num_l
     local_rank = rank % num_local_ranks
 
     fake_barrier = torch.ones([num_ranks], dtype=torch.int32, device=tensor_A.device)
-    workspaces = pymxshmem.mxshmem_create_tensor_list_intra_node([M_per_rank*num_ranks, K], dtype)
+    workspaces = pymxshmem.mxshmem_create_tensor_list_intra_node([M_per_rank * num_ranks, K], dtype)
     barriers = pymxshmem.mxshmem_create_tensor_list_intra_node([num_ranks * num_chunks_per_rank], torch.uint64)
 
     if use_tma:
@@ -1249,27 +1222,12 @@ def create_ag_gemm_inter_node_context(tensor_A, tensor_B, rank, num_ranks, num_l
     torch.cuda.synchronize()
 
     ret = AllGatherGEMMTensorParallelContext(
-        rank=rank,
-        num_ranks=num_ranks,
-        local_rank=local_rank,
-        num_chunks_per_rank=num_chunks_per_rank,
-        num_local_ranks=num_local_ranks,
-        workspace_tensors=workspaces,
-        barrier_tensors=barriers,
-        fake_barrier_tensor=fake_barrier,
-        comm_buf=comm_buf,
-        for_correctness=for_correctness,
-        ag_stream=ag_stream,
-        internode_ag_stream=torch.cuda.Stream(),
-        gemm_stream=gemm_stream,
-        serial=serial,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        stages=stages,
-        autotune=autotune,
-        fullmesh_world_size=get_intranode_fullmesh_world_size(num_local_ranks)
-    )
+        rank=rank, num_ranks=num_ranks, local_rank=local_rank, num_chunks_per_rank=num_chunks_per_rank,
+        num_local_ranks=num_local_ranks, workspace_tensors=workspaces, barrier_tensors=barriers,
+        fake_barrier_tensor=fake_barrier, comm_buf=comm_buf, for_correctness=for_correctness, ag_stream=ag_stream,
+        internode_ag_stream=torch.cuda.Stream(), gemm_stream=gemm_stream, serial=serial, BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, stages=stages, autotune=autotune,
+        fullmesh_world_size=get_intranode_fullmesh_world_size(num_local_ranks))
 
     return ret
 
@@ -1293,24 +1251,25 @@ def ag_gemm_inter_node(a, b, ctx=None, rank=None, num_ranks=None, local_world_si
     M_per_rank, K = a.shape
     N_per_rank, _ = b.shape
     C = torch.empty([ctx.num_ranks * M_per_rank, N_per_rank], dtype=a.dtype, device=a.device)
-    local_rank = ctx.rank % local_world_size                             
+    local_rank = ctx.rank % local_world_size
     ctx.barrier_tensors[local_rank].fill_(0)
     current_stream = torch.cuda.current_stream()
     pymxshmem.mxshmem_barrier_all_on_stream(current_stream.cuda_stream)
     ctx.workspace_tensors[local_rank][ctx.rank * M_per_rank:(ctx.rank + 1) * M_per_rank, :].copy_(a)
     signal_t = 1
-    ctx.barrier_tensors[local_rank][ctx.rank * ctx.num_chunks_per_rank:(ctx.rank+1) * ctx.num_chunks_per_rank].fill_(signal_t)
+    ctx.barrier_tensors[local_rank][ctx.rank * ctx.num_chunks_per_rank:(ctx.rank + 1) *
+                                    ctx.num_chunks_per_rank].fill_(signal_t)
 
     # flush L2
     pymxshmem.flush_l2c(current_stream.cuda_stream)
     # make sure local copy and flush_l2c finished on all devices
-    pymxshmem.mxshmem_barrier_all_on_stream(current_stream.cuda_stream)    
+    pymxshmem.mxshmem_barrier_all_on_stream(current_stream.cuda_stream)
 
-    ag_gemm_inter_node_op(a, b, C, ctx.rank, ctx.num_ranks, ctx.fullmesh_world_size, ctx.num_chunks_per_rank, ctx.workspace_tensors, ctx.barrier_tensors,
-                            ctx.comm_buf, ag_stream=ctx.ag_stream, internode_ag_stream=ctx.internode_ag_stream,
-                            gemm_stream=ctx.gemm_stream, 
-                            local_world_size=local_world_size, signal_target=signal_target, signal_t=signal_t,
-                            copy_engine_dispatch=True)
+    ag_gemm_inter_node_op(a, b, C, ctx.rank, ctx.num_ranks, ctx.fullmesh_world_size, ctx.num_chunks_per_rank,
+                          ctx.workspace_tensors, ctx.barrier_tensors, ctx.comm_buf, ag_stream=ctx.ag_stream,
+                          internode_ag_stream=ctx.internode_ag_stream, gemm_stream=ctx.gemm_stream,
+                          local_world_size=local_world_size, signal_target=signal_target, signal_t=signal_t,
+                          copy_engine_dispatch=True)
 
     return C
 
@@ -1387,30 +1346,28 @@ def gemm(a, b, BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, stages=4, pipeline="cpasyn
     N, _ = b.shape
     c = torch.empty([M, N], dtype=a.dtype, device=a.device)
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
     compiled = kernel_consumer_gemm_triton[grid](
-            a,
-            b,
-            c,  #
-            M,
-            N,
-            K,  #
-            a.stride(0),
-            a.stride(1),
-            b.stride(1),
-            b.stride(0),
-            c.stride(0),
-            c.stride(1),
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_K,
-            8,
-            False,
-            num_stages=stages,
-            pipeline="cpasync",
-            num_warps=4,
-        )    
+        a,
+        b,
+        c,  #
+        M,
+        N,
+        K,  #
+        a.stride(0),
+        a.stride(1),
+        b.stride(1),
+        b.stride(0),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        8,
+        False,
+        num_stages=stages,
+        pipeline="cpasync",
+        num_warps=4,
+    )
 
     return c

@@ -53,7 +53,7 @@ void init_triton_distributed_passes_ttgpuir_for_amd(py::module &&m) {
 void init_triton_distributed_passes_ttgpuir_for_metax(py::module &&m) {
   using namespace mlir::triton;
   ADD_PASS_WRAPPER_1("add_distributed_to_llvm",
-                      createConvertMETAXDistributedToLLVMPass, int);
+                     createConvertMETAXDistributedToLLVMPass, int);
 }
 #endif
 
@@ -68,7 +68,8 @@ void init_triton_distributed_passes(py::module &&m) {
   init_triton_distributed_passes_ttir(m.def_submodule("ttir"));
   auto ttgpuir = m.def_submodule("ttgpuir");
 #ifdef USE_MACA
-  init_triton_distributed_passes_ttgpuir_for_metax(ttgpuir.def_submodule("metax"));
+  init_triton_distributed_passes_ttgpuir_for_metax(
+      ttgpuir.def_submodule("metax"));
 #else
   init_triton_distributed_passes_ttgpuir_for_nvidia(
       ttgpuir.def_submodule("nvidia"));

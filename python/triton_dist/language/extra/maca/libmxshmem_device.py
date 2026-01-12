@@ -131,6 +131,7 @@ def putmem_signal_block(dest, source, nbytes, sig_addr, signal, sig_op, pe, _sem
         _semantic=_semantic,
     )
 
+
 @core.extern
 def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
     return extern_call(
@@ -140,7 +141,7 @@ def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
             sig_addr,  # no cast: pointer type should be aligned
             tl.cast(signal, tl.uint64, _builder=_semantic.builder),
             tl.cast(sig_op, tl.int32, _builder=_semantic.builder),
-            tl.cast(pe, tl.int32,_builder=_semantic.builder),
+            tl.cast(pe, tl.int32, _builder=_semantic.builder),
         ],
         {
             (pi_u64_t, tl.uint64, tl.int32, tl.int32): (

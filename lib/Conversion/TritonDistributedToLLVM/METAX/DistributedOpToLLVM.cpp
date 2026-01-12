@@ -22,10 +22,10 @@ bool useMXSHMEMLibrary(StringRef libname) {
   return libname == "libmxshmem_device";
 }
 
-Operation *CreateMXSHMEMOp(ConversionPatternRewriter &rewriter, Operation *curOp,
-                           const StringRef &symbol, StringRef libname,
-                           StringRef libpath, ValueRange inputOperands,
-                           Type retType) {
+Operation *CreateMXSHMEMOp(ConversionPatternRewriter &rewriter,
+                           Operation *curOp, const StringRef &symbol,
+                           StringRef libname, StringRef libpath,
+                           ValueRange inputOperands, Type retType) {
   auto loc = curOp->getLoc();
   SmallVector<Value> llvmOpearands;
 
@@ -156,25 +156,26 @@ struct WaitOpConversion
     auto tid = tid_val();
     Value warpSize = i32_val(64);
     Value laneId = urem(tid, warpSize);
-    
+
     auto pred = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
-                                            laneId, num_barriers);
+                                               laneId, num_barriers);
     // create if
     auto ifOp = rewriter.create<scf::IfOp>(loc, TypeRange{}, pred,
-                                       /*hasElse=*/false);
+                                           /*hasElse=*/false);
     // if then block:
     rewriter.setInsertionPointToStart(ifOp.thenBlock());
     // calculate offset of each barrier.
-    auto addr = gep(ptr_ty(rewriter.getContext(), 1), intType, barrier_ptr, laneId);
+    auto addr =
+        gep(ptr_ty(rewriter.getContext(), 1), intType, barrier_ptr, laneId);
     // load init val for while op.
-    Value init = load(intType, addr, barrier_width, false, false, false, semantic, scope);
-    
+    Value init = load(intType, addr, barrier_width, false, false, false,
+                      semantic, scope);
+
     // create while
-    auto whileOp = rewriter.create<scf::WhileOp>(
-          loc,
-          TypeRange{intType},           // return type
-          ValueRange{init}              // init args
-      );
+    auto whileOp =
+        rewriter.create<scf::WhileOp>(loc, TypeRange{intType}, // return type
+                                      ValueRange{init}         // init args
+        );
 
     // create condition
     Block *beforeBlock;
@@ -187,8 +188,8 @@ struct WaitOpConversion
     }
     rewriter.setInsertionPointToStart(beforeBlock);
     Value arg = beforeBlock->getArgument(0);
-    auto whileCond = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
-                                                    arg, wait_val);
+    auto whileCond = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ne, arg, wait_val);
     rewriter.create<scf::ConditionOp>(loc, whileCond, ValueRange{arg});
     // create loop after region
     Block *afterBlock;
@@ -201,7 +202,8 @@ struct WaitOpConversion
     }
     rewriter.setInsertionPointToStart(afterBlock);
     // update argument
-    Value ret = load(intType, addr, barrier_width, false, false, false, semantic, scope);
+    Value ret = load(intType, addr, barrier_width, false, false, false,
+                     semantic, scope);
     rewriter.create<scf::YieldOp>(loc, ValueRange{ret});
 
     // barrier
@@ -209,8 +211,8 @@ struct WaitOpConversion
     StringRef funcName("llvm.mxc.barrier.inst");
     Value voidVal = undef(void_ty(op.getContext()));
     ValueRange voidVals = {};
-    mlir::LLVM::createBuiltinFunc<triton::distributed::WaitOp>(rewriter, loc, op, funcName,
-                                                               getVoidType(), voidVals);
+    mlir::LLVM::createBuiltinFunc<triton::distributed::WaitOp>(
+        rewriter, loc, op, funcName, getVoidType(), voidVals);
 
     rewriter.eraseOp(op);
     return success();

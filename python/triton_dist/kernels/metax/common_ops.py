@@ -22,12 +22,12 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import triton
 import torch
 import triton.language as tl
 from triton_dist.utils import (
     MACA_CHECK, )
 from maca import maca
+
 
 @tl.core.extern
 def thread_id(axis: tl.constexpr, _builder=None):
@@ -38,6 +38,7 @@ def thread_id(axis: tl.constexpr, _builder=None):
         is_pure=True,
         _builder=_builder,
     )
+
 
 def _wait_eq_maca(ptr: int, signal: int, stream: torch.cuda.Stream, require_i64=False):
     if not require_i64:

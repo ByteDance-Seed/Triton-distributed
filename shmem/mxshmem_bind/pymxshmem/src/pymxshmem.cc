@@ -1,18 +1,18 @@
 #include "c10/cuda/CUDAGuard.h"
 #include <ATen/ops/from_blob.h>
-#include <host_device_common/mxshmem_types.h>
 #include <c10/core/ScalarType.h>
 #include <c10/cuda/CUDAFunctions.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cstdint>
-#include <mxshmem.h>
+#include <device/mxshmem_defines.h>
 #include <host_device_common/mxshmem_error.h>
+#include <host_device_common/mxshmem_types.h>
+#include <mxshmem.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <torch/all.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch/python.h>
-#include <device/mxshmem_defines.h>
 
 class LazyLogger {
 public:
@@ -58,7 +58,7 @@ private:
 #define CHECK_MXSHMEMX(expr)                                                   \
   do {                                                                         \
     int x = expr;                                                              \
-    if (x != MXSHMEM_SUCCESS) {                                               \
+    if (x != MXSHMEM_SUCCESS) {                                                \
       throw std::runtime_error(__FILE__ ":" + std::to_string(__LINE__) +       \
                                " " #expr " failed with status code " +         \
                                std::to_string(x));                             \
@@ -205,10 +205,6 @@ PYBIND11_MODULE(_pymxshmem, m) {
             shape, torch::python::detail::py_object_to_dtype(std::move(dtype)));
       },
       py::arg("shape"), py::arg("dtype"));
-  m.def("flush_l2c", [](intptr_t stream) {
-    flush_l2c((cudaStream_t)stream);
-  });
-  m.def("mxshmem_finalize", []() {
-    mxshmem_finalize();
-  });
+  m.def("flush_l2c", [](intptr_t stream) { flush_l2c((cudaStream_t)stream); });
+  m.def("mxshmem_finalize", []() { mxshmem_finalize(); });
 }

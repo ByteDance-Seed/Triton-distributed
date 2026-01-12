@@ -23,10 +23,10 @@
 #
 ################################################################################
 
-import triton
 import triton.language as tl
 from triton.language import core
 # from triton.language.extra.maca.libdevice import ffs
+
 
 @core.extern
 def __syncthreads(_builder=None):

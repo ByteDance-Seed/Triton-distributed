@@ -1,6 +1,5 @@
 import torch
 import torch.distributed
-from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.metax import ag_gemm_inter_node, create_ag_gemm_inter_node_context, gemm
 
 from triton_dist.utils import dist_print
@@ -41,6 +40,7 @@ TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="n
 
 device = "cuda"
 dtype = torch.bfloat16
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -131,7 +131,8 @@ def perf_test_ag_only(M, config):
     def triton_func():
         local_copy_and_barrier_all(ctx.rank, ctx.num_ranks, A, ctx.workspace_tensors[ctx.local_rank], ctx.comm_buf,
                                    ctx.barrier_tensors[ctx.local_rank], M_per_rank, K, is_internode=True)
-        inter_node_allgather(A, ctx.workspace_tensors, ctx.barrier_tensors, ctx.fullmesh_world_size, 1, RANK, ctx.num_chunks_per_rank, LOCAL_WORLD_SIZE, WORLD_SIZE,
+        inter_node_allgather(A, ctx.workspace_tensors, ctx.barrier_tensors,
+                             ctx.fullmesh_world_size, 1, RANK, ctx.num_chunks_per_rank, LOCAL_WORLD_SIZE, WORLD_SIZE,
                              torch.cuda.current_stream(), internode_ag_stream, True)
         pymxshmem.mxshmem_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
         return ctx.workspace_tensors[LOCAL_RANK]
@@ -194,14 +195,16 @@ def perf_test(M, config):
     internode_ag_stream = torch.cuda.Stream()
     torch_ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
 
-    ctx = create_ag_gemm_inter_node_context(A, B, RANK, WORLD_SIZE, LOCAL_WORLD_SIZE, max_M=M, BLOCK_M=config["BM"], BLOCK_N=config["BN"],
-                                            BLOCK_K=config["BK"], stages=config["stage"], ag_stream=torch.cuda.Stream(),
-                                            gemm_stream=torch.cuda.Stream(), autotune=args.autotune)
+    ctx = create_ag_gemm_inter_node_context(A, B, RANK, WORLD_SIZE, LOCAL_WORLD_SIZE, max_M=M, BLOCK_M=config["BM"],
+                                            BLOCK_N=config["BN"], BLOCK_K=config["BK"], stages=config["stage"],
+                                            ag_stream=torch.cuda.Stream(), gemm_stream=torch.cuda.Stream(),
+                                            autotune=args.autotune)
 
     def triton_ag_func():
         local_copy_and_barrier_all(ctx.rank, ctx.num_ranks, A, ctx.workspace_tensors[ctx.local_rank], ctx.comm_buf,
                                    ctx.barrier_tensors[ctx.local_rank], M_per_rank, K, is_internode=True)
-        inter_node_allgather(A, ctx.workspace_tensors, ctx.barrier_tensors, ctx.fullmesh_world_size, 1, RANK, ctx.num_chunks_per_rank, LOCAL_WORLD_SIZE, WORLD_SIZE,
+        inter_node_allgather(A, ctx.workspace_tensors, ctx.barrier_tensors,
+                             ctx.fullmesh_world_size, 1, RANK, ctx.num_chunks_per_rank, LOCAL_WORLD_SIZE, WORLD_SIZE,
                              torch.cuda.current_stream(), internode_ag_stream, True)
         return ctx.workspace_tensors[LOCAL_RANK]
 

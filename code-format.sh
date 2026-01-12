@@ -53,7 +53,7 @@ if [ "$format_all" -eq 1 ]; then
   files_to_check=($(git ls-files --exclude-standard | grep -v '^3rdparty/' | grep -v "$(git config --file .gitmodules --get-regexp path | awk '{ print $2 }' | xargs -I {} echo -n '\|{}' | cut -c 3-)"))
 else
   # 排除3rdparty目录下的所有修改
-  files_to_check=($(git diff $base $target --name-only --diff-filter=ACMRT --ignore-submodules | grep -v '^3rdparty/'))
+  files_to_check=($(git diff $base $target --name-only --diff-filter=ACMRT --ignore-submodules))
 fi
 
 current_dir="$PWD"
