@@ -65,4 +65,7 @@ print("Test pass: ", passed)
 
 torch.distributed.barrier()
 
+del message
+del data
+del sig_addr
 finalize_distributed()
