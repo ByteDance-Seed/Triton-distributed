@@ -43,9 +43,9 @@ sig_addr = pyrocshmem.rocshmem_create_tensor((1,), NVSHMEM_SIGNAL_DTYPE)
 
 for i in range(elems):
     message[i] = RANK
+    data[i] = RANK
 
 sig_addr.zero_()
-data.zero_()
 torch.cuda.synchronize()
 
 print(RANK, '->', dst_pe)
@@ -60,7 +60,7 @@ for i in range(elems):
     if data[i] != 0:
         passed = False
 
-print(message[0], sig_addr)
+print(data[0], sig_addr)
 print("Test pass: ", passed)
 
 torch.distributed.barrier()

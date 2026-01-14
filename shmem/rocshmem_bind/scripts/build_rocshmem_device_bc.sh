@@ -31,6 +31,8 @@ OUTPUT_DIR="${ROCSHMEM_INSTALL_DIR}/lib"
 declare -A SOURCE_MAP
 SOURCE_MAP=(
     ["${ROCSHMEM_SRC}/src/rocshmem_gpu.cpp"]="rocshmem_gpu.bc"
+    ["${ROCSHMEM_SRC}/src/reverse_offload/backend_ro.cpp"]="rocshmem_backend_ro.bc"
+    ["${ROCSHMEM_SRC}/src/reverse_offload/context_ro_device.cpp"]="rocshmem_context_ro_device.bc"
     ["${ROCSHMEM_SRC}/src/ipc/backend_ipc.cpp"]="rocshmem_backend_ipc.bc"
     ["${ROCSHMEM_SRC}/src/ipc/context_ipc_device.cpp"]="rocshmem_context_ipc_device.bc"
     ["${ROCSHMEM_SRC}/src/ipc/context_ipc_device_coll.cpp"]="rocshmem_context_ipc_device_coll.bc"
@@ -50,7 +52,6 @@ SOURCE_MAP=(
 
 declare -A SOURCE_MAP_FLAGS
 SOURCE_MAP_FLAGS=(
-    ["${ROCSHMEM_SRC}/src/rocshmem_gpu.cpp"]="-DENABLE_IBGDA_BITCODE"
 )
 
 BITCODE_FILES=()
