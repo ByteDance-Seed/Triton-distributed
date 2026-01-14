@@ -45,7 +45,7 @@ import pyrocshmem
 from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
 from triton_dist.profiler_utils import perf_func
-from triton_dist.utils import finalize_distributed, initialize_distributed, nvshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, nvshmem_free_tensor_sync, sleep_async
+from triton_dist.utils import finalize_distributed, initialize_distributed, rocshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, sleep_async
 
 
 @dataclass
@@ -143,27 +143,29 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
     print(f"✅ RANK[{RANK}] check passed")
 
     # perf all-gather by NCCL
-    sleep_async(1000)  # in case CPU bound
+    #sleep_async(1000)  # in case CPU bound # Broken in rocm 7+
     _, duration_per_iter_ms = perf_func(
         _run_all_gather_nccl,
         warmup_iters=5,
         iters=10,
     )
-    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1)
+    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE -
+                                                            1) / WORLD_SIZE
     print(
         f"[NCCL] RANK = {RANK}, {nbytes // 1024} KB, Latency {duration_per_iter_ms * 1000:0.2f} us, Bus bandwith = {gbps:0.2f} GB/S"
     )
 
     # perf all-gather by triton-distributed
-    nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    sleep_async(1000)  # in case CPU bound
+    rocshmem_barrier_all_on_stream(torch.cuda.current_stream())
+    #sleep_async(1000)  # in case CPU bound
     _, duration_per_iter_ms = perf_func(
         _run_all_gather_triton,
         warmup_iters=5,
         iters=10,
     )
 
-    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE - 1)
+    gbps = nbytes * 1e-9 / (duration_per_iter_ms * 1e-3) * (WORLD_SIZE -
+                                                            1) / WORLD_SIZE
     print(
         f"[Triton] RANK = {RANK}, {nbytes // 1024} KB, Latency {duration_per_iter_ms * 1000:0.2f} us, Bus bandwith = {gbps:0.2f} GB/S"
     )
@@ -202,8 +204,8 @@ perf_ag(
     nbytes,
     ctx,
 )
-nvshmem_free_tensor_sync(symm_ag_buffer)
-nvshmem_free_tensor_sync(ctx.symm_signals[0])
-nvshmem_free_tensor_sync(ctx.symm_signals[1])
+
+del symm_ag_buffer
+del ctx.symm_signals
 
 finalize_distributed()
