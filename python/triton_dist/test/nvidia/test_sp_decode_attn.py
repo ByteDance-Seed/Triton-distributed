@@ -29,7 +29,7 @@ import sys
 from typing import List, Optional
 
 import torch
-from cuda import cuda, cudart
+from triton_dist.utils import cuda, cudart
 import nvshmem.core
 
 from triton_dist.layers.nvidia import SpGQAFlashDecodeAttention

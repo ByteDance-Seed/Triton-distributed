@@ -26,7 +26,7 @@
 import torch
 import triton
 import triton.language as tl
-from cuda import cudart
+from triton_dist.utils import cudart
 from typing import Optional, List
 from dataclasses import dataclass
 from triton_dist.language.extra.language_extra import tid, st, __syncthreads, atomic_add

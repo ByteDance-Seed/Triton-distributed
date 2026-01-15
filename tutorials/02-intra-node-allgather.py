@@ -47,7 +47,7 @@ from typing import List
 
 import nvshmem.core
 import torch
-from cuda import cuda
+from triton_dist.utils import cuda
 
 import triton_dist
 import triton.language as tl

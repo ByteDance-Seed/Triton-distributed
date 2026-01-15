@@ -990,13 +990,21 @@ def get_packages():
             "triton_dist/kernels/metax",
             "triton_dist/language",
             "triton_dist/language/extra",
+            "triton_dist/language/extra/cuda",
+            "triton_dist/language/extra/hip",
+            "triton_dist/mega_triton_kernel",
+            "triton_dist/function",
+            "triton_dist/function/nvidia",
             "triton_dist/layers",
             "triton_dist/layers/nvidia",
+            "triton_dist/layers/amd",
             "triton_dist/models",
             "triton_dist/test",
             "triton_dist/tools",
             "triton_dist/tools/compile",
+            "triton_dist/tools/profiler",
             "triton_dist/tools/runtime",
+            "triton_dist/tools/tune",
         ]
 
     packages = []

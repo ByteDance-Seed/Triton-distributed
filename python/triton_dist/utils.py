@@ -47,6 +47,15 @@ import triton_dist
 import dataclasses
 import shutil
 
+try:
+    from cuda import cuda as _cuda, cudart as _cudart
+    cuda = _cuda
+    cudart = _cudart
+except Exception:
+    from cuda.bindings import driver, runtime
+    cuda = driver
+    cudart = runtime
+
 
 def is_cuda():
     """Checks if 'nvidia-smi' is available on the system's PATH."""
@@ -97,7 +106,6 @@ def is_mori_shmem():
 if is_cuda():
     import nvshmem
     import nvshmem.core
-    from cuda import cuda, cudart
     from .nv_utils import (
         get_numa_node,
         _get_pynvml_device_id,

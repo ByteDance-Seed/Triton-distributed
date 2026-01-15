@@ -32,7 +32,7 @@ from typing import List
 import nvshmem.bindings.nvshmem as pynvshmem
 import nvshmem.core
 import torch
-from cuda import cudart
+from triton_dist.utils import cudart
 
 import triton.language as tl
 import triton_dist

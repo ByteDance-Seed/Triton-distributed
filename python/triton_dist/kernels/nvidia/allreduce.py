@@ -29,7 +29,7 @@ import warnings
 from typing import Optional
 
 import torch
-from cuda import cudart
+from triton_dist.utils import cudart
 
 import triton
 import triton.language as tl
