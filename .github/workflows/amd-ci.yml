@@ -25,13 +25,14 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update -y && apt install -y libopenmpi-dev
+          rm -f /usr/local/bin/cmake
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
           pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: 'recursive'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -48,6 +49,10 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
           # gemm rs
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
+          # mori shmem api tests
+          TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
+          # mori shmem bw tests
+          TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py
   amd-e2e-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
@@ -62,6 +67,7 @@ jobs:
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
       PYTHON: "python3"
       TRITON_BUILD_PROTON: "0"
+      TRITON_DIST_SHMEM_BACKEND: "rocshmem"
 
     steps:
       - name: Install dependencies
@@ -72,7 +78,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: 'recursive'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -82,8 +88,8 @@ jobs:
       - name: E2E tests
         run: |
           bash ./scripts/build_e2e_env.sh --download_model
-          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B
-          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B --per_op
+          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-0.6B
+          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-0.6B --per_op
           # TODO: uncomment below tests until CI image has a working flash-attention installed
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_attn.py --bsz 32 --seq_len 128 --model Qwen/Qwen3-32B --mode prefill
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_attn.py --bsz 4096 --seq_len 128 --model Qwen/Qwen3-32B --mode decode
@@ -92,3 +98,40 @@ jobs:
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_e2e.py --bsz 4096 --seq_len 128 --model Qwen/Qwen3-32B --mode decode
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_e2e_inference.py --bsz 4096 --gen_len 128 --max_length 150
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_e2e_inference.py --bsz 4096 --gen_len 128 --max_length 150 --triton_dist
+  amd-mori-test:
+    name: Build and Test on AMD GPUs with MoRI SHMEM
+    runs-on: "amd-gfx942-mi325"
+    timeout-minutes: 45
+    container:
+        image: rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.5.1
+        options: >-
+          --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
+          --volume /home/runner/.triton:/github/home/.triton
+    env:
+      TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      PYTHON: "python3"
+      TRITON_BUILD_PROTON: "0"
+      TRITON_DIST_SHMEM_BACKEND: "mori_shmem"
+
+    steps:
+      - name: Install dependencies
+        run: |
+          rm -f /usr/local/bin/cmake
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
+          pip3 install -i https://test.pypi.org/simple hip-python==6.4.3.555.40
+          pip3 install pybind11
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: Build triton-distributed
+        run: |
+          pip3 install -e python --verbose --no-build-isolation --use-pep517
+      - name: Build mori shmem
+        run: |
+          bash ./scripts/build_mori_shmem.sh 
+      - name: Mori SHMEM API tests
+        run: |
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py

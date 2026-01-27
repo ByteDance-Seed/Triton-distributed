@@ -439,8 +439,43 @@ def build_rocshmem():
     subprocess.check_call(["bash", f"{rocshmem_bind_dir}/build.sh"] + extra_args)
 
 
+def build_mori_shmem():
+    base_dir = get_base_dir()
+    mori_dir = os.path.join(base_dir, "3rdparty", "mori")
+    build_script = os.path.join(base_dir, "scripts", "build_mori_shmem.sh")
+
+    if not os.path.exists(mori_dir) or len(os.listdir(mori_dir)) == 0:
+        raise RuntimeError("MoRI is empty. Please `git submodule update --init --recursive`")
+    if not os.path.exists(build_script):
+        raise RuntimeError("MoRI build script not found: " + build_script)
+
+    subprocess.check_call(["bash", build_script])
+
+
 def build_shmem():
-    if _is_hip_platform() or check_env_flag("TRITON_DISTRIBUTED_BUILD_PYROCSHMEM", "0"):
+    # Determine which shmem backend(s) to build based on TRITON_DIST_SHMEM_BACKEND
+    shmem_backend = os.getenv("TRITON_DIST_SHMEM_BACKEND", "").lower()
+
+    if not _is_hip_platform():
+        # Not HIP platform, skip shmem build
+        return
+
+    # If no backend specified, build both
+    if not shmem_backend:
+        print("TRITON_DIST_SHMEM_BACKEND not set, building both mori_shmem and rocshmem")
+        build_mori_shmem()
+        build_rocshmem()
+    elif shmem_backend == "mori_shmem":
+        print("Building mori_shmem backend")
+        build_mori_shmem()
+    elif shmem_backend == "rocshmem":
+        print("Building rocshmem backend")
+        build_rocshmem()
+    else:
+        raise RuntimeError(f"Unknown TRITON_DIST_SHMEM_BACKEND: {shmem_backend}. Must be 'mori_shmem' or 'rocshmem'")
+
+    # Also build if explicitly requested via env var (for backward compatibility)
+    if check_env_flag("TRITON_DISTRIBUTED_BUILD_PYROCSHMEM", "0") and shmem_backend != "rocshmem":
         build_rocshmem()  # (9, 4)
 
 

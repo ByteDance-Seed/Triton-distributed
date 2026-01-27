@@ -59,27 +59,36 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
     elif is_hip():
         import torch
         from hip import hip
-        import pyrocshmem
-        res = hip.hipModuleGetGlobal(kernel_module, b"ROCSHMEM_CTX_DEFAULT")
-        # dptr, bytes = res[1], res[2]
-        if res[0] == hip.hipError_t.hipSuccess:
-            """
-                typedef struct rocshmem_ctx{
-                    void *ctx_opaque;
-                    void *team_opaque;
-                } rocshmem_ctx_t;
-                pyrocshmem.rocshmem_get_device_ctx only return the `ctx_opaque`.
-                `ROCSHMEM_CTX_DEFAULT` is a `rocshmem_ctx_t` struct, but only the `ctx_opaque` field needs to be updated on the device side.
-                (equal to `libshmem_device.set_rocshmem_ctx(ctx)` in the kernel)
-            """
-            ctx_opaque_bytes = 8  # assuming 64-bit pointer
-            # get the host address of the `ctx_opaque` pointer.
-            ctx = pyrocshmem.rocshmem_get_device_ctx()
-            ctx_tensor = torch.tensor([ctx], dtype=torch.int64)
-            # update the device `ROCSHMEM_CTX_DEFAULT` struct's `ctx_opaque` field in the kernel module.
-            cp_res = hip.hipMemcpy(res[1], ctx_tensor.data_ptr(), ctx_opaque_bytes,
-                                   hip.hipMemcpyKind.hipMemcpyHostToDevice)
-            HIP_CHECK(cp_res)
+        from triton_dist.utils import get_shmem_backend
+
+        backend = get_shmem_backend()
+
+        if backend == 'rocshmem':
+            import pyrocshmem
+            res = hip.hipModuleGetGlobal(kernel_module, b"ROCSHMEM_CTX_DEFAULT")
+            # dptr, bytes = res[1], res[2]
+            if res[0] == hip.hipError_t.hipSuccess:
+                """
+                    typedef struct rocshmem_ctx{
+                        void *ctx_opaque;
+                        void *team_opaque;
+                    } rocshmem_ctx_t;
+                    pyrocshmem.rocshmem_get_device_ctx only return the `ctx_opaque`.
+                    `ROCSHMEM_CTX_DEFAULT` is a `rocshmem_ctx_t` struct, but only the `ctx_opaque` field needs to be updated on the device side.
+                    (equal to `libshmem_device.set_rocshmem_ctx(ctx)` in the kernel)
+                """
+                ctx_opaque_bytes = 8  # assuming 64-bit pointer
+                # get the host address of the `ctx_opaque` pointer.
+                ctx = pyrocshmem.rocshmem_get_device_ctx()
+                ctx_tensor = torch.tensor([ctx], dtype=torch.int64)
+                # update the device `ROCSHMEM_CTX_DEFAULT` struct's `ctx_opaque` field in the kernel module.
+                cp_res = hip.hipMemcpy(res[1], ctx_tensor.data_ptr(), ctx_opaque_bytes,
+                                       hip.hipMemcpyKind.hipMemcpyHostToDevice)
+                HIP_CHECK(cp_res)
+        elif backend == 'mori_shmem':
+            # Initialize mori_shmem device symbols in this kernel module
+            import mori.shmem as mori_shmem
+            mori_shmem.shmem_module_init(kernel_module)
     else:
         raise ValueError("Unsupported device type for shmem kernel module init hook.")
 
@@ -101,11 +110,22 @@ def get_shmem_extern_lib() -> Dict[str, str]:
 
     elif is_hip():
         import triton_dist
-        from .utils import _get_rocshmem_libdevice
+        from .utils import get_shmem_backend, _get_rocshmem_libdevice, _get_mori_shmem_libdevice
+
         libdevice_extra_lib = Path(triton_dist.__path__[0]) / "tools" / "compile" / "libdevice_extra.ll"
-        rocshmem_lib = _get_rocshmem_libdevice()
-        # func name need to contain the lib name
-        extern_libs = {"rocshmem": str(rocshmem_lib), "extra": str(libdevice_extra_lib)}
+        backend = get_shmem_backend()
+
+        if backend == 'rocshmem':
+            rocshmem_lib = _get_rocshmem_libdevice()
+            # func name need to contain the lib name
+            extern_libs = {"rocshmem": str(rocshmem_lib), "extra": str(libdevice_extra_lib)}
+        elif backend == 'mori_shmem':
+            mori_shmem_lib = _get_mori_shmem_libdevice()
+            # func name need to contain the lib name
+            extern_libs = {"mori_shmem": str(mori_shmem_lib), "extra": str(libdevice_extra_lib)}
+        else:
+            raise ValueError(f"Unknown HIP SHMEM backend: {backend}")
+
         return extern_libs
 
     else:
