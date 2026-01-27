@@ -53,6 +53,7 @@ def n_pes(_semantic=None):
         _semantic=_semantic,
     )
 
+
 @core.extern
 def remote_ptr(destPtr, myPe, destPe, _semantic=None):
     """Get P2P pointer to remote memory."""
@@ -64,10 +65,11 @@ def remote_ptr(destPtr, myPe, destPe, _semantic=None):
             tl.cast(myPe, tl.int32, _semantic=_semantic),
             tl.cast(destPe, tl.int32, _semantic=_semantic),
         ],
-        {(tl.uint64, tl.int32, tl.int32): ("mori_shmem_ptr_p2p", (tl.uint64,))},
+        {(tl.uint64, tl.int32, tl.int32): ("mori_shmem_ptr_p2p", (tl.uint64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def quiet(_semantic=None):
@@ -89,7 +91,7 @@ def quiet_pe(pe, _semantic=None):
         "libmori_shmem_device",
         "",
         [tl.cast(pe, tl.int32, _semantic=_semantic)],
-        {(tl.int32,): ("mori_shmem_quiet_thread_pe", ())},
+        {(tl.int32, ): ("mori_shmem_quiet_thread_pe", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -136,7 +138,7 @@ def fence_pe(pe, _semantic=None):
         "libmori_shmem_device",
         "",
         [tl.cast(pe, tl.int32, _semantic=_semantic)],
-        {(tl.int32,): ("mori_shmem_fence_thread_pe", ())},
+        {(tl.int32, ): ("mori_shmem_fence_thread_pe", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -162,6 +164,7 @@ def fence_pe_qp(pe, qp_id, _semantic=None):
         _semantic=_semantic,
     )
 
+
 @core.extern
 def putmem_nbi(dest, source, nbytes, pe, qp_id=0, _semantic=None):
     """Non-blocking put memory operation (thread scope).
@@ -183,7 +186,8 @@ def putmem_nbi(dest, source, nbytes, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.int32, tl.int32): ("mori_shmem_putmem_nbi_thread", ())},
+        {(tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_putmem_nbi_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -210,7 +214,8 @@ def put_uint32_nbi(dest, source, nelems, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint32), tl.pointer_type(tl.uint32), tl.uint64, tl.int32, tl.int32): ("mori_shmem_put_uint32_nbi_thread", ())},
+        {(tl.pointer_type(tl.uint32), tl.pointer_type(tl.uint32), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_put_uint32_nbi_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -237,7 +242,8 @@ def put_uint64_nbi(dest, source, nelems, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint64), tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32): ("mori_shmem_put_uint64_nbi_thread", ())},
+        {(tl.pointer_type(tl.uint64), tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_put_uint64_nbi_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -264,7 +270,8 @@ def put_float_nbi(dest, source, nelems, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.float32), tl.pointer_type(tl.float32), tl.uint64, tl.int32, tl.int32): ("mori_shmem_put_float_nbi_thread", ())},
+        {(tl.pointer_type(tl.float32), tl.pointer_type(tl.float32), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_put_float_nbi_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -291,10 +298,12 @@ def put_double_nbi(dest, source, nelems, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.float64), tl.pointer_type(tl.float64), tl.uint64, tl.int32, tl.int32): ("mori_shmem_put_double_nbi_thread", ())},
+        {(tl.pointer_type(tl.float64), tl.pointer_type(tl.float64), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_put_double_nbi_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def putmem_nbi_signal(dest, source, bytes, sig_addr, signal_value, signal_op, pe, qp_id=0, _semantic=None):
@@ -326,10 +335,12 @@ def putmem_nbi_signal(dest, source, bytes, sig_addr, signal_value, signal_op, pe
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.pointer_type(tl.void), tl.uint64, tl.int32, tl.int32, tl.int32): ("mori_shmem_putmem_nbi_signal_thread", ())},
+        {(tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.pointer_type(tl.void), tl.uint64, tl.int32, tl.int32, tl.int32):
+         ("mori_shmem_putmem_nbi_signal_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def int_p(dest, value, pe, qp_id=0, _semantic=None):
@@ -730,6 +741,7 @@ def uint64_p(dest, value, pe, qp_id=0, _semantic=None):
         _semantic=_semantic,
     )
 
+
 @core.extern
 def atomic_uint64_nonfetch(dest, val, amoType, pe, qp_id=0, _semantic=None):
     """Atomic non-fetch uint64 operation (thread scope).
@@ -751,7 +763,8 @@ def atomic_uint64_nonfetch(dest, val, amoType, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32, tl.int32): ("mori_shmem_atomic_uint64_nonfetch_thread", ())},
+        {(tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32, tl.int32):
+         ("mori_shmem_atomic_uint64_nonfetch_thread", ())},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -783,7 +796,8 @@ def atomic_uint64_fetch(dest, val, compare, amoType, pe, qp_id=0, _semantic=None
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint64), tl.uint64, tl.uint64, tl.int32, tl.int32, tl.int32): ("mori_shmem_atomic_uint64_fetch_thread", (tl.uint64,))},
+        {(tl.pointer_type(tl.uint64), tl.uint64, tl.uint64, tl.int32, tl.int32, tl.int32):
+         ("mori_shmem_atomic_uint64_fetch_thread", (tl.uint64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -836,10 +850,12 @@ def atomic_fetch_add_uint64(dest, val, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32): ("mori_shmem_uint64_atomic_fetch_add_thread", (tl.uint64,))},
+        {(tl.pointer_type(tl.uint64), tl.uint64, tl.int32, tl.int32):
+         ("mori_shmem_uint64_atomic_fetch_add_thread", (tl.uint64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def atomic_int64_nonfetch(dest, val, amo_type, pe, qp_id=0, _semantic=None):
@@ -862,10 +878,12 @@ def atomic_int64_nonfetch(dest, val, amo_type, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32, tl.int32): ("mori_shmem_atomic_int64_nonfetch_thread", (tl.void,))},
+        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32, tl.int32):
+         ("mori_shmem_atomic_int64_nonfetch_thread", (tl.void, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def atomic_int64_fetch(dest, val, compare, amo_type, pe, qp_id=0, _semantic=None):
@@ -893,10 +911,12 @@ def atomic_int64_fetch(dest, val, compare, amo_type, pe, qp_id=0, _semantic=None
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int64), tl.int64, tl.int64, tl.int32, tl.int32, tl.int32): ("mori_shmem_atomic_int64_fetch_thread", (tl.int64,))},
+        {(tl.pointer_type(tl.int64), tl.int64, tl.int64, tl.int32, tl.int32, tl.int32):
+         ("mori_shmem_atomic_int64_fetch_thread", (tl.int64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def atomic_add_int64(dest, val, pe, qp_id=0, _semantic=None):
@@ -917,10 +937,12 @@ def atomic_add_int64(dest, val, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32): ("mori_shmem_int64_atomic_add_thread", (tl.void,))},
+        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32):
+         ("mori_shmem_int64_atomic_add_thread", (tl.void, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def atomic_fetch_add_int64(dest, val, pe, qp_id=0, _semantic=None):
@@ -944,10 +966,12 @@ def atomic_fetch_add_int64(dest, val, pe, qp_id=0, _semantic=None):
             tl.cast(pe, tl.int32, _semantic=_semantic),
             tl.cast(qp_id, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32): ("mori_shmem_int64_atomic_fetch_add_thread", (tl.int64,))},
+        {(tl.pointer_type(tl.int64), tl.int64, tl.int32, tl.int32):
+         ("mori_shmem_int64_atomic_fetch_add_thread", (tl.int64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
+
 
 @core.extern
 def uint32_wait_until_greater_than(addr, val, _semantic=None):
@@ -959,7 +983,7 @@ def uint32_wait_until_greater_than(addr, val, _semantic=None):
             tl.cast(addr, tl.pointer_type(tl.uint32), _semantic=_semantic),
             tl.cast(val, tl.uint32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint32), tl.uint32): ("mori_shmem_uint32_wait_until_greater_than", (tl.uint32,))},
+        {(tl.pointer_type(tl.uint32), tl.uint32): ("mori_shmem_uint32_wait_until_greater_than", (tl.uint32, ))},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -991,7 +1015,7 @@ def uint64_wait_until_greater_than(addr, val, _semantic=None):
             tl.cast(addr, tl.pointer_type(tl.uint64), _semantic=_semantic),
             tl.cast(val, tl.uint64, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.uint64), tl.uint64): ("mori_shmem_uint64_wait_until_greater_than", (tl.uint64,))},
+        {(tl.pointer_type(tl.uint64), tl.uint64): ("mori_shmem_uint64_wait_until_greater_than", (tl.uint64, ))},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -1023,7 +1047,7 @@ def int32_wait_until_greater_than(addr, val, _semantic=None):
             tl.cast(addr, tl.pointer_type(tl.int32), _semantic=_semantic),
             tl.cast(val, tl.int32, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int32), tl.int32): ("mori_shmem_int32_wait_until_greater_than", (tl.int32,))},
+        {(tl.pointer_type(tl.int32), tl.int32): ("mori_shmem_int32_wait_until_greater_than", (tl.int32, ))},
         is_pure=False,
         _semantic=_semantic,
     )
@@ -1055,7 +1079,7 @@ def int64_wait_until_greater_than(addr, val, _semantic=None):
             tl.cast(addr, tl.pointer_type(tl.int64), _semantic=_semantic),
             tl.cast(val, tl.int64, _semantic=_semantic),
         ],
-        {(tl.pointer_type(tl.int64), tl.int64): ("mori_shmem_int64_wait_until_greater_than", (tl.int64,))},
+        {(tl.pointer_type(tl.int64), tl.int64): ("mori_shmem_int64_wait_until_greater_than", (tl.int64, ))},
         is_pure=False,
         _semantic=_semantic,
     )

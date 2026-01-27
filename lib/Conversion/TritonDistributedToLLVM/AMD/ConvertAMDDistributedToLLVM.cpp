@@ -168,25 +168,25 @@ struct ConvertAMDDistributedToLLVM
         typeConverter, patterns, mlir::gpu::amd::HIP, *maybeChipset);
 
     // Distributed ops - determine SHMEM backend from environment variable
-    std::string shmemLibname = "librocshmem_device";  // default to rocshmem
+    std::string shmemLibname = "librocshmem_device"; // default to rocshmem
     std::string shmemLibpath = "";
-    
+
     // Check environment variable to determine backend
-    const char* shmemBackendEnv = std::getenv("TRITON_DIST_SHMEM_BACKEND");
+    const char *shmemBackendEnv = std::getenv("TRITON_DIST_SHMEM_BACKEND");
     if (shmemBackendEnv != nullptr) {
       std::string shmemBackend(shmemBackendEnv);
       // Convert to lowercase for case-insensitive comparison
-      std::transform(shmemBackend.begin(), shmemBackend.end(), 
+      std::transform(shmemBackend.begin(), shmemBackend.end(),
                      shmemBackend.begin(), ::tolower);
-      
+
       if (shmemBackend == "mori_shmem") {
         shmemLibname = "libmori_shmem_device";
       }
     }
-    
+
     mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
-        typeConverter, patterns, commonBenefit, targetInfo, 
-        shmemLibname, shmemLibpath);
+        typeConverter, patterns, commonBenefit, targetInfo, shmemLibname,
+        shmemLibpath);
 
     // SIMT ops
     mlir::triton::populateSIMTOpToLLVMPatterns(typeConverter, targetInfo,

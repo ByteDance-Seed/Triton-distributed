@@ -151,9 +151,11 @@ def team_sync_warp(team):
 def quiet():
     ...
 
+
 @_shmem_module.dispatch
 def quiet_pe():
     ...
+
 
 @_shmem_module.dispatch
 def fence():
@@ -538,4 +540,3 @@ MORI_AMO_FETCH_XOR = 19
 MORI_AMO_SWAP = 20
 MORI_AMO_COMPARE_SWAP = 21
 MORI_AMO_OP_SENTINEL = sys.maxsize
-

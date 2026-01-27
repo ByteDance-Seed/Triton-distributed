@@ -60,9 +60,9 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
         import torch
         from hip import hip
         from triton_dist.utils import get_shmem_backend
-        
+
         backend = get_shmem_backend()
-        
+
         if backend == 'rocshmem':
             import pyrocshmem
             res = hip.hipModuleGetGlobal(kernel_module, b"ROCSHMEM_CTX_DEFAULT")
@@ -111,10 +111,10 @@ def get_shmem_extern_lib() -> Dict[str, str]:
     elif is_hip():
         import triton_dist
         from .utils import get_shmem_backend, _get_rocshmem_libdevice, _get_mori_shmem_libdevice
-        
+
         libdevice_extra_lib = Path(triton_dist.__path__[0]) / "tools" / "compile" / "libdevice_extra.ll"
         backend = get_shmem_backend()
-        
+
         if backend == 'rocshmem':
             rocshmem_lib = _get_rocshmem_libdevice()
             # func name need to contain the lib name
@@ -125,7 +125,7 @@ def get_shmem_extern_lib() -> Dict[str, str]:
             extern_libs = {"mori_shmem": str(mori_shmem_lib), "extra": str(libdevice_extra_lib)}
         else:
             raise ValueError(f"Unknown HIP SHMEM backend: {backend}")
-        
+
         return extern_libs
 
     else:

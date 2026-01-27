@@ -181,8 +181,8 @@ void registerGenericOpToSHMEMDevice(RewritePatternSet &patterns,
                                     PatternBenefit benefit,
                                     StringRef calleeName, StringRef libname,
                                     StringRef libpath) {
-  patterns.add<GenericOpToSHMEMDevice<Args>...>(
-      typeConverter, benefit, calleeName, libname, libpath);
+  patterns.add<GenericOpToSHMEMDevice<Args>...>(typeConverter, benefit,
+                                                calleeName, libname, libpath);
 }
 
 struct WaitOpConversion
@@ -328,19 +328,21 @@ void mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
                                                            benefit);
 
   bool useMoriShmem = useMORISHMEMLibrary(SHMEMLibname);
-  
-  std::string myPeWrapper = useMoriShmem ? "mori_shmem_my_pe" : "rocshmem_my_pe_wrapper";
-  std::string nPesWrapper = useMoriShmem ? "mori_shmem_n_pes" : "rocshmem_n_pes_wrapper";
-  std::string ptrWrapper = useMoriShmem ? "mori_shmem_ptr" : "rocshmem_ptr_wrapper";
+
+  std::string myPeWrapper =
+      useMoriShmem ? "mori_shmem_my_pe" : "rocshmem_my_pe_wrapper";
+  std::string nPesWrapper =
+      useMoriShmem ? "mori_shmem_n_pes" : "rocshmem_n_pes_wrapper";
+  std::string ptrWrapper =
+      useMoriShmem ? "mori_shmem_ptr" : "rocshmem_ptr_wrapper";
 
   registerGenericOpToSHMEMDevice<triton::distributed::GetRankOp>(
-      patterns, typeConverter, benefit, myPeWrapper,
-      SHMEMLibname, SHMEMLibpath);
-  registerGenericOpToSHMEMDevice<triton::distributed::GetNumRanksOp>(
-      patterns, typeConverter, benefit, nPesWrapper,
-      SHMEMLibname, SHMEMLibpath);
-  registerGenericOpToSHMEMDevice<triton::distributed::SymmAtOp>(
-      patterns, typeConverter, benefit, ptrWrapper, SHMEMLibname,
+      patterns, typeConverter, benefit, myPeWrapper, SHMEMLibname,
       SHMEMLibpath);
+  registerGenericOpToSHMEMDevice<triton::distributed::GetNumRanksOp>(
+      patterns, typeConverter, benefit, nPesWrapper, SHMEMLibname,
+      SHMEMLibpath);
+  registerGenericOpToSHMEMDevice<triton::distributed::SymmAtOp>(
+      patterns, typeConverter, benefit, ptrWrapper, SHMEMLibname, SHMEMLibpath);
   patterns.add<ExternCallConversion>(typeConverter, benefit);
 }

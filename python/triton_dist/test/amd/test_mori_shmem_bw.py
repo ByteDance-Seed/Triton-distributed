@@ -22,7 +22,6 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-
 """
 MoRI SHMEM Bandwidth Test For P2P And IBGDA
 ==============================
@@ -67,8 +66,6 @@ Baseline:
 import os
 import sys
 import argparse
-import datetime
-from typing import List
 
 # Set default environment variables
 os.environ.setdefault('TRITON_DIST_SHMEM_BACKEND', 'mori_shmem')
@@ -81,7 +78,8 @@ if _triton_dist_python_path not in sys.path:
     sys.path.insert(0, _triton_dist_python_path)
 current_pythonpath = os.environ.get('PYTHONPATH', '')
 if _triton_dist_python_path not in current_pythonpath:
-    os.environ['PYTHONPATH'] = f"{_triton_dist_python_path}:{current_pythonpath}" if current_pythonpath else _triton_dist_python_path
+    os.environ[
+        'PYTHONPATH'] = f"{_triton_dist_python_path}:{current_pythonpath}" if current_pythonpath else _triton_dist_python_path
 
 # Add upstream Triton python path
 _triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
@@ -95,12 +93,8 @@ from triton_dist.utils import initialize_distributed
 from triton_dist.profiler_utils import perf_func, group_profile
 import mori.shmem as mori_shmem
 from mori.shmem import (
-    MoriShmemBuffer,
     mori_shmem_create_tensor,
-    symm_mori_shmem_tensor,
-    mori_shmem_create_tensor_list_intra_node,
 )
-import triton
 import triton_dist
 import triton.language as tl
 from triton_dist.language.extra import libshmem_device
@@ -141,49 +135,43 @@ def mori_putmem_p2p_kernel(
     thread_idx = tid(0)
     warp_id = thread_idx // WARP_SIZE
     lane_id = thread_idx % WARP_SIZE
-    
+
     # Total threads and warps across all blocks
     threads_per_block = num_warps * WARP_SIZE
     total_threads = num_pid * threads_per_block
     global_thread_id = pid * threads_per_block + thread_idx
     global_warp_id = global_thread_id // WARP_SIZE
-    
+
     # Total elements to transfer
     total_elements = M * N
-    
+
     # Element size in bytes
     elem_size = tl.constexpr(2 if dtype == tl.float16 else 4)
-    
+
     # Each thread handles multiple chunks with stride
     for elem_offset in range(global_thread_id * BLOCK_SIZE, total_elements, total_threads * BLOCK_SIZE):
         # Calculate how many elements this thread will process
         remaining = total_elements - elem_offset
         chunk_size = tl.minimum(remaining, BLOCK_SIZE)
-        
+
         if chunk_size > 0:
             # start_row = elem_offset // N
             # start_col = elem_offset % N
             # src_ptr = src_tensor + start_row * stride_src_m + start_col * stride_src_n
             # dst_row = rank * M + start_row
             # dst_ptr = dst_tensor + dst_row * stride_dst_m + start_col * stride_dst_n
-            
+
             src_ptr = src_tensor + elem_offset
             dst_offset = rank * M * N + elem_offset
             dst_ptr = dst_tensor + dst_offset
             # Calculate byte size for this chunk
             nbytes = chunk_size * elem_size
-            
+
             # QP selection based on thread ID
             qp_id = (global_thread_id // WARP_SIZE) % num_qps
-            
+
             # Each thread independently calls putmem_nbi
-            libshmem_device.putmem_nbi(
-                dst_ptr,
-                src_ptr,
-                nbytes,
-                target_rank,
-                qp_id
-            )
+            libshmem_device.putmem_nbi(dst_ptr, src_ptr, nbytes, target_rank, qp_id)
     if test_ibgda:
         if global_warp_id == 0:
             libshmem_device.quiet_pe(target_rank)
@@ -197,7 +185,7 @@ def print_bw_matrix(title: str, matrix: torch.Tensor, world_size: int):
         header += f" {i:^5} |"
     print(header)
     print("-" * len(header))
-    
+
     for i in range(world_size):
         row_str = f"  {i:<7}|"
         for j in range(world_size):
@@ -242,11 +230,12 @@ def test_mori_shmem_bandwidth(
         test_iters: Test iterations
     """
     M, K = local_tensor.shape
-    
+
     # Grid configuration: use multiple blocks
     grid = (num_sms, )
+
     # grid = (16, )
-    
+
     def run_p2p():
         mori_putmem_p2p_kernel[grid](
             local_tensor,
@@ -265,30 +254,30 @@ def test_mori_shmem_bandwidth(
             num_warps=num_warps,
             test_ibgda=test_ibgda,
         )
-    
+
     # Clear target region first (data will be written to dst_rank's region in dst PE's symmetric memory)
     # Note: We're clearing src_rank's slice on the dst PE, which will receive the data
     M_per_rank = M
     symm_tensor[src_rank * M_per_rank:(src_rank + 1) * M_per_rank].fill_(0)
     torch.cuda.synchronize()
-    
+
     # Run once to get output
     run_p2p()
     torch.cuda.synchronize()
-    
+
     # After putmem, data from src_rank should appear in src_rank's slice of dst PE's symm_tensor
     output = symm_tensor[src_rank * M_per_rank:(src_rank + 1) * M_per_rank].clone()
-    
+
     # Benchmark
     torch.cuda.synchronize()
     _, latency = perf_func(run_p2p, iters=test_iters, warmup_iters=warmup_iters)
     tensor_size = local_tensor.numel() * local_tensor.element_size()
     bandwidth_gbps = (tensor_size / latency * 1000) / (1024**3) if latency > 0 else 0
-    
+
     # Verify correctness
     assert torch.allclose(output, local_tensor, atol=1e-2, rtol=1e-2), \
         f"Data mismatch between src_rank={src_rank} and dst_rank={dst_rank}"
-    
+
     return bandwidth_gbps, latency, output
 
 
@@ -296,13 +285,13 @@ def run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
     # Create a single symmetric memory tensor for all ranks [M * WORLD_SIZE, K]
     # All operations are performed directly on this symmetric tensor
     symm_tensor = mori_shmem_create_tensor([M * WORLD_SIZE, K], dtype)
-    
+
     # Initialize local source data in symmetric memory
     # Each rank writes to its own slice: [RANK * M : (RANK + 1) * M, :]
     torch.manual_seed(42 + RANK)
-    local_tensor = symm_tensor[RANK * M : (RANK + 1) * M, :]
+    local_tensor = symm_tensor[RANK * M:(RANK + 1) * M, :]
     local_tensor.copy_(torch.randn(M, K, dtype=dtype, device='cuda'))
-    
+
     tensor_size_mb = local_tensor.numel() * local_tensor.element_size() / (1024**2)
     assert args.num_sms % (WORLD_SIZE - 1) == 0, "num_sms must be divisible by (WORLD_SIZE - 1)"
     num_sms = args.num_sms // (WORLD_SIZE - 1) * 2
@@ -310,16 +299,16 @@ def run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
     if RANK == 0:
         print(f"\n--- MoRI SHMEM P2P Bandwidth Test: Shape [{M}, {K}] ({tensor_size_mb:.2f} MB) ---")
         print(f"    num_sms={num_sms},   num_warps_per_sm={num_warps_per_sm}")
-    
+
     mori_bandwidths = torch.zeros(WORLD_SIZE, device='cuda', dtype=torch.float32)
-    
+
     prof = group_profile("mori_shmem_p2p_bw", args.profile, group=TP_GROUP)
     with prof:
         for src_rank in range(WORLD_SIZE):
             for dst_rank in range(WORLD_SIZE):
                 if src_rank == dst_rank:
                     continue
-                
+
                 if RANK == src_rank:
                     bandwidth, latency, _ = test_mori_shmem_bandwidth(
                         src_rank,
@@ -338,14 +327,14 @@ def run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
                     mori_bandwidths[dst_rank] = bandwidth
                     print(f"[Rank {RANK}] PE{src_rank} -> PE{dst_rank}: "
                           f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
-                
+
                 torch.distributed.barrier(TP_GROUP)
-    
+
     # Gather all bandwidth results
     all_mori_bandwidths = torch.zeros(WORLD_SIZE, WORLD_SIZE, device='cuda', dtype=torch.float32)
     torch.distributed.all_gather_into_tensor(all_mori_bandwidths, mori_bandwidths.view(1, WORLD_SIZE))
     torch.distributed.barrier(TP_GROUP)
-    
+
     if RANK == 0:
         print_bw_matrix("MoRI SHMEM P2P Bandwidth Matrix", all_mori_bandwidths, WORLD_SIZE)
 
@@ -358,15 +347,15 @@ def run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
     # Create a single symmetric memory tensor for all ranks [M * WORLD_SIZE, K]
     # All operations are performed directly on this symmetric tensor
     symm_tensor = mori_shmem_create_tensor([M * WORLD_SIZE, K], dtype)
-    
+
     # Initialize local source data in symmetric memory
     # Each rank writes to its own slice: [RANK * M : (RANK + 1) * M, :]
     torch.manual_seed(42 + RANK)
-    local_tensor = symm_tensor[RANK * M : (RANK + 1) * M, :]
+    local_tensor = symm_tensor[RANK * M:(RANK + 1) * M, :]
     local_tensor.copy_(torch.randn(M, K, dtype=dtype, device='cuda'))
-    
+
     tensor_size_mb = local_tensor.numel() * local_tensor.element_size() / (1024**2)
-    
+
     assert args.num_sms % (WORLD_SIZE - 1) == 0, "num_sms must be divisible by (WORLD_SIZE - 1)"
     num_sms = args.num_sms // (WORLD_SIZE - 1) // 4
     num_warps_per_sm = 4
@@ -375,14 +364,14 @@ def run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
         print(f"    num_sms={num_sms},   num_warps_per_sm={num_warps_per_sm},   num_qps={args.num_qps}")
 
     mori_bandwidths = torch.zeros(WORLD_SIZE, device='cuda', dtype=torch.float32)
-    
+
     prof = group_profile("mori_shmem_ibgda_bw", args.profile, group=TP_GROUP)
     with prof:
         for src_rank in range(WORLD_SIZE):
             for dst_rank in range(WORLD_SIZE):
                 if src_rank == dst_rank:
                     continue
-                
+
                 if RANK == src_rank:
                     bandwidth, latency, _ = test_mori_shmem_bandwidth(
                         src_rank,
@@ -393,7 +382,7 @@ def run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
                         num_qps=args.num_qps,
                         num_sms=num_warps_per_sm,
                         num_warps=4,
-                        BLOCK_SIZE=16*4096,
+                        BLOCK_SIZE=16 * 4096,
                         warmup_iters=args.warmup,
                         test_iters=args.iters,
                         test_ibgda=True,
@@ -401,15 +390,14 @@ def run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
                     mori_bandwidths[dst_rank] = bandwidth
                     print(f"[Rank {RANK}] IBGDA PE{src_rank} -> PE{dst_rank}: "
                           f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
-                
+
                 torch.distributed.barrier(TP_GROUP)
 
-    
     # Gather all bandwidth results
     all_mori_bandwidths = torch.zeros(WORLD_SIZE, WORLD_SIZE, device='cuda', dtype=torch.float32)
     torch.distributed.all_gather_into_tensor(all_mori_bandwidths, mori_bandwidths.view(1, WORLD_SIZE))
     torch.distributed.barrier(TP_GROUP)
-    
+
     if RANK == 0:
         print_bw_matrix("MoRI SHMEM IBGDA Bandwidth Matrix", all_mori_bandwidths, WORLD_SIZE)
 
@@ -424,25 +412,23 @@ def parse_args():
     parser.add_argument("--num-sms", type=int, default=56, help="Number of SMs for kernel launch")
     parser.add_argument("--num-qps", type=int, default=4, help="Number of QPs for MoRI SHMEM")
     parser.add_argument("--size-sweep", action="store_true", help="Run size sweep with a fixed list of M dimensions.")
-    parser.add_argument("--profile", action="store_true",
-                        help="Enable PyTorch Profiler for a fixed size")
-    parser.add_argument("--test_ibgda", action="store_true",
-                        help="Enable ibgda test")
+    parser.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler for a fixed size")
+    parser.add_argument("--test_ibgda", action="store_true", help="Enable ibgda test")
     return parser.parse_args()
 
 
 def generate_size_configs(dtype):
     """Generate tensor configs for a fixed list of M values with K=4096."""
     element_size = torch.tensor([], dtype=dtype).element_size()
-    configs = [] 
-    
+    configs = []
+
     m_values = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
     K = 4096
-    
+
     for M in m_values:
         size_byte = M * K * element_size
         configs.append((M, K, size_byte))
-    
+
     return configs
 
 
@@ -455,37 +441,37 @@ def main():
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    
+
     # Initialize distributed training
     TP_GROUP = initialize_distributed()
     torch.distributed.barrier(TP_GROUP)
-    
+
     if not args.test_ibgda:
         if RANK == 0:
             print("=" * 80)
             print("MoRI SHMEM P2P Bandwidth Test")
             print("=" * 80)
-        
+
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         dtype = dtype_map[args.dtype]
-        
+
         if args.profile:
             M, K = args.M, args.K
             run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args)
-        
+
         elif args.size_sweep:
             size_configs = generate_size_configs(dtype)
-            
+
             if RANK == 0:
                 print(f"\nRunning MoRI SHMEM P2P bandwidth sweep (fixed K=4096, dtype={args.dtype})")
-            
+
             for i, (M, K, size_bytes) in enumerate(size_configs):
                 if RANK == 0:
                     print(f"\n{'='*80}")
                     print(f"Testing config {i+1}/{len(size_configs)}: [{M}, {K}] ({size_bytes/(1024**2):.2f} MB)")
                     print(f"{'='*80}")
                 run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args)
-        
+
         else:
             if RANK == 0:
                 print(f"\nRunning MoRI SHMEM P2P bandwidth test with shape [{args.M}, {args.K}], dtype={args.dtype}")
@@ -496,37 +482,37 @@ def main():
             print("=" * 80)
             print("MoRI SHMEM IBGDA Bandwidth Test")
             print("=" * 80)
-        
+
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         dtype = dtype_map[args.dtype]
-        
+
         if args.profile:
             M, K = args.M, args.K
             run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args)
-        
+
         elif args.size_sweep:
             size_configs = generate_size_configs(dtype)
-            
+
             if RANK == 0:
                 print(f"\nRunning MoRI SHMEM IBGDA bandwidth sweep (fixed K=4096, dtype={args.dtype})")
-            
+
             for i, (M, K, size_bytes) in enumerate(size_configs):
                 if RANK == 0:
                     print(f"\n{'='*80}")
                     print(f"Testing config {i+1}/{len(size_configs)}: [{M}, {K}] ({size_bytes/(1024**2):.2f} MB)")
                     print(f"{'='*80}")
                 run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args)
-        
+
         else:
             if RANK == 0:
                 print(f"\nRunning MoRI SHMEM IBGDA bandwidth test with shape [{args.M}, {args.K}], dtype={args.dtype}")
             run_ibgda_single_test(args.M, args.K, dtype, RANK, WORLD_SIZE, TP_GROUP, args)
         torch.distributed.barrier(TP_GROUP)
-    
+
     # cleanup
     mori_shmem.shmem_finalize()
     torch.distributed.destroy_process_group()
-    
+
     if RANK == 0:
         print("\n" + "=" * 80)
         print("Test completed successfully!")

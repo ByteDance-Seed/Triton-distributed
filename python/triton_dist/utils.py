@@ -63,11 +63,9 @@ def get_shmem_backend():
     elif is_hip():
         backend = os.getenv('TRITON_DIST_SHMEM_BACKEND', 'rocshmem').lower()
         if backend not in ['rocshmem', 'mori_shmem']:
-            raise ValueError(
-                f"Invalid SHMEM backend: '{backend}'. "
-                f"Must be 'rocshmem' or 'mori_shmem'. "
-                f"Set via: export TRITON_DIST_SHMEM_BACKEND=<backend>"
-            )
+            raise ValueError(f"Invalid SHMEM backend: '{backend}'. "
+                             f"Must be 'rocshmem' or 'mori_shmem'. "
+                             f"Set via: export TRITON_DIST_SHMEM_BACKEND=<backend>")
         return backend
     else:
         raise Exception("either CUDA or HIP platform is supported")
@@ -102,7 +100,7 @@ elif is_hip():
         get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
     )
-    
+
     # Dynamically import SHMEM library based on backend selection
     _shmem_backend = get_shmem_backend()
     if _shmem_backend == 'rocshmem':
@@ -111,11 +109,9 @@ elif is_hip():
         try:
             import mori.shmem as mori_shmem
         except ImportError:
-            raise ImportError(
-                "mori_shmem Python package not found. "
-                "Please install mori_shmem or use rocshmem backend: "
-                "export TRITON_DIST_SHMEM_BACKEND=rocshmem"
-            )
+            raise ImportError("mori_shmem Python package not found. "
+                              "Please install mori_shmem or use rocshmem backend: "
+                              "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
 else:
     raise Exception("either CUDA or HIP platform is supported")
 
@@ -175,12 +171,9 @@ def init_mori_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     rank, nranks = pg.rank(), pg.size()
     if rank == 0:
         buffer: bytes = bytearray(mori_shmem.shmem_get_unique_id())
-        unique_id: torch.Tensor = torch.frombuffer(
-            buffer, dtype=torch.uint8).cpu().clone()
+        unique_id: torch.Tensor = torch.frombuffer(buffer, dtype=torch.uint8).cpu().clone()
     else:
-        unique_id: torch.Tensor = torch.empty(128,
-                                              dtype=torch.uint8,
-                                              device="cpu")
+        unique_id: torch.Tensor = torch.empty(128, dtype=torch.uint8, device="cpu")
     # Broadcast unique_id from rank 0 to all ranks
     if not unique_id.is_cuda:
         tensor_gpu = unique_id.cuda()
@@ -192,12 +185,7 @@ def init_mori_by_torch_process_group(pg: torch.distributed.ProcessGroup):
 
     # Initialize mori_shmem with the unique_id
     unique_id = unique_id.numpy().tobytes()
-    mori_shmem.shmem_init_attr(
-        mori_shmem.MORI_SHMEM_INIT_WITH_UNIQUEID, 
-        rank, 
-        nranks, 
-        unique_id
-    )
+    mori_shmem.shmem_init_attr(mori_shmem.MORI_SHMEM_INIT_WITH_UNIQUEID, rank, nranks, unique_id)
     torch.distributed.barrier(group=pg)
     torch.cuda.synchronize()
 
