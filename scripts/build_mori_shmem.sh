@@ -47,7 +47,6 @@ echo "=========================================="
 # Install mori Python interface (this will also build and install C++ library via CMake)
 echo "Installing mori..."
 cd "${MORI_DIR}"
-# pip install -r requirements-build.txt
 if pip3 install . --no-build-isolation --verbose; then
     echo "pip3 install completed successfully."
 else
@@ -88,14 +87,30 @@ TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
 echo "Linking all mori_shmem BC files (wrapper + init + memory)..."
-${ROCM_PATH}/lib/llvm/bin/llvm-link \
+if ! ${ROCM_PATH}/lib/llvm/bin/llvm-link \
     "$WRAPPER_BC" \
     "$INIT_BC" \
     "$MEMORY_BC" \
-    -o "$TEMP_DIR/libmori_shmem_device.bc"
+    -o "$TEMP_DIR/libmori_shmem_device.bc"; then
+    echo "Error: llvm-link failed while creating $TEMP_DIR/libmori_shmem_device.bc"
+    exit 1
+fi
+
+if [ ! -f "$TEMP_DIR/libmori_shmem_device.bc" ]; then
+    echo "Error: Linked BC file not created: $TEMP_DIR/libmori_shmem_device.bc"
+    exit 1
+fi
 
 echo "Verifying linked BC file..."
-${ROCM_PATH}/lib/llvm/bin/opt -S "$TEMP_DIR/libmori_shmem_device.bc" -o "$TEMP_DIR/libmori_shmem_device.ll"
+if ! ${ROCM_PATH}/lib/llvm/bin/opt -S "$TEMP_DIR/libmori_shmem_device.bc" -o "$TEMP_DIR/libmori_shmem_device.ll"; then
+    echo "Error: opt failed while generating $TEMP_DIR/libmori_shmem_device.ll"
+    exit 1
+fi
+
+if [ ! -f "$TEMP_DIR/libmori_shmem_device.ll" ]; then
+    echo "Error: LLVM IR file not created: $TEMP_DIR/libmori_shmem_device.ll"
+    exit 1
+fi
 
 # Check if globalGpuStates is properly defined (should NOT have weak attribute)
 if grep -q "weak.*globalGpuStates" "$TEMP_DIR/libmori_shmem_device.ll"; then

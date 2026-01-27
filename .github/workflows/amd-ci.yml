@@ -88,8 +88,8 @@ jobs:
       - name: E2E tests
         run: |
           bash ./scripts/build_e2e_env.sh --download_model
-          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B
-          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-32B --per_op
+          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-0.6B
+          CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_mlp.py --M 4096 --model Qwen/Qwen3-0.6B --per_op
           # TODO: uncomment below tests until CI image has a working flash-attention installed
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_attn.py --bsz 32 --seq_len 128 --model Qwen/Qwen3-32B --mode prefill
           # CUDA_GRAPH=1 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_tp_attn.py --bsz 4096 --seq_len 128 --model Qwen/Qwen3-32B --mode decode

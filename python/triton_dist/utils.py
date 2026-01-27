@@ -269,10 +269,8 @@ def finalize_distributed():
     elif is_hip():
         backend = get_shmem_backend()
         if backend == 'rocshmem':
-            import pyrocshmem
             pyrocshmem.rocshmem_finalize()
         elif backend == 'mori_shmem':
-            import mori.shmem as mori_shmem
             mori_shmem.shmem_finalize()
     torch.distributed.destroy_process_group()
 
@@ -610,9 +608,15 @@ def get_rocshmem_hash():
     return rocshmem_hash
 
 
-def get_mori_home():
-    return os.getenv("MORI_HOME",
-                     Path(__file__).parent.parent / "shmem" / "mori_bind" / "mori_build" / "install")
+# Note: MORI SHMEM currently only requires a single device BC file (_get_mori_shmem_libdevice()).
+# get_mori_home() is kept for future compatibility but not currently used.
+@functools.lru_cache()
+def get_mori_home() -> Path:
+    if (mori_home := os.getenv("MORI_HOME")) is not None:
+        return Path(mori_home)
+
+    # Note: This path does not exist yet. MORI is installed via pip and only produces BC file.
+    return Path(__file__).parent.parent.parent / "shmem" / "mori_bind" / "mori_build" / "install"
 
 
 @functools.lru_cache

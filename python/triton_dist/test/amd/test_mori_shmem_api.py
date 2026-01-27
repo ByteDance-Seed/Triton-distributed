@@ -195,6 +195,17 @@ def test_mori_shmem_device():
     # Test dl.symm_at() for remote memory access
     print("**test_mori_shmem_symm_at start!")
     
+    # Check if running in multi-node environment
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
+    is_multinode = world_size > local_world_size
+    
+    if is_multinode:
+        if mype % local_world_size == 0:
+            print(f"   Skipping symm_at test in multi-node environment (world_size={world_size}, local_world_size={local_world_size})")
+            print(f"   symm_at() is only supported for intra-node communication")
+        return
+    
     nelems_per_rank = 4
     n_elements = npes * nelems_per_rank
     

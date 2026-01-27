@@ -88,9 +88,6 @@ public:
   }
 
 private:
-  // StringRef calleeName;
-  // StringRef libname;
-  // StringRef libpath;
   std::string calleeName;
   std::string libname;
   std::string libpath;

@@ -336,9 +336,8 @@ def run_p2p_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
                         test_ibgda=False,
                     )
                     mori_bandwidths[dst_rank] = bandwidth
-                    if RANK == 0 or True:  # Print from all ranks for debugging
-                        print(f"[Rank {RANK}] PE{src_rank} -> PE{dst_rank}: "
-                              f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
+                    print(f"[Rank {RANK}] PE{src_rank} -> PE{dst_rank}: "
+                          f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
                 
                 torch.distributed.barrier(TP_GROUP)
     
@@ -400,9 +399,8 @@ def run_ibgda_single_test(M, K, dtype, RANK, WORLD_SIZE, TP_GROUP, args):
                         test_ibgda=True,
                     )
                     mori_bandwidths[dst_rank] = bandwidth
-                    if RANK == 0 or True:  # Print from all ranks for debugging
-                        print(f"[Rank {RANK}] IBGDA PE{src_rank} -> PE{dst_rank}: "
-                              f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
+                    print(f"[Rank {RANK}] IBGDA PE{src_rank} -> PE{dst_rank}: "
+                          f"{bandwidth:.2f} GB/s ({latency:.3f} ms)")
                 
                 torch.distributed.barrier(TP_GROUP)
 
@@ -452,7 +450,7 @@ def main():
     args = parse_args()
     if args.test_ibgda:
         os.environ["MORI_DISABLE_P2P"] = "ON"
-        os.environ["MORI_NUM_QP_PER_PE"] = args.num_qps.__str__()
+        os.environ["MORI_NUM_QP_PER_PE"] = str(args.num_qps)
     # Get rank info from environment variables
     RANK = int(os.environ.get("RANK", 0))
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
