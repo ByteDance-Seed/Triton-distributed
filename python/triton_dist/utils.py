@@ -113,7 +113,7 @@ elif is_hip():
         get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
     )
-    
+
     # Dynamically import SHMEM library based on backend selection
     _shmem_backend = get_shmem_backend()
     if _shmem_backend == 'rocshmem':
