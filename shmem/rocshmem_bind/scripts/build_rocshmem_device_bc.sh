@@ -47,6 +47,7 @@ SOURCE_MAP=(
     ["${ROCSHMEM_SRC}/src/team.cpp"]="rocshmem_team.bc"
     ["${ROCSHMEM_SRC}/src/sync/abql_block_mutex.cpp"]="rocshmem_abql_block_mutex.bc"
     ["${ROCSHMEM_SRC}/src/util.cpp"]="rocshmem_util.bc"
+    ["${ROCSHMEM_SRC}/src/context_device.cpp"]="rocshmem_context_device.bc"
     ["${SCRIPT_DIR}/../runtime/rocshmem_wrapper.cc"]="rocshmem_wrapper.bc"
 )
 
