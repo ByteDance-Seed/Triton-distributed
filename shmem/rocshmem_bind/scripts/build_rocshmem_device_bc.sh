@@ -17,6 +17,7 @@ CLANG_FLAGS=(
     --cuda-device-only
     -std=c++20
     -emit-llvm
+    -mcode-object-version=5
     --offload-arch=${BITCODE_LIB_ARCH}
     -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem
     -I${ROCSHMEM_INSTALL_DIR}/include

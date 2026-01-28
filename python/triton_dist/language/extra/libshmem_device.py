@@ -23,15 +23,17 @@
 #
 ################################################################################
 from .utils import ModuleProxy
-from triton_dist.utils import is_cuda, is_hip
+from triton_dist.utils import is_cuda, is_rocshmem, is_mori_shmem
 import triton_dist.language.extra.cuda.libnvshmem_device as libnvshmem_device
 import triton_dist.language.extra.hip.librocshmem_device as librocshmem_device
+import triton_dist.language.extra.hip.libmori_shmem_device as libmori_shmem_device
 
 import sys
 
 _shmem_module = ModuleProxy([
     (is_cuda, libnvshmem_device),
-    (is_hip, librocshmem_device),
+    (is_rocshmem, librocshmem_device),
+    (is_mori_shmem, libmori_shmem_device),
 ])
 
 
@@ -64,7 +66,7 @@ def team_n_pes(team):
 
 
 @_shmem_module.dispatch
-def int_p(dest, value, pe):
+def int_p(dest, value, pe, qp_id=0):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
@@ -147,6 +149,11 @@ def team_sync_warp(team):
 
 @_shmem_module.dispatch
 def quiet():
+    ...
+
+
+@_shmem_module.dispatch
+def quiet_pe():
     ...
 
 
@@ -241,7 +248,7 @@ def putmem_wg(dest, source, bytes, pe):
 
 
 @_shmem_module.dispatch
-def putmem_nbi(dest, source, bytes, pe):
+def putmem_nbi(dest, source, bytes, pe, qp_id=0):
     ...
 
 
@@ -510,3 +517,27 @@ ROCSHMEM_CMP_LE = 5
 # ROCSHMEM_SIGNAL_OPS (enum)
 ROCSHMEM_SIGNAL_SET = 0
 ROCSHMEM_SIGNAL_ADD = 1
+
+# MoRI SHMEM atomicType (enum) - Not all types are currently supported.
+MORI_AMO_ACK = 1
+MORI_AMO_INC = 2
+MORI_AMO_SET = 3
+MORI_AMO_ADD = 4
+MORI_AMO_AND = 5
+MORI_AMO_OR = 6
+MORI_AMO_XOR = 7
+MORI_AMO_SIGNAL = 8
+MORI_SIGNAL_SET = 9
+MORI_SIGNAL_ADD = 10
+MORI_AMO_SIGNAL_SET = MORI_SIGNAL_SET
+MORI_AMO_SIGNAL_ADD = MORI_SIGNAL_ADD
+MORI_AMO_END_OF_NONFETCH = 13
+MORI_AMO_FETCH = 14
+MORI_AMO_FETCH_INC = 15
+MORI_AMO_FETCH_ADD = 16
+MORI_AMO_FETCH_AND = 17
+MORI_AMO_FETCH_OR = 18
+MORI_AMO_FETCH_XOR = 19
+MORI_AMO_SWAP = 20
+MORI_AMO_COMPARE_SWAP = 21
+MORI_AMO_OP_SENTINEL = sys.maxsize
