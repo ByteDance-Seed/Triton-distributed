@@ -7,7 +7,10 @@ PYROCSHMEM_DIR=${SCRIPT_DIR}/../shmem/rocshmem_bind/pyrocshmem
 ROCSHMEM_ROOT=${SCRIPT_DIR}/../shmem/rocshmem_bind/rocshmem_build/install
 MPI_ROOT=/opt/ompi_build/install/ompi
 
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${ROCSHMEM_ROOT}/lib:${MPI_ROOT}/lib
+# Only add rocshmem and MPI to LD_LIBRARY_PATH if not using mori_shmem backend
+if [ "${TRITON_DIST_SHMEM_BACKEND}" != "mori_shmem" ]; then
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${ROCSHMEM_ROOT}/lib:${MPI_ROOT}/lib
+fi
 
 case ":${PYTHONPATH}:" in
     *:"${DISTRIBUTED_DIR}/python:${PYROCSHMEM_DIR}/build:${TRITON_ROCSHMEM_DIR}":*)

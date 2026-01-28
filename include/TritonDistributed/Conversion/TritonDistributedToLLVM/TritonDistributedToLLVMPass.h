@@ -57,8 +57,8 @@ void populateDistributedOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                          RewritePatternSet &patterns,
                                          PatternBenefit benefit,
                                          const TargetInfo &targetInfo,
-                                         std::string ROCSHMEMLibname = "",
-                                         std::string ROCSHMEMLibpath = "");
+                                         std::string SHMEMLibname = "",
+                                         std::string SHMEMLibpath = "");
 
 void populateROCDLBlockDimPattern(LLVMTypeConverter &typeConverter,
                                   RewritePatternSet &patterns,
