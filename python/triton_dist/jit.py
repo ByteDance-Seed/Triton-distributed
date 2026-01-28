@@ -60,7 +60,9 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
         import torch
         from hip import hip
         from triton_dist.utils import get_shmem_backend
+
         backend = get_shmem_backend()
+
         if backend == 'rocshmem':
             import pyrocshmem
             res = hip.hipModuleGetGlobal(kernel_module, b"ROCSHMEM_CTX_DEFAULT")
