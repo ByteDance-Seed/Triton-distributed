@@ -22,7 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from triton_dist.utils import is_cuda, is_hip
+from triton_dist.utils import is_cuda, is_hip, is_maca
 from triton.language import core
 import triton.language as tl
 import triton
@@ -139,5 +139,10 @@ if is_cuda():
 elif is_hip():
     from .amd.common_ops import _wait_eq_hip as wait_eq
     from .amd.common_ops import _set_signal_hip as set_signal
+elif is_maca():
+    from .metax.common_ops import _wait_eq_maca as wait_eq
+    from .metax.common_ops import _set_signal_maca as set_signal
+else:
+    raise Exception("only support cuda and hip")
 
 __all__ = ["wait_eq", "set_signal", "globaltimer", "globaltimer_lo", "pack_b32_v2", "smid"]

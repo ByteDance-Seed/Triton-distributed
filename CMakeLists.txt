@@ -25,6 +25,7 @@ option(USE_TRITON_DISTRIBUTED_AOT "Build the Triton Distributed with AOT" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+option(TRITON_USE_MACA "Build the Triton Distributed with MACA backend" OFF)
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -91,6 +92,9 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
 
+if(TRITON_USE_MACA)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_MACA")
+endif()
 
 # #########
 # LLVM
@@ -161,6 +165,9 @@ include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablege
 # backend
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
 include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
+if(TRITON_USE_MACA)
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/metax/include)
+endif()
 
 # link_directories(${LLVM_LIBRARY_DIR})
 add_subdirectory(3rdparty/triton/include)
@@ -186,7 +193,11 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
                                       ${PYTHON_DIST_SRC_PATH}/passes.cc
                                       ${PYTHON_DIST_SRC_PATH}/ir.cc)
-  target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
+  if(TRITON_USE_MACA)
+    target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
+  else()
+    target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
+  endif()
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)
@@ -225,9 +236,11 @@ if(TRITON_BUILD_PYTHON_MODULE)
   if (TRITON_BUILD_DISTRIBUTED)
     add_subdirectory(csrc)
   endif()
-  # We always build proton dialect
-  list(APPEND TRITON_PLUGIN_NAMES "proton")
-  add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+  # build proton dialect
+  if(NOT TRITON_USE_MACA)
+    list(APPEND TRITON_PLUGIN_NAMES "proton")
+    add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+  endif()
   # We always build distributed dialect
   list(APPEND TRITON_PLUGIN_NAMES "distributed")
 
@@ -271,6 +284,13 @@ if(TRITON_BUILD_PYTHON_MODULE)
     pybind11::headers
 
   )
+  if(TRITON_USE_MACA)
+    list(APPEND TRITON_LIBRARIES
+        MLIRMACADialect
+        MLIRGPUToMACATransforms
+    )
+  endif()
+
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR # Linux arm64
      CMAKE_SYSTEM_PROCESSOR MATCHES "arm64" OR # macOS arm64
      CMAKE_OSX_ARCHITECTURES MATCHES "arm64")  # also macOS arm64
@@ -303,12 +323,21 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
   set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
-  add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
-                  ${PYTHON_SRC_PATH}/ir.cc
-                  ${PYTHON_SRC_PATH}/gluon_ir.cc
-                  ${PYTHON_SRC_PATH}/passes.cc
-                  ${PYTHON_SRC_PATH}/interpreter.cc
-                  ${PYTHON_SRC_PATH}/llvm.cc)
+
+  if(TRITON_USE_MACA)
+    add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
+                    ${PYTHON_SRC_PATH}/ir.cc
+                    ${PYTHON_SRC_PATH}/passes.cc
+                    ${PYTHON_SRC_PATH}/interpreter.cc
+                    ${PYTHON_SRC_PATH}/llvm.cc)
+  else()
+    add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
+                    ${PYTHON_SRC_PATH}/ir.cc
+                    ${PYTHON_SRC_PATH}/gluon_ir.cc
+                    ${PYTHON_SRC_PATH}/passes.cc
+                    ${PYTHON_SRC_PATH}/interpreter.cc
+                    ${PYTHON_SRC_PATH}/llvm.cc)
+  endif()
 
   # Link triton with its dependencies
   target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES})

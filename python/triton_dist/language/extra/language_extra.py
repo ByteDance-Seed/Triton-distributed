@@ -24,7 +24,8 @@
 ################################################################################
 import triton_dist.language.extra.cuda.language_extra as cuda_language_extra
 import triton_dist.language.extra.hip.language_extra as hip_language_extra
-from triton_dist.utils import is_cuda, is_hip
+import triton_dist.language.extra.maca.language_extra as maca_language_extra
+from triton_dist.utils import is_cuda, is_hip, is_maca
 from triton_dist.language import vector
 from triton.language import core
 from .utils import ModuleProxy
@@ -32,6 +33,7 @@ from .utils import ModuleProxy
 _extra_module = ModuleProxy([
     (is_cuda, cuda_language_extra),
     (is_hip, hip_language_extra),
+    (is_maca, maca_language_extra),
 ])
 
 

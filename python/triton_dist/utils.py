@@ -63,6 +63,13 @@ def is_hip():
         return False
 
 
+def is_maca():
+    if shutil.which("mx-smi"):
+        return True
+    else:
+        return False
+
+
 def get_shmem_backend():
     if is_cuda():
         return 'nvshmem'
@@ -118,6 +125,8 @@ elif is_hip():
             raise ImportError("mori_shmem Python package not found. "
                               "Please install mori_shmem or use rocshmem backend: "
                               "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
+elif is_maca():
+    from maca import macart
 else:
     raise Exception("either CUDA or HIP platform is supported")
 
@@ -438,6 +447,14 @@ def HIP_CHECK(call_result):
     return result
 
 
+def MACA_CHECK(err):
+    if isinstance(err, macart.mcError_t):
+        if err != macart.mcError_t.mcSuccess:
+            raise RuntimeError(f"MACA Error: {err}: {macart.mcGetErrorString(err)}")
+    else:
+        raise RuntimeError(f"Unknown error type: {err}")
+
+
 def get_cpu_info_linux():
     vendor = None
     model_name = None
@@ -602,6 +619,26 @@ def get_rocshmem_hash():
     return rocshmem_hash
 
 
+def _get_mxshmem_libdevice():
+    mxshmem_device_bc_path_user_specify = os.getenv("TRITON_MXSHMEM_LIBDEVICE_PATH", None)
+    if mxshmem_device_bc_path_user_specify is not None:
+        mxshmem_lib_dir = Path(mxshmem_device_bc_path_user_specify)
+    else:
+        try:
+            import triton.backends.metax
+            mxshmem_lib_dir = Path(triton.backends.metax.__path__[0]) / "lib"
+        except Exception:
+            pass
+    return mxshmem_lib_dir / "libmxshmem_device.bc"
+
+
+def get_mxshmem_hash():
+    mxshmem_libdevice = _get_mxshmem_libdevice()
+    with open(mxshmem_libdevice, "rb") as f:
+        mxshmem_hash = hashlib.sha256(f.read(1024 * 1024)).hexdigest()
+    return mxshmem_hash
+
+
 # Note: MORI SHMEM currently only requires a single device BC file (_get_mori_shmem_libdevice()).
 # get_mori_home() is kept for future compatibility but not currently used.
 @functools.lru_cache()
@@ -656,6 +693,8 @@ def get_shmem_hash():
             return get_rocshmem_hash()
         elif backend == 'mori_shmem':
             return get_mori_shmem_hash()
+    elif is_maca():
+        return get_mxshmem_hash()
     return "unknown"
 
 
