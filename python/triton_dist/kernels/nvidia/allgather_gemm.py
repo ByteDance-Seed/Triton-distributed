@@ -137,7 +137,7 @@ def barrier_all_intra_node_kernel(
     barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_sync_ptr, flag_value + 1, use_cooperative)
 
 def local_copy_and_barrier_all(local_rank, rank, num_ranks, local_data, global_data, comm_buf, barrier_ptr, M_per_rank,
-                               N, phase, is_internode: bool = False, use_cooperative: bool = True, no_copy: bool = False):
+                               N, phase, is_internode: bool = False, use_cooperative: bool = True, local_copy: bool = True):
     if not is_internode:
         grid = lambda META: (min(
             triton.cdiv(M_per_rank, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -147,7 +147,7 @@ def local_copy_and_barrier_all(local_rank, rank, num_ranks, local_data, global_d
 
         if use_cooperative:
             additional_options.update(launch_cooperative_grid_options())
-        if not no_copy:
+        if local_copy:
             copy_and_barrier_all_intra_node_kernel[grid](local_rank, rank, num_ranks, local_data,
                                                         global_data, barrier_ptr, comm_buf, M_per_rank, N,
                                                         local_data.stride(0), local_data.stride(1), global_data.stride(0),
@@ -573,6 +573,7 @@ def ag_gemm(
     straggler_option=None,
     debug=False,
     use_cooperative=True,
+    local_copy=True,
 ):
     """allgather gemm
     C = all_gather(A) * B
@@ -600,7 +601,7 @@ def ag_gemm(
 
     local_copy_and_barrier_all(ctx.local_rank, ctx.rank, ctx.num_ranks, A, ctx.symm_workspace, ctx.symm_comm_buf,
                                ctx.symm_barrier, M_per_rank, K, ctx.phase, is_internode=ctx.is_multinode,
-                               use_cooperative=use_cooperative)
+                               use_cooperative=use_cooperative, local_copy=local_copy)
     ctx.phase += 2
 
     rowise_ag_gemm_dispatcher(
