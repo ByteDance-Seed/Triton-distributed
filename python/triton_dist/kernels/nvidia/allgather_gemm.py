@@ -110,8 +110,34 @@ def copy_and_barrier_all_intra_node_kernel(
     barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_sync_ptr, flag_value + 1, use_cooperative)
 
 
+@triton_dist.jit(do_not_specialize=["local_rank", "rank", "num_ranks", "flag_value"])
+def barrier_all_intra_node_kernel(
+    local_rank,
+    rank,
+    num_ranks,
+    local_buf_ptr,
+    global_buf_ptr,
+    symm_barrier_ptr,
+    symm_sync_ptr,
+    M_per_rank,
+    N,
+    stride_local_m,
+    stride_local_n,
+    stride_global_m,
+    stride_global_n,
+    flag_value,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    use_cooperative: tl.constexpr,
+):
+    barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_sync_ptr, flag_value, use_cooperative)
+    thread_idx = tid(0)
+    if thread_idx < num_ranks:  # set symm barrier
+        st(symm_barrier_ptr + thread_idx, 1 if thread_idx == rank else 0)
+    barrier_all_intra_node_non_atomic(local_rank, rank, num_ranks, symm_sync_ptr, flag_value + 1, use_cooperative)
+
 def local_copy_and_barrier_all(local_rank, rank, num_ranks, local_data, global_data, comm_buf, barrier_ptr, M_per_rank,
-                               N, phase, is_internode: bool = False, use_cooperative: bool = True):
+                               N, phase, is_internode: bool = False, use_cooperative: bool = True, no_copy: bool = False):
     if not is_internode:
         grid = lambda META: (min(
             triton.cdiv(M_per_rank, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -121,11 +147,19 @@ def local_copy_and_barrier_all(local_rank, rank, num_ranks, local_data, global_d
 
         if use_cooperative:
             additional_options.update(launch_cooperative_grid_options())
-        copy_and_barrier_all_intra_node_kernel[grid](local_rank, rank, num_ranks, local_data,
+        if not no_copy:
+            copy_and_barrier_all_intra_node_kernel[grid](local_rank, rank, num_ranks, local_data,
+                                                        global_data, barrier_ptr, comm_buf, M_per_rank, N,
+                                                        local_data.stride(0), local_data.stride(1), global_data.stride(0),
+                                                        global_data.stride(1), phase, CPY_BLOCKS[0], CPY_BLOCKS[1],
+                                                        use_cooperative, **additional_options)
+        else:
+            barrier_all_intra_node_kernel[grid](local_rank, rank, num_ranks, local_data,
                                                      global_data, barrier_ptr, comm_buf, M_per_rank, N,
                                                      local_data.stride(0), local_data.stride(1), global_data.stride(0),
                                                      global_data.stride(1), phase, CPY_BLOCKS[0], CPY_BLOCKS[1],
                                                      use_cooperative, **additional_options)
+            
     else:
         nvshmem_barrier_all_on_stream()
         barrier_ptr.fill_(0)
