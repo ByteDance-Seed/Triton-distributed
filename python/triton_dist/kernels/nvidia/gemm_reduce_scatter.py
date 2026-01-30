@@ -620,7 +620,6 @@ def gemm_rs_op(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorPar
     rs_stream.wait_stream(current_stream)
 
     if reduce_st:
-        print("reduce_st=True")
         assert ctx.rs_ctx.nnodes == 1, "`reduce_st` does not support multi node`"
         assert persistent, "`reduce_st` only support persistent mode"
         assert fuse_scatter, "`reduce_st` only support fuse_scatter mode"
@@ -639,7 +638,6 @@ def gemm_rs_op(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorPar
         nvshmem_barrier_all_on_stream(current_stream)
         return gemm_out
     else:
-        print("reduce_st=False")
         output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
         workspace = torch.zeros((world_size, ), dtype=torch.int32, device=A.device)
         gemm_out = ctx.get_gemm_out_buf(A)
