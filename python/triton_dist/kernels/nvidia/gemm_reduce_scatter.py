@@ -504,7 +504,7 @@ def gemm_rs_producer_persistent(A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
 
     M, local_K = A.shape
     _, N = B.shape
-    # print("num_gemm_sms:", num_gemm_sms)
+
     grid = lambda META: (min(
         num_gemm_sms,
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
