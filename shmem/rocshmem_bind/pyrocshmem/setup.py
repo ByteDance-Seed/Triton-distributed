@@ -86,7 +86,7 @@ def hip_deps():
     library_dirs = [hip_home / "lib"]
     libraries = [
         "amdhip64", "hiprtc", "hsa-runtime64", "hipfft", "amd_comgr", "rocrand", "hiprand", "rocblas", "hipblaslt",
-        "hipfft", "hipsparse", "rccl", "hipsolver"
+        "hipfft", "hipsparse", "rccl", "hipsolver", "ibverbs"
     ]
     return include_dirs, library_dirs, libraries
 

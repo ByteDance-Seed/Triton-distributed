@@ -19,10 +19,12 @@ cmake \
     -DCMAKE_VERBOSE_MAKEFILE=OFF \
     -DDEBUG=OFF \
     -DPROFILE=OFF \
-    -DUSE_GPU_IB=OFF \
-    -DUSE_RO=OFF \
+    -DUSE_GDA=ON \
+    -DUSE_RO=ON \
     -DUSE_DC=OFF \
     -DUSE_IPC=ON \
+    -DGDA_IONIC=ON \
+    -DGDA_MLX5=ON \
     -DUSE_COHERENT_HEAP=ON \
     -DUSE_THREADS=OFF \
     -DUSE_WF_COAL=OFF \
