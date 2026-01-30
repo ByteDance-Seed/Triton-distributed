@@ -487,18 +487,29 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                                       BLOCK_SIZE_K: tl.constexpr,  #
                                       GROUP_SIZE_M: tl.constexpr,  #
                                       NUM_GEMM_SMS: tl.constexpr,  #
+                                      EPILOGUE_SUBTILE: tl.constexpr = False, #
                                       FUSE_START_OFFSET: tl.constexpr = 0):
     a_desc = tl.make_tensor_descriptor(
         a_ptr,
         shape=[M, K],
-        strides=[K, 1],
+        strides=[stride_am, stride_ak],
         block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
     )
     b_desc = tl.make_tensor_descriptor(
         b_ptr,
         shape=[N, K],
-        strides=[K, 1],
+        strides=[stride_bn, stride_bk],
         block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+    )
+
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr,
+        shape=[M, N],
+        strides=[N, 1],
+        block_shape=[
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N if not EPILOGUE_SUBTILE else BLOCK_SIZE_N // 2,
+        ],
     )
 
     start_pid = tl.program_id(axis=0) - FUSE_START_OFFSET
@@ -512,44 +523,43 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
     if start_pid < num_tiles % NUM_GEMM_SMS:
         tiles_per_SM += 1
 
-    tile_id = start_pid - NUM_GEMM_SMS
-    ki = -1
-
     pid_m = 0
     pid_n = 0
     offs_am = 0
     offs_bn = 0
 
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     dtype = c_ptr.dtype.element_ty
-    for _ in range(0, k_tiles * tiles_per_SM):
-        ki = tl.where(ki == k_tiles - 1, 0, ki + 1)
-        if ki == 0:
-            tile_id += NUM_GEMM_SMS
-            pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
-            offs_am = pid_m * BLOCK_SIZE_M
-            offs_bn = pid_n * BLOCK_SIZE_N
 
-        offs_k = ki * BLOCK_SIZE_K
+    for tile_id in tl.range(start_pid, num_tiles, NUM_GEMM_SMS, flatten=False):
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_GEMM_SMS)
+        offs_am = pid_m * BLOCK_SIZE_M
+        offs_bn = pid_n * BLOCK_SIZE_N
 
-        a = a_desc.load([offs_am, offs_k])
-        b = b_desc.load([offs_bn, offs_k])
-        accumulator = tl.dot(a, b.T, accumulator)
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        if ki == k_tiles - 1:
+
+        for ki in tl.range(k_tiles):
+            offs_k = ki * BLOCK_SIZE_K
+            a = a_desc.load([offs_am, offs_k])
+            b = b_desc.load([offs_bn, offs_k])
+            accumulator = tl.dot(a, b.T, accumulator)
+
+        if EPILOGUE_SUBTILE:
+            acc = tl.reshape(accumulator, (BLOCK_SIZE_M, 2, BLOCK_SIZE_N // 2))
+            acc = tl.permute(acc, (0, 2, 1))
+            acc0, acc1 = tl.split(acc)
+            c0 = acc0.to(dtype)
+            c_desc.store([offs_am, offs_bn], c0)
+            c1 = acc1.to(dtype)
+            c_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], c1)
+        else:
             c = accumulator.to(dtype)
-            offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-            c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-            tl.store(c_ptrs, c, mask=c_mask)
-            __syncthreads()
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-            thread_idx = tid(0)
-            gemm_barrier_idx = pid_m * num_pid_n + pid_n
-            if thread_idx == 0:
-                st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
+            c_desc.store([offs_am, offs_bn], c)
+        __syncthreads()
+        thread_idx = tid(0)
+        gemm_barrier_idx = pid_m * num_pid_n + pid_n
+        if thread_idx == 0:
+            st(gemm_barrier_ptr + gemm_barrier_idx, 1, scope="gpu", semantic="release")
 
 
 @triton_dist.jit(do_not_specialize=[])
