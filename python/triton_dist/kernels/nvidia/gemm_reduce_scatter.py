@@ -35,7 +35,7 @@ from triton_dist.language.extra.language_extra import (__syncthreads, atomic_add
 from triton_dist.kernels.nvidia.reduce_scatter import (ReduceScatter2DContext, create_reduce_scater_2d_ctx,
                                                        reduce_scatter_2d_op, ring_reduce)
 from triton_dist.kernels.nvidia.gemm_rs_threadblock_swizzle import threadblock_swizzle_gemm_reduce_scatter_kernel
-from triton_dist.utils import has_tma, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync, requires, get_device_max_shared_memory_size
+from triton_dist.utils import has_tma, nvshmem_barrier_all_on_stream, nvshmem_create_tensors, nvshmem_free_tensor_sync, requires, get_device_max_shared_memory_size, dist_print
 import triton_dist.tune
 from triton_dist.kernels.nvidia.gemm import get_config_space
 from triton_dist.kernels.nvidia.comm_perf_model import (estimate_reduce_scatter_time_ms, get_nic_gbps_per_gpu)
@@ -69,11 +69,13 @@ class GEMMReduceScatterTensorParallelContext:
 
 
 def create_gemm_rs_context(max_M, N, rank, world_size, local_world_size, output_dtype: torch.dtype,
-                           rs_stream: torch.cuda.Stream) -> GEMMReduceScatterTensorParallelContext:
+                           rs_stream: torch.cuda.Stream, reduce_st: bool = False) -> GEMMReduceScatterTensorParallelContext:
     rs_ctx = create_reduce_scater_2d_ctx(max_M, N, rank, world_size, local_world_size, output_dtype)
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    
     num_gemm_sms = NUM_SMS - rs_ctx.num_rs_sms
-    gemm_out_bufs = nvshmem_create_tensors((max_M, N), output_dtype, rank, local_world_size)
+    
+    gemm_out_bufs = nvshmem_create_tensors((max_M // world_size if reduce_st else max_M, N), output_dtype, rank, local_world_size)
     ctx = GEMMReduceScatterTensorParallelContext(rs_ctx=rs_ctx, output_dtype=output_dtype, gemm_out_bufs=gemm_out_bufs,
                                                  rs_stream=rs_stream, num_gemm_sms=num_gemm_sms)
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
@@ -116,6 +118,98 @@ def _gemm_rs_persistent_repr(proxy):
     suffix = "_fuse_scatter" if fuse_scatter else ""
 
     return f"triton3x_sm{cap_major}{cap_minor}_gemm_rs_persistent_tensorop_{a_dtype}_{b_dtype}_{c_dtype}_{BM}x{BN}x{BK}_ntn{suffix}"
+
+# Require NNODES = 1 and FUSE_SCATTER = True
+# For performance comparison with ThunderKittens only.
+# Cannot gurantee bitwise with PyTorch due to non-deterministic atomic add.
+@triton_dist.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_persistent_repr)
+def kernel_gemm_rs_producer_persistent_reduce_st(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    barrier_ptr,
+    counter_ptr,
+    FUSE_SCATTER: tl.constexpr,
+    LOCAL_WORLD_SIZE: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    EPILOGUE_SUBTILE: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):  #
+    # Matmul using TMA and device-side descriptor creation
+    rank = dl.rank()
+    dtype = c_ptr.dtype.element_ty
+    start_pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    num_tiles = num_pid_m * num_pid_n
+    NNODES: tl.constexpr = WORLD_SIZE // LOCAL_WORLD_SIZE
+
+    a_desc = tl.make_tensor_descriptor(a_ptr, shape=[M, K], strides=[K, 1], block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K])
+    b_desc = tl.make_tensor_descriptor(b_ptr, shape=[N, K], strides=[K, 1], block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K])
+
+    tiles_per_SM = num_tiles // NUM_SMS
+    if start_pid < num_tiles % NUM_SMS:
+        tiles_per_SM += 1
+
+    tile_id = start_pid - NUM_SMS
+    ki = -1
+
+    pid_m = 0
+    pid_n = 0
+    offs_am = 0
+    offs_bn = 0
+
+    M_per_rank = M // WORLD_SIZE
+
+    pid_m_offset = (rank + 1) * M_per_rank // BLOCK_SIZE_M
+    
+    for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        pid_m, pid_n = swizzle_2d(tile_id, num_pid_m, num_pid_n, GROUP_SIZE_M)
+        pid_m = (pid_m + pid_m_offset) % num_pid_m
+
+        offs_am = pid_m * BLOCK_SIZE_M
+        offs_bn = pid_n * BLOCK_SIZE_N
+
+        for ki in range(k_tiles):
+            offs_k = ki * BLOCK_SIZE_K
+            a = a_desc.load([offs_am, offs_k])
+            b = b_desc.load([offs_bn, offs_k])
+            accumulator = tl.dot(a, b.T, accumulator)
+
+        rank_start = pid_m * BLOCK_SIZE_M // M_per_rank
+        rank_end = (min((pid_m + 1) * BLOCK_SIZE_M, M) - 1) // M_per_rank
+        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        for cur_rank in range(rank_start, rank_end + 1):
+            m_start = max(M_per_rank * cur_rank, pid_m * BLOCK_SIZE_M)
+            m_end = min(M_per_rank * (cur_rank + 1) - 1, (min((pid_m + 1) * BLOCK_SIZE_M, M) - 1))
+            remote_c_ptr = dl.symm_at(c_ptr, cur_rank)
+
+            mask_offset = m_start - pid_m * BLOCK_SIZE_M
+            remote_offs_cm = m_start % M_per_rank + tl.arange(0, BLOCK_SIZE_M) - mask_offset
+            remote_mask = (offs_cm[:, None] <= m_end) & (offs_cm[:, None] >= m_start) & (offs_cn[None, :] < N)
+            remote_desc = tl.make_tensor_descriptor(
+                remote_c_ptr,
+                shape=[M // WORLD_SIZE, N],
+                strides=[N, 1],
+                block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+            )
+
+            acc = accumulator.to(dtype)
+            acc = tl.where(remote_mask, acc, 0)
+
+            remote_m_base = m_start % M_per_rank - mask_offset
+            remote_desc.atomic_add([remote_m_base, offs_bn], acc)
+
 
 
 @triton_dist.jit(launch_metadata=_matmul_launch_metadata, repr=_gemm_rs_persistent_repr)
@@ -234,6 +328,7 @@ def kernel_gemm_rs_producer_persistent(
                     tl.store(remote_c_ptrs, accumulator, mask=remote_mask)
 
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
 
 
 def _gemm_rs_non_persistent_repr(proxy):
@@ -402,7 +497,7 @@ def kernel_gemm_rs_producer_non_persistent(
 @requires(has_tma)
 def gemm_rs_producer_persistent(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, barrier: torch.Tensor,
                                 workspace: torch.Tensor, world_size: int, local_world_size: int, fuse_scatter: bool,
-                                num_gemm_sms: int, gemm_config: triton.Config):
+                                num_gemm_sms: int, gemm_config: triton.Config, reduce_st: bool = False):
     # Check constraints.
     assert A.shape[1] == B.shape[0], "Incompatible dimensions"
     assert A.dtype == B.dtype, "Incompatible dtypes"
@@ -415,22 +510,38 @@ def gemm_rs_producer_persistent(A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     ), )
     assert B.stride(0) == 1
-    kernel_gemm_rs_producer_persistent[grid](
-        A,
-        B,
-        C,
-        M,
-        N,
-        local_K,
-        barrier,
-        workspace,
-        fuse_scatter,
-        local_world_size,
-        world_size,
-        NUM_SMS=num_gemm_sms,
-        **gemm_config.all_kwargs(),
-    )
-
+    if not reduce_st:
+        kernel_gemm_rs_producer_persistent[grid](
+            A,
+            B,
+            C,
+            M,
+            N,
+            local_K,
+            barrier,
+            workspace,
+            fuse_scatter,
+            local_world_size,
+            world_size,
+            NUM_SMS=num_gemm_sms,
+            **gemm_config.all_kwargs(),
+        )
+    else:
+        kernel_gemm_rs_producer_persistent_reduce_st[grid](
+            A,
+            B,
+            C,
+            M,
+            N,
+            local_K,
+            barrier,
+            workspace,
+            fuse_scatter,
+            local_world_size,
+            world_size,
+            NUM_SMS=num_gemm_sms,
+            **gemm_config.all_kwargs(),
+        )
 
 def gemm_rs_producer_non_persistent(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, barrier: torch.Tensor,
                                     workspace: torch.Tensor, world_size: int, local_world_size: int, fuse_scatter: bool,
@@ -490,7 +601,7 @@ def update_triton_config(M, N, K, dtype: torch.dtype, world_size, local_world_si
 
 
 def gemm_rs_op(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorParallelContext,
-               gemm_config: triton.Config, persistent: bool = True, fuse_scatter: bool = False):
+               gemm_config: triton.Config, persistent: bool = True, fuse_scatter: bool = False, reduce_st: bool = False):
     if fuse_scatter:
         assert ctx.rs_ctx.nnodes == 1, "`fuse_scatter` does not support multi node`"
     world_size = ctx.rs_ctx.world_size
@@ -508,35 +619,54 @@ def gemm_rs_op(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorPar
     current_stream = torch.cuda.current_stream()
     rs_stream.wait_stream(current_stream)
 
-    output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
-    workspace = torch.zeros((world_size, ), dtype=torch.int32, device=A.device)
-    gemm_out = ctx.get_gemm_out_buf(A)
-    scatter_signal = ctx.rs_ctx.scatter_signal_buf
+    if reduce_st:
+        assert ctx.rs_ctx.nnodes == 1, "`reduce_st` does not support multi node`"
+        assert persistent, "`reduce_st` only support persistent mode"
+        assert fuse_scatter, "`reduce_st` only support fuse_scatter mode"
+        workspace = torch.zeros((world_size, ), dtype=torch.int32, device=A.device)
+        gemm_out = ctx.get_gemm_out_buf(A[:M_per_rank])
+        gemm_out.zero_()
+        scatter_signal = ctx.rs_ctx.scatter_signal_buf
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8) 
 
-    # TMA descriptors require a global memory allocation
-    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device="cuda", dtype=torch.int8)
+        triton.set_allocator(alloc_fn)
 
-    triton.set_allocator(alloc_fn)
-
-    if persistent:
         gemm_rs_producer_persistent(A, B, gemm_out, scatter_signal, workspace, world_size, local_world_size,
-                                    fuse_scatter, num_gemm_sms, gemm_config)
+                                        fuse_scatter, num_gemm_sms, gemm_config, reduce_st=True)
+        nvshmem_barrier_all_on_stream(current_stream)
+        return gemm_out
     else:
-        gemm_config = update_triton_config(M, N, local_K, A.dtype, world_size, local_world_size, gemm_config)
-        gemm_rs_producer_non_persistent(A, B, gemm_out, scatter_signal, workspace, world_size, local_world_size,
-                                        fuse_scatter, gemm_config)
+        output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
+        workspace = torch.zeros((world_size, ), dtype=torch.int32, device=A.device)
+        gemm_out = ctx.get_gemm_out_buf(A)
+        scatter_signal = ctx.rs_ctx.scatter_signal_buf
 
-    if not fuse_scatter:
-        with torch.cuda.stream(rs_stream):
-            # don't allocate memory on other stream: error-prune
-            reduce_scatter_2d_op(gemm_out, ctx.rs_ctx, output)
-        current_stream.wait_stream(rs_stream)
-    else:
-        nvshmem_barrier_all_on_stream(current_stream)
-        ring_reduce(gemm_out, output, ctx.rs_ctx.local_rank, local_world_size)
-        nvshmem_barrier_all_on_stream(current_stream)
-    return output
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+
+        if persistent:
+            gemm_rs_producer_persistent(A, B, gemm_out, scatter_signal, workspace, world_size, local_world_size,
+                                        fuse_scatter, num_gemm_sms, gemm_config)
+        else:
+            gemm_config = update_triton_config(M, N, local_K, A.dtype, world_size, local_world_size, gemm_config)
+            gemm_rs_producer_non_persistent(A, B, gemm_out, scatter_signal, workspace, world_size, local_world_size,
+                                            fuse_scatter, gemm_config)
+
+        if not fuse_scatter:
+            with torch.cuda.stream(rs_stream):
+                # don't allocate memory on other stream: error-prune
+                reduce_scatter_2d_op(gemm_out, ctx.rs_ctx, output)
+            current_stream.wait_stream(rs_stream)
+        else:
+            nvshmem_barrier_all_on_stream(current_stream)
+            ring_reduce(gemm_out, output, ctx.rs_ctx.local_rank, local_world_size)
+            nvshmem_barrier_all_on_stream(current_stream)
+        return output
 
 
 def key_fn(A, B, ctx: GEMMReduceScatterTensorParallelContext, *args, **kwargs):
@@ -591,7 +721,7 @@ def get_gemm_rs_config_space():
     prune_fn=prune_fn,
 )
 def gemm_rs(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorParallelContext, gemm_config: triton.Config,
-            persistent=True, fuse_scatter=False):
+            persistent=True, fuse_scatter=False, reduce_st=False):
     """GEMM Reduce-Scatter for Multi-Node
 
     computes local GEMM (A x B) to generate partial results, followed by `reduce_scatter` to produce c
@@ -604,4 +734,4 @@ def gemm_rs(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorParall
     Returns:
         c (torch.Tensor<bfloat16/float16>): C matrix. shape: [M // world_size, N]
     """
-    return gemm_rs_op(A, B, ctx, gemm_config, persistent, fuse_scatter)
+    return gemm_rs_op(A, B, ctx, gemm_config, persistent, fuse_scatter, reduce_st)

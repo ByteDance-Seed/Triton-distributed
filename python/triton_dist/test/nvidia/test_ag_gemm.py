@@ -58,6 +58,7 @@ def get_args():
     parser.add_argument("--profile", default=False, action="store_true")
     parser.add_argument("--autotune", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--trans_b", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--local-copy", default=True, action=argparse.BooleanOptionalAction)
 
     args = parser.parse_args()
     return args
@@ -106,12 +107,15 @@ def test_ag_gemm(args):
     ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE)
     if rank == 0:
         print(f"all gather with: {ctx.all_gather_method}")
-
+    
+        
     for i in range(5):
         # every time, use a new input data to check correctness
         A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
         ctx.symm_workspace[:M].random_()
-        C_triton = ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
+        if not args.local_copy:
+            ctx.symm_workspace[rank * M // num_ranks: min(M, (rank + 1) * M // num_ranks)].copy_(A)
+        C_triton = ag_gemm(A, B, ctx=ctx, autotune=args.autotune, local_copy=args.local_copy)
         C_torch = ag_gemm_torch(A, B, args.default_group)
 
         for i in range(num_ranks):
@@ -139,9 +143,11 @@ def perf_ag_gemm(args):
     A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
 
     ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, LOCAL_WORLD_SIZE)
-
+    
+    if not args.local_copy:
+        ctx.symm_workspace[rank * M // num_ranks: min(M, (rank + 1) * M // num_ranks)].copy_(A)
     def func():
-        return ag_gemm(A, B, ctx=ctx, autotune=args.autotune)
+        return ag_gemm(A, B, ctx=ctx, autotune=args.autotune, local_copy=args.local_copy)
 
     C, duration_ms = perf_func(func, iters=10, warmup_iters=5)
     dist_print(f"rank{RANK}: {duration_ms:0.2f} ms/iter", need_sync=True, allowed_ranks=list(range(WORLD_SIZE)))
