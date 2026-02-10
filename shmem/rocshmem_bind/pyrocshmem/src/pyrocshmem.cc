@@ -109,8 +109,17 @@ PYBIND11_MODULE(_pyrocshmem, m) {
   m.def("rocshmem_barrier_all_on_stream", [](intptr_t stream) {
     rocshmem_barrier_all_on_stream((hipStream_t)stream);
   });
-  m.def("rocshmem_get_device_ctx",
-        []() -> int64_t { return (int64_t)rocshmem_get_device_ctx(); });
+  m.def("rocshmem_hipmodule_init", 
+        [](intptr_t module, intptr_t stream) -> int {
+          return rocshmem_hipmodule_init(
+              (hipModule_t)module, 
+              stream == 0 ? nullptr : (hipStream_t)stream
+          );
+        },
+        py::arg("module"), 
+        py::arg("stream") = 0,
+        "Initialize rocSHMEM device context for a specific HIP module. "
+        "This is required for CUDA graph compatibility.");
   m.def("rocshmem_get_uniqueid", []() {
     rocshmem_uniqueid_t uid;
     CHECK_ROCSHMEM(rocshmem_get_uniqueid(&uid));

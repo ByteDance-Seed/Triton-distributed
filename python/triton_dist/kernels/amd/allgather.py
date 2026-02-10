@@ -30,8 +30,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_dist.language as dl
-from triton.language.extra.hip.librocshmem_device import set_rocshmem_ctx
-from triton_dist.kernels.amd.common_ops import (barrier_all_kernel, barrier_all_with_ctx_on_stream,
+from triton_dist.kernels.amd.common_ops import (barrier_all_kernel, barrier_all_on_stream,
                                                 barrier_on_this_grid)
 from triton_dist.kernels.amd.memcpy import memcpy_async_kernel
 from triton_dist.utils import launch_cooperative_grid_options
@@ -39,7 +38,6 @@ from triton_dist.utils import launch_cooperative_grid_options
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_no_barrier_kernel(
-    ctx,
     symm_ptr,
     local_ptr,
     N_per_rank,
@@ -47,7 +45,6 @@ def allgather_no_barrier_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    set_rocshmem_ctx(ctx)
     npid = tl.num_programs(0)
     pid = tl.program_id(0)
     npid_per_rank = npid // num_ranks
@@ -65,7 +62,6 @@ def allgather_no_barrier_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_kernel(
-    ctx,
     symm_ptr,
     local_ptr,
     N_per_rank,
@@ -74,7 +70,6 @@ def allgather_kernel(
     group_barrier_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    set_rocshmem_ctx(ctx)
     npid = tl.num_programs(0)
     pid = tl.program_id(0)
     npid_per_rank = npid // num_ranks
@@ -97,7 +92,7 @@ def allgather_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_strided_chunked_kernel(
-    ctx,
+
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
     local_ptr,  # (M_per_rank, N)
     M_per_rank,
@@ -114,7 +109,6 @@ def allgather_strided_chunked_kernel(
     """
     with the local_ptr
     """
-    set_rocshmem_ctx(ctx)
     npid = tl.num_programs(0)
     pid = tl.program_id(0)
 
@@ -400,7 +394,6 @@ def allgather_strided_chunked_pull_packed_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_strided_chunked_pull_ctx_wrapper_kernel(
-    ctx,
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
     M_per_rank,
     N,
@@ -413,7 +406,6 @@ def allgather_strided_chunked_pull_ctx_wrapper_kernel(
     BLOCK_SIZE_N: tl.constexpr,  # should be as large as possible
     SPLIT_N: tl.constexpr,
 ):
-    set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     npid = tl.num_programs(0)
     allgather_strided_chunked_pull_kernel(
@@ -436,7 +428,7 @@ def allgather_strided_chunked_pull_ctx_wrapper_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_strided_chunked_pull_fused_kernel(
-    ctx,
+
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
     local_ptr,  # (M_per_rank, N)
     M_per_rank,
@@ -451,7 +443,6 @@ def allgather_strided_chunked_pull_fused_kernel(
     BLOCK_SIZE_N: tl.constexpr,  # should be as large as possible
     SPLIT_N: tl.constexpr,
 ):
-    set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     npid = tl.num_programs(0)
 
@@ -481,7 +472,7 @@ def allgather_strided_chunked_pull_fused_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_chunked_pull_fused_packed_kernel(
-    ctx,
+
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
     local_ptr,  # (M_per_rank, N)
     M_per_rank,
@@ -496,7 +487,6 @@ def allgather_chunked_pull_fused_packed_kernel(
     BLOCK_SIZE_N: tl.constexpr,  # should be as large as possible
     SPLIT_N: tl.constexpr,
 ):
-    set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
 
     memcpy_async_kernel(local_ptr, symm_ptr + M_per_rank * stride_m * rank, M_per_rank * N, 8 * BLOCK_SIZE_N)
@@ -523,7 +513,7 @@ def allgather_chunked_pull_fused_packed_kernel(
 
 @triton.jit(do_not_specialize=["rank"])
 def allgather_opt_kernel(
-    ctx,
+
     symm_ptr,
     local_ptr,
     N_per_rank,
@@ -533,7 +523,6 @@ def allgather_opt_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """ compared to allagther_kernel, this use less CTAs to achieve to the same level """
-    set_rocshmem_ctx(ctx)
     npid = tl.num_programs(0)
     pid = tl.program_id(0)
     total_tiles = tl.cdiv(N_per_rank, BLOCK_SIZE)
@@ -618,21 +607,16 @@ def allgather_ipc_kernel(
 
 
 @functools.lru_cache()
-def get_pyrocshmem_device_ctx():
-    return pyrocshmem.rocshmem_get_device_ctx()
-
-
 def allgather_no_fuse(full_symm: torch.Tensor, shard: torch.Tensor, barrier: torch.Tensor):
     rank = pyrocshmem.rocshmem_my_pe()
     nranks = pyrocshmem.rocshmem_n_pes()
     assert shard.numel() * nranks == full_symm.numel()
     assert shard.dtype == full_symm.dtype
-    ctx = get_pyrocshmem_device_ctx()
     current_stream = torch.cuda.current_stream()
-    barrier_all_with_ctx_on_stream(ctx, rank, nranks, barrier, current_stream)
-    allgather_no_barrier_kernel[(nranks * 4, )](ctx, full_symm, shard, shard.numel(), rank, nranks,
+    barrier_all_on_stream(current_stream)
+    allgather_no_barrier_kernel[(nranks * 4, )](full_symm, shard, shard.numel(), rank, nranks,
                                                 BLOCK_SIZE=32 * 1024, **launch_cooperative_grid_options())
-    barrier_all_with_ctx_on_stream(ctx, rank, nranks, barrier, current_stream)
+    barrier_all_on_stream(current_stream)
 
 
 def allgather(
@@ -645,11 +629,10 @@ def allgather(
     nranks = pyrocshmem.rocshmem_n_pes()
     assert shard.numel() * nranks == full_symm.numel()
     assert shard.dtype == full_symm.dtype
-    ctx = get_pyrocshmem_device_ctx()
 
     workgroups_per_rank = 1
     # use only 8 ranks can achieve similay bandwidth
-    allgather_opt_kernel[(nranks * workgroups_per_rank, )](ctx, full_symm, shard, shard.numel(), rank, nranks, barrier,
+    allgather_opt_kernel[(nranks * workgroups_per_rank, )](full_symm, shard, shard.numel(), rank, nranks, barrier,
                                                            BLOCK_SIZE=32 * 1024, num_warps=16,
                                                            **launch_cooperative_grid_options())
 
@@ -662,7 +645,6 @@ def allgather_chunked_pull(
     SPLIT_N: int,
     workgroups_per_rank: int = 2,
 ):
-    ctx = get_pyrocshmem_device_ctx()
     assert full_symm.dim() == 2 and shard.dim() == 2
     M_per_rank, N = shard.shape
     rank = pyrocshmem.rocshmem_my_pe()
@@ -678,16 +660,16 @@ def allgather_chunked_pull(
     full_symm[M_start:M_end, :].copy_(shard)
 
     current_stream = torch.cuda.current_stream()
-    barrier_all_with_ctx_on_stream(ctx, rank, nranks, group_barrier, current_stream)
+    barrier_all_on_stream(current_stream)
 
     workgroups_per_rank = 2
     BLOCK_SIZE_N = triton.next_power_of_2(N // SPLIT_N)
     BLOCK_SIZE_M = max(1, 16 * 1024 // BLOCK_SIZE_N)
     # use only 8 ranks can achieve similay bandwidth
     allgather_strided_chunked_pull_ctx_wrapper_kernel[(nranks * workgroups_per_rank, )](
-        ctx, full_symm, M_per_rank, N, shard.stride(0), shard.stride(1), rank, nranks, group_barrier,
+        full_symm, M_per_rank, N, shard.stride(0), shard.stride(1), rank, nranks, group_barrier,
         BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N, SPLIT_N=SPLIT_N, num_warps=16)
-    barrier_all_with_ctx_on_stream(ctx, rank, nranks, group_barrier, current_stream)
+    barrier_all_on_stream(current_stream)
 
 
 def allgather_chunked_pull_fused(
@@ -698,7 +680,6 @@ def allgather_chunked_pull_fused(
     SPLIT_N: int,
     workgroups_per_rank: int = 2,
 ):
-    ctx = get_pyrocshmem_device_ctx()
     assert full_symm.dim() == 2 and shard.dim() == 2
     M_per_rank, N = shard.shape
     rank = pyrocshmem.rocshmem_my_pe()
@@ -713,7 +694,7 @@ def allgather_chunked_pull_fused(
     BLOCK_SIZE_M = max(1, 16 * 1024 // BLOCK_SIZE_N)
     # use only 8 ranks can achieve similay bandwidth
     allgather_strided_chunked_pull_fused_kernel[(nranks * workgroups_per_rank, )](
-        ctx, full_symm, shard, M_per_rank, N, shard.stride(0), shard.stride(1), rank, nranks, grid_barrier,
+        full_symm, shard, M_per_rank, N, shard.stride(0), shard.stride(1), rank, nranks, grid_barrier,
         group_barrier, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N, SPLIT_N=SPLIT_N, num_warps=16,
         **launch_cooperative_grid_options())
 
@@ -726,7 +707,6 @@ def allgather_chunked_pull_packed_fused(
     SPLIT_N: int,
     workgroups_per_rank: int = 2,
 ):
-    ctx = get_pyrocshmem_device_ctx()
     assert full_symm.dim() == 2 and shard.dim() == 2
     M_per_rank, N = shard.shape
     rank = pyrocshmem.rocshmem_my_pe()
@@ -740,7 +720,7 @@ def allgather_chunked_pull_packed_fused(
     BLOCK_SIZE_N = triton.next_power_of_2(N // SPLIT_N)
     BLOCK_SIZE_M = max(1, 2 * 1024 // BLOCK_SIZE_N)
     # use only 8 ranks can achieve similar bandwidth
-    allgather_chunked_pull_fused_packed_kernel[(nranks * workgroups_per_rank, )](ctx, full_symm, shard, M_per_rank, N,
+    allgather_chunked_pull_fused_packed_kernel[(nranks * workgroups_per_rank, )](full_symm, shard, M_per_rank, N,
                                                                                  shard.stride(0), shard.stride(1), rank,
                                                                                  nranks, grid_barrier, group_barrier,
                                                                                  BLOCK_SIZE_M=BLOCK_SIZE_M,
@@ -766,13 +746,12 @@ def allgather_chunked(
     assert shard.is_cuda and full_symm.is_cuda
     assert shard.stride() == full_symm.stride()  # just for simple implementation
 
-    ctx = get_pyrocshmem_device_ctx()
 
     workgroups_per_rank = 1
     BLOCK_SIZE_N = triton.next_power_of_2(N // SPLIT_N)
     BLOCK_SIZE_M = max(1, 32 * 1024 // BLOCK_SIZE_N)
     # use only 8 ranks can achieve similay bandwidth
-    allgather_strided_chunked_kernel[(nranks * workgroups_per_rank, )](ctx, full_symm, shard, M_per_rank, N,
+    allgather_strided_chunked_kernel[(nranks * workgroups_per_rank, )](full_symm, shard, M_per_rank, N,
                                                                        shard.stride(0), shard.stride(1), rank, nranks,
                                                                        group_barrier, BLOCK_SIZE_M=BLOCK_SIZE_M,
                                                                        BLOCK_SIZE_N=BLOCK_SIZE_N, SPLIT_N=SPLIT_N,

@@ -45,11 +45,6 @@ rocshmem_ptr_wrapper(void *dest, int pe) {
 }
 
 __device__ void __attribute__((visibility("default")))
-rocshmem_set_ctx(void *ctx) {
-  ROCSHMEM_CTX_DEFAULT.ctx_opaque = ctx;
-}
-
-__device__ void __attribute__((visibility("default")))
 rocshmem_putmem_signal_wrapper(void *dest, const void *source, size_t nbytes,
                                uint64_t *sig_addr, uint64_t signal, int sig_op,
                                int pe) {

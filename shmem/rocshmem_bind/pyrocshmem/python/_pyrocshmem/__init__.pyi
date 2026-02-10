@@ -99,10 +99,6 @@ def rocshmem_ptr(dest: np.intp, pe: np.int32) -> np.intp:
 
 
 ## for device side api
-def rocshmem_get_device_ctx() -> np.intp:
-    ...
-
-
 # torch related
 
 
