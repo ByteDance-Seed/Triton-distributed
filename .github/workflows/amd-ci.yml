@@ -12,7 +12,7 @@ jobs:
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 45
     container:
-        image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        image: rocm/pytorch:rocm6.4.4_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
           --volume /home/runner/.triton:/github/home/.triton
@@ -27,7 +27,7 @@ jobs:
         run: |
           rm -f /usr/local/bin/cmake
           apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
-          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          pip3 install -i https://test.pypi.org/simple hip-python>=6.4.4 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 60
     container:
-        image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        image: rocm/pytorch:rocm6.4.4_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
           --volume /home/runner/.triton:/github/home/.triton
@@ -73,7 +73,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -y && apt install -y libopenmpi-dev
-          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          pip3 install -i https://test.pypi.org/simple hip-python>=6.4.4 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
         uses: actions/checkout@v4
