@@ -46,8 +46,7 @@ LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 def test_rocshmem_device():
 
     @triton_dist.jit
-    def _rocshmem_device(comm_buf, ctx, ptr):
-        libshmem_device.set_rocshmem_ctx(ctx)
+    def _rocshmem_device(comm_buf, ptr):
         mype = dl.rank()
         npes = dl.num_ranks()
 
@@ -58,9 +57,7 @@ def test_rocshmem_device():
         tl.store(comm_buf, npes)
 
     @triton_dist.jit
-    def _rocshmem_put(ptr, ctx):
-        libshmem_device.set_rocshmem_ctx(ctx)
-
+    def _rocshmem_put(ptr):
         mype = libshmem_device.my_pe()
         npes = libshmem_device.n_pes()
         peer = (mype + 1) % npes
@@ -68,9 +65,7 @@ def test_rocshmem_device():
         libshmem_device.int_p(ptr, mype, peer)
 
     @triton_dist.jit
-    def _rocshmem_get_put_symm_at(local_ptr, ctx):
-        libshmem_device.set_rocshmem_ctx(ctx)
-
+    def _rocshmem_get_put_symm_at(local_ptr):
         mype = libshmem_device.my_pe()
         npes = libshmem_device.n_pes()
         pid = tl.program_id(axis=0)
@@ -87,11 +82,10 @@ def test_rocshmem_device():
 
     mype = pyrocshmem.rocshmem_my_pe()
     npes = pyrocshmem.rocshmem_n_pes()
-    ctx = pyrocshmem.rocshmem_get_device_ctx()
     comm_buf = pyrocshmem.rocshmem_create_tensor((2, ), torch.int32)
 
     torch.distributed.barrier()
-    _rocshmem_device[(1, )](comm_buf, ctx, comm_buf.data_ptr())
+    _rocshmem_device[(1, )](comm_buf, comm_buf.data_ptr())
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
@@ -106,7 +100,7 @@ def test_rocshmem_device():
 
     put_buf = pyrocshmem.rocshmem_create_tensor((1, ), torch.int32)
     torch.distributed.barrier()
-    _rocshmem_put[(1, )](put_buf, ctx)
+    _rocshmem_put[(1, )](put_buf)
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
@@ -121,7 +115,7 @@ def test_rocshmem_device():
                                                                                    mype:nelems_per_rank * (mype + 1)])
 
     torch.distributed.barrier()
-    _rocshmem_get_put_symm_at[(1, )](put_bufs, ctx)
+    _rocshmem_get_put_symm_at[(1, )](put_bufs)
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
@@ -139,7 +133,7 @@ def test_rocshmem_device():
 def test_rocshmem_basic():
 
     @triton.jit
-    def _rocshmem_basic(comm_buf, ctx, mype, npes):
+    def _rocshmem_basic(comm_buf, mype, npes):
         tl.store(comm_buf, mype)
         comm_buf += 1
         tl.store(comm_buf, npes)
@@ -149,11 +143,10 @@ def test_rocshmem_basic():
     mype = pyrocshmem.rocshmem_my_pe()
     npes = pyrocshmem.rocshmem_n_pes()
 
-    ctx = pyrocshmem.rocshmem_get_device_ctx()
     comm_buf = pyrocshmem.rocshmem_create_tensor((2, ), torch.int32)
 
     # torch.distributed.barrier()
-    _rocshmem_basic[(1, )](comm_buf, ctx, mype, npes)
+    _rocshmem_basic[(1, )](comm_buf, mype, npes)
     # torch.distributed.barrier()
     pyrocshmem.rocshmem_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
     torch.cuda.synchronize()
@@ -167,6 +160,102 @@ def test_rocshmem_basic():
         raise (e)
     else:
         print(f"✅ _rocshmem_basic #{mype} pass")
+
+
+def test_rocshmem_graph_capture():
+    """
+    Test CUDA/HIP graph capture compatibility with rocshmem_hipmodule_init.
+
+    This test validates that rocshmem_hipmodule_init() works correctly within
+    torch.cuda.graph() capture, which requires device-to-device copy operations
+    instead of legacy stream operations (Issue #2741).
+    """
+    print("**test_rocshmem_graph_capture start!")
+
+    # IMPORTANT: Define the kernel INSIDE this function to ensure it's NOT cached
+    # This forces rocshmem_hipmodule_init to be called during graph capture
+    @triton_dist.jit
+    def _graph_test_kernel(result_buf):
+        """Kernel for graph capture test - must be unique to avoid caching"""
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        # Write rank-specific value to verify execution
+        tl.store(result_buf, mype + 42)
+
+    mype = pyrocshmem.rocshmem_my_pe()
+    npes = pyrocshmem.rocshmem_n_pes()
+
+    # Create result buffer
+    result_buf = pyrocshmem.rocshmem_create_tensor((1,), torch.int32)
+    result_buf.fill_(0)  # Initialize to 0
+
+    print(f"[Rank {mype}] Creating CUDA graph for rocshmem_hipmodule_init test...")
+
+    # Create a CUDA graph
+    graph = torch.cuda.CUDAGraph()
+
+    # Use a dedicated stream for graph capture
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        # DO NOT warm up - we want rocshmem_hipmodule_init to be called
+        # DURING graph capture to test if it's graph compatible
+
+        # Begin graph capture IMMEDIATELY
+        print(f"[Rank {mype}] Beginning graph capture (first kernel launch will call rocshmem_hipmodule_init)...")
+        graph.capture_begin()
+
+        try:
+            # Launch kernel within graph capture
+            # This is the FIRST launch, so rocshmem_hipmodule_init will be called NOW
+            # With OLD implementation: hipMemcpyFromSymbol uses legacy stream -> SHOULD FAIL
+            # With NEW implementation: device-to-device copy -> SHOULD SUCCEED
+            _graph_test_kernel[(1,)](result_buf)
+
+            # End graph capture
+            graph.capture_end()
+            print(f"[Rank {mype}] ✅ Graph capture completed successfully")
+            print(f"[Rank {mype}] ✅ rocshmem_hipmodule_init worked within graph capture!")
+
+        except Exception as e:
+            print(f"[Rank {mype}] ❌ Graph capture FAILED: {e}")
+            print(f"[Rank {mype}] ❌ This proves rocshmem_hipmodule_init is NOT graph compatible")
+            try:
+                graph.capture_end()
+            except:
+                pass
+            raise
+
+    # Synchronize before replay
+    torch.cuda.synchronize()
+
+    # Reset buffer before graph replay
+    result_buf.fill_(0)
+
+    # Replay the captured graph
+    print(f"[Rank {mype}] Replaying captured graph...")
+    graph.replay()
+    torch.cuda.synchronize()
+
+    # Verify result
+    expected_value = mype + 42
+    actual_value = result_buf.item()
+
+    print(f"[Rank {mype}] Graph replay result: expected={expected_value}, actual={actual_value}")
+
+    try:
+        torch.testing.assert_close(
+            result_buf,
+            torch.tensor([expected_value], dtype=torch.int32, device="cuda"),
+            atol=0,
+            rtol=0
+        )
+    except Exception as e:
+        print(f"[Rank {mype}] ❌ Graph capture test FAILED - result mismatch")
+        raise e
+    else:
+        print(f"[Rank {mype}] ✅ Graph replay verification PASSED")
+        print(f"[Rank {mype}] ✅ CONFIRMED: rocshmem_hipmodule_init is CUDA graph compatible!")
 
 
 def test_rocshmem_memcpy():
@@ -241,6 +330,8 @@ if __name__ == "__main__":
     test_rocshmem_basic()
 
     test_rocshmem_device()
+
+    test_rocshmem_graph_capture()
 
     test_rocshmem_memcpy()
 

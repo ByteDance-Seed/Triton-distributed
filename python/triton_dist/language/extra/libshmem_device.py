@@ -40,12 +40,6 @@ _shmem_module = ModuleProxy([
 
 
 @_shmem_module.dispatch
-def set_rocshmem_ctx(ctx):
-    """ROCSHMEM only"""
-    ...
-
-
-@_shmem_module.dispatch
 def my_pe():
     """Both NVSHMEM and ROCSHMEM"""
     ...

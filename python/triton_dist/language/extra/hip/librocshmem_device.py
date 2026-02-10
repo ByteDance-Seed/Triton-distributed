@@ -42,22 +42,6 @@ ROCSHMEM_SIGNAL_SET = 0
 ROCSHMEM_SIGNAL_ADD = 1
 
 
-@core.extern
-def set_rocshmem_ctx(ctx, _semantic=None):
-    return extern_call(
-        "librocshmem_device",
-        "",
-        [
-            tl.cast(ctx, tl.pointer_type(tl.void), _semantic=_semantic),
-        ],
-        {
-            (tl.pointer_type(tl.void), ): ("rocshmem_set_ctx", ()),
-        },
-        is_pure=False,
-        _semantic=_semantic,
-    )
-
-
 void_ptr = core.pointer_type(core.void)
 
 

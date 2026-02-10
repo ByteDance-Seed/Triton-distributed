@@ -64,29 +64,12 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
         backend = get_shmem_backend()
 
         if backend == 'rocshmem':
-            import pyrocshmem
-            res = hip.hipModuleGetGlobal(kernel_module, b"ROCSHMEM_CTX_DEFAULT")
-            # dptr, bytes = res[1], res[2]
-            if res[0] == hip.hipError_t.hipSuccess:
-                """
-                    typedef struct rocshmem_ctx{
-                        void *ctx_opaque;
-                        void *team_opaque;
-                    } rocshmem_ctx_t;
-                    pyrocshmem.rocshmem_get_device_ctx only return the `ctx_opaque`.
-                    `ROCSHMEM_CTX_DEFAULT` is a `rocshmem_ctx_t` struct, but only the `ctx_opaque` field needs to be updated on the device side.
-                    (equal to `libshmem_device.set_rocshmem_ctx(ctx)` in the kernel)
-                """
-                ctx_opaque_bytes = 8  # assuming 64-bit pointer
-                # get the host address of the `ctx_opaque` pointer.
-                ctx = pyrocshmem.rocshmem_get_device_ctx()
-                ctx_tensor = torch.tensor([ctx], dtype=torch.int64)
-                # update the device `ROCSHMEM_CTX_DEFAULT` struct's `ctx_opaque` field in the kernel module.
-                cp_res = hip.hipMemcpy(res[1], ctx_tensor.data_ptr(), ctx_opaque_bytes,
-                                       hip.hipMemcpyKind.hipMemcpyHostToDevice)
-                HIP_CHECK(cp_res)
-            else:
-                hip.hipGetLastError() # Discard the last error
+            has_rocshmem = "rocshmem" in kernel.asm.get('llir', '')
+            if has_rocshmem:
+                import pyrocshmem
+                ret = pyrocshmem.rocshmem_hipmodule_init(kernel_module, 0)
+                if ret != 0:
+                    warnings.warn(f"rocshmem_hipmodule_init failed with code {ret}")
         elif backend == 'mori_shmem':
             # Initialize mori_shmem device symbols in this kernel module
             import mori.shmem as mori_shmem

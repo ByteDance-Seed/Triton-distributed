@@ -11,8 +11,7 @@ from triton_dist.language.extra import libshmem_device
 from triton_dist.utils import finalize_distributed, initialize_distributed, NVSHMEM_SIGNAL_DTYPE
 
 @triton_dist.jit(do_not_specialize=["my_pe", "dst_pe"])
-def simple_put_signal_test(data, message, nelem, sig_addr, my_pe, dst_pe, ctx):
-    libshmem_device.set_rocshmem_ctx(ctx)
+def simple_put_signal_test(data, message, nelem, sig_addr, my_pe, dst_pe):
     pid = tl.program_id(0)
     thread_id = tid(0)
 
@@ -49,9 +48,8 @@ sig_addr.zero_()
 torch.cuda.synchronize()
 
 print(RANK, '->', dst_pe)
-ctx = pyrocshmem.rocshmem_get_device_ctx()
 
-simple_put_signal_test[(1, )](data, message, elems, sig_addr, RANK, dst_pe, ctx)
+simple_put_signal_test[(1, )](data, message, elems, sig_addr, RANK, dst_pe)
 pyrocshmem.rocshmem_barrier_all()
 torch.cuda.synchronize()
 
