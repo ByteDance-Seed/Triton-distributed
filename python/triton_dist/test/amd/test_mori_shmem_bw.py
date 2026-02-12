@@ -86,20 +86,19 @@ _triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
 if os.path.exists(_triton_python_path):
     sys.path.insert(0, _triton_python_path)
 
-import torch
-import torch.distributed
+import torch  # noqa: E402
+import torch.distributed  # noqa: E402
 
-from triton_dist.utils import initialize_distributed
-from triton_dist.profiler_utils import perf_func, group_profile
-import mori.shmem as mori_shmem
-from mori.shmem import (
-    mori_shmem_create_tensor,
-)
-import triton_dist
-import triton.language as tl
-from triton_dist.language.extra import libshmem_device
-from triton_dist.language.extra.language_extra import threads_per_warp
-from triton_dist.language.extra.hip.language_extra import tid
+from triton_dist.utils import initialize_distributed  # noqa: E402
+from triton_dist.profiler_utils import perf_func, group_profile  # noqa: E402
+import mori.shmem as mori_shmem  # noqa: E402
+from mori.shmem import (  # noqa: E402
+    mori_shmem_create_tensor, )
+import triton_dist  # noqa: E402
+import triton.language as tl  # noqa: E402
+from triton_dist.language.extra import libshmem_device  # noqa: E402
+from triton_dist.language.extra.language_extra import threads_per_warp  # noqa: E402
+from triton_dist.language.extra.hip.language_extra import tid  # noqa: E402
 
 
 @triton_dist.jit
@@ -133,8 +132,8 @@ def mori_putmem_p2p_kernel(
     pid = tl.program_id(0)
     num_pid = tl.num_programs(0)
     thread_idx = tid(0)
-    warp_id = thread_idx // WARP_SIZE
-    lane_id = thread_idx % WARP_SIZE
+    _warp_id = thread_idx // WARP_SIZE  # noqa: F841
+    _lane_id = thread_idx % WARP_SIZE  # noqa: F841
 
     # Total threads and warps across all blocks
     threads_per_block = num_warps * WARP_SIZE
@@ -439,7 +438,7 @@ def main():
         os.environ["MORI_NUM_QP_PER_PE"] = str(args.num_qps)
     # Get rank info from environment variables
     RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+    _LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))  # noqa: F841
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 
     # Initialize distributed training

@@ -46,9 +46,9 @@ _triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
 if os.path.exists(_triton_python_path):
     sys.path.insert(0, _triton_python_path)
 
-from triton_dist.utils import initialize_distributed, finalize_distributed, get_triton_dist_world
-import mori.shmem as mori_shmem
-from mori.shmem import mori_shmem_create_tensor
+from triton_dist.utils import initialize_distributed, finalize_distributed, get_triton_dist_world  # noqa: E402
+import mori.shmem as mori_shmem  # noqa: E402
+from mori.shmem import mori_shmem_create_tensor  # noqa: E402
 
 
 def test_mori_shmem_basic():

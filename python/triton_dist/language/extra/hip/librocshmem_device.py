@@ -361,8 +361,7 @@ def putmem_signal_nbi_wave(dest, source, nbytes, sig_addr, signal, sig_op, pe, _
 @core.extern
 def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
     tl.static_assert(sig_addr.dtype == pi_u64_t or sig_addr.dtype == pi_i64_t,
-                     "sig_addr should be a pointer of uint64_t/int64_t",
-                     _semantic=_semantic)
+                     "sig_addr should be a pointer of uint64_t/int64_t", _semantic=_semantic)
     return extern_call(
         "librocshmem_device",
         "",
@@ -385,9 +384,7 @@ def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
 @core.extern
 def ulong_put_signal(dest, source, nelems, sig_addr, signal, sig_op, pe, _semantic=None):
     return extern_call(
-        "librocshmem_device",
-        "",
-        [
+        "librocshmem_device", "", [
             tl.cast(dest, pi_u64_t, _semantic=_semantic),
             tl.cast(source, pi_u64_t, _semantic=_semantic),
             tl.cast(nelems, tl.uint64, _semantic=_semantic),
@@ -395,11 +392,10 @@ def ulong_put_signal(dest, source, nelems, sig_addr, signal, sig_op, pe, _semant
             tl.cast(signal, tl.uint64, _semantic=_semantic),
             tl.cast(sig_op, tl.int32, _semantic=_semantic),
             tl.cast(pe, tl.int32, _semantic=_semantic),
-        ],
-        {
+        ], {
             (pi_u64_t, pi_u64_t, tl.uint64, pi_u64_t, tl.uint64, tl.int32, tl.int32): (
-               "rocshmem_ulong_put_signal_wrapper",
-               (),
+                "rocshmem_ulong_put_signal_wrapper",
+                (),
             ),
         }, is_pure=False, _semantic=_semantic)
 
