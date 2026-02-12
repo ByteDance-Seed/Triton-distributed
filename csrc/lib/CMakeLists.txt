@@ -20,6 +20,22 @@ target_link_libraries(triton_distributed PUBLIC pybind11::headers Python3::Modul
 target_include_directories(triton_distributed PUBLIC ".")
 target_include_directories(triton_distributed PUBLIC "../triton_aot_generated")
 
+# Find cuda.h: prefer system CUDA toolkit, fallback to triton bundled headers
+find_package(CUDAToolkit QUIET)
+if(CUDAToolkit_FOUND)
+  message(STATUS "Found CUDA Toolkit include: ${CUDAToolkit_INCLUDE_DIRS}")
+  target_include_directories(triton_distributed PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+else()
+  # Fallback: triton bundles cuda.h in third_party/nvidia/backend/include
+  set(_TRITON_CUDA_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/triton/third_party/nvidia/backend/include")
+  if(EXISTS "${_TRITON_CUDA_INCLUDE}/cuda.h")
+    message(STATUS "CUDA Toolkit not found, using triton bundled cuda.h: ${_TRITON_CUDA_INCLUDE}")
+    target_include_directories(triton_distributed PUBLIC "${_TRITON_CUDA_INCLUDE}")
+  else()
+    message(WARNING "cuda.h not found in system CUDA toolkit or triton bundled headers")
+  endif()
+endif()
+
 set(NVSHMEM_HOME "")
 function(set_nvshmem_home)
   # 1. Check if NVSHMEM_HOME environment variable is set
