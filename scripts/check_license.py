@@ -200,8 +200,11 @@ def check_license(file_path):
 
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
-            first_lines = ''.join(file.readlines()[:max(
-                len(license.splitlines()) for license in licenses)])
+            lines = file.readlines()
+            max_license_lines = max(
+                len(license.splitlines()) for license in licenses)
+            num_lines = max_license_lines + 5
+            first_lines = ''.join(lines[:num_lines])
             for license_text in licenses:
                 if license_text.strip() in first_lines.strip():
                     return True
@@ -211,10 +214,52 @@ def check_license(file_path):
         return False
 
 
+def add_license(file_path):
+    """Add license header to a file that is missing it."""
+    _, ext = os.path.splitext(file_path)
+    if ext in PYTHON_EXTENSIONS:
+        license_text = PYTHON_LICENSES[0] + "\n\n"
+    elif ext in TD_EXTENSIONS:
+        license_text = TD_LICENSES[0] + "\n\n"
+    elif ext in CPP_EXTENSIONS:
+        license_text = CPP_LICENSES[0] + "\n\n"
+    else:
+        return False
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if ext in PYTHON_EXTENSIONS:
+        prefix = ""
+        rest = content
+        lines = content.split("\n")
+        if lines and lines[0].startswith("#!"):
+            prefix = lines[0] + "\n"
+            rest = "\n".join(lines[1:]).lstrip("\n")
+            if rest:
+                rest = "\n" + rest
+        elif lines and "coding" in lines[0]:
+            prefix = lines[0] + "\n"
+            rest = "\n".join(lines[1:]).lstrip("\n")
+            if rest:
+                rest = "\n" + rest
+        new_content = prefix + license_text + rest
+    else:
+        new_content = license_text + content
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    return True
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Check license for modified files.")
     parser.add_argument("--modify-only", default=False, action="store_true")
+    parser.add_argument("--add",
+                        default=False,
+                        action="store_true",
+                        help="Add license to files that are missing it.")
     return parser.parse_args()
 
 
@@ -233,10 +278,16 @@ def main():
                 missing_license_files.append(file)
 
     if missing_license_files:
-        print("The following files are missing the required license:")
-        for file in missing_license_files:
-            print(file)
-        assert not missing_license_files, "Some files are missing the required license."
+        if args.add:
+            for file in missing_license_files:
+                add_license(file)
+                print(f"Added license to: {file}")
+            print(f"[✅] Added license to {len(missing_license_files)} files")
+        else:
+            print("The following files are missing the required license:")
+            for file in missing_license_files:
+                print(file)
+            assert not missing_license_files, "Some files are missing the required license."
     else:
         print("[✅] check license passed")
 

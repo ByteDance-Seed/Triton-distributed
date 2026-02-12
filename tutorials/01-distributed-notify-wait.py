@@ -56,6 +56,7 @@ import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE, dist_print, initialize_distributed, nvshmem_barrier_all_on_stream, nvshmem_free_tensor_sync, nvshmem_create_tensor
 from triton_dist.language.extra.language_extra import __syncthreads
+from triton_dist.language.extra import libshmem_device
 import triton_dist
 
 
@@ -88,7 +89,7 @@ def producer_consumer_kernel(
                 # Use `symm_at` to map the data pointer to remote peer rank
                 dl.symm_at(signal_ptr, peer_rank) + queue_offset,
                 1,  # The number of signals to wait
-                "sys",  # The scope of the barrier, `gpu` or `sys`
+                "gpu",  # The scope of the barrier, `gpu` or `sys`
                 "acquire",  # The semantic of the wait
                 waitValue=queue_repeat *
                 2,  # The value expected, should conform to certain order
@@ -103,6 +104,7 @@ def producer_consumer_kernel(
                 offs, data)
             # need a syncthreads to make sure all the data has been sent
             __syncthreads()
+            libshmem_device.fence()
             # `notify` is also single thread scope, we need to use a different thread from `wait`
             dl.notify(
                 signal_ptr + queue_offset,
@@ -125,7 +127,7 @@ def producer_consumer_kernel(
                 signal_ptr +
                 queue_offset,  # The base *Pointer* of signals at the current rank
                 1,  # The number of signals to wait
-                "sys",  # The scope of the barrier
+                "gpu",  # The scope of the barrier
                 "acquire",  # The semantic of the wait
                 waitValue=queue_repeat * 2 + 1,  # The value expected
             )  # This wait ensures that the corresponding position is full
@@ -133,6 +135,7 @@ def producer_consumer_kernel(
             data = tl.load(queue_ptr + queue_offset * BLOCK_SIZE + offs)
             tl.store(output_ptr + i * BLOCK_SIZE + offs, data)
             __syncthreads()
+            libshmem_device.fence()
             dl.notify(
                 signal_ptr + queue_offset,
                 rank,  # Notify the signal object on the current rank

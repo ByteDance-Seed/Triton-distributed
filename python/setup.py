@@ -1007,6 +1007,36 @@ def get_packages():
             "triton_dist/tools/tune",
         ]
 
+    if check_env_flag("TRITON_BUILD_LITTLE_KERNEL", "ON"):  # Default ON
+        _packages += [
+            "little_kernel",
+            "little_kernel/atom",
+            "little_kernel/atom/barrier",
+            "little_kernel/atom/mma",
+            "little_kernel/atom/tma",
+            "little_kernel/codegen",
+            "little_kernel/codegen/registries",
+            "little_kernel/codegen/special_struct",
+            "little_kernel/codegen/visitors",
+            "little_kernel/core",
+            "little_kernel/core/passes",
+            "little_kernel/core/passes/utils",
+            "little_kernel/core/passes/utils/registries",
+            "little_kernel/core/passes/utils/type_inference",
+            "little_kernel/language",
+            "little_kernel/language/intrin",
+            "little_kernel/runtime",
+            "little_kernel/benchmark",
+            "little_kernel/benchmark/gemm_sm90",
+            "little_kernel/benchmark/gemm_sm100",
+            "little_kernel/benchmark/compute",
+            "little_kernel/benchmark/memory",
+            "little_kernel/benchmark/latency",
+            "little_kernel/benchmark/warp",
+            "little_kernel/benchmark/sm",
+            "little_kernel/benchmark/sm90",
+        ]
+
     packages = []
     for pkg in _packages:
         if os.path.exists(pkg):
