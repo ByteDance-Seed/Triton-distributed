@@ -78,8 +78,8 @@ def gemm_v1_kernel(
     bm: ll.int32 = ll.blockIdx_y() * BLOCK_M
     bn: ll.int32 = ll.blockIdx_x() * BLOCK_N
 
-    # Initialize m64n64 accumulator (declares float acc64[32] in C++)
-    ll.wgmma_init_accum_64x64()
+    acc64 = ll.empty([32], dtype=ll.float32, scope="local")
+    ll.wgmma_init_accum_64x64(acc64, 32, ll.float32)
 
     # Get base SMEM addresses for descriptor construction
     base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(sA) >> 4
@@ -127,7 +127,7 @@ def gemm_v1_kernel(
 
         # WGMMA compute loop: 4 iterations (BLOCK_K/WGMMA_K = 64/16 = 4)
         for ki in ll.unroll(range(0, BLOCK_K, WGMMA_K)):
-            ll.wgmma_fence_acc64()
+            ll.wgmma_fence_acc64(acc64, 32)
             ll.wgmma_fence()
 
             # Construct SMEM descriptors for this K slice
@@ -136,15 +136,15 @@ def gemm_v1_kernel(
             da: ll.uint64 = ll.uint64((base_desc_a + ki * 2 // 16) & 0x3FFF) | DESC_HI
             db: ll.uint64 = ll.uint64((base_desc_b + ki * 2 // 16) & 0x3FFF) | DESC_HI
 
-            ll.wgmma_compute_64x64(da, db)
+            ll.wgmma_compute_64x64(acc64, da, db)
             ll.wgmma_commit()
-            ll.wgmma_fence_acc64()
+            ll.wgmma_fence_acc64(acc64, 32)
             ll.wgmma_wait()
 
         k_base = k_base + BLOCK_K
 
     # Store accumulator to global memory (float32 output)
-    ll.store_acc64_to_global_f32(C, bm, bn, M, N, tid)
+    ll.store_acc64_to_global_f32(C, acc64, bm, bn, M, N, tid)
 
 
 # =========================================================================

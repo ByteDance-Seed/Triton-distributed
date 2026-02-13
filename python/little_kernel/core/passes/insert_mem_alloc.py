@@ -31,10 +31,10 @@ from little_kernel.core.internal import __LITTLE_KERNEL_ENTRY__, __INTERNAL_DYN_
 from little_kernel.language.intrin.memory import (
     alloc_dynamic_shared_memory,
     alloc_local_memory,
+    alloc_local_zeros,
     alloc_shared_memory,
     slice_dynamic_shared_memory,
 )
-
 from .mem_analysis import MemoryAnalyzer
 from .pass_base import CompleteASTMutator
 from .utils.add_parent_reference import add_parent_references
@@ -126,13 +126,18 @@ class InsertMemAlloc(CompleteASTMutator):
                                 ],
                                 keywords=[],
                             ))
-                        # replace ll.empty, preserving attributes
                         new_node.body[i] = slice_stmt
+                        break
                     elif var["scope"] == "local" and is_target:
                         original_assign = new_node.body[i]
                         var_expr = _target_to_load_expr(var["expr"])
-                        obj_name = update_context(self.ctx, alloc_local_memory.__name__, alloc_local_memory)
-                        slice_stmt = create_node_with_attrs(
+                        # zeros(..., scope="local") -> single alloc_local_zeros (decl+init in one, stable codegen)
+                        if var.get("is_zeros"):
+                            alloc_fn = alloc_local_zeros
+                        else:
+                            alloc_fn = alloc_local_memory
+                        obj_name = update_context(self.ctx, alloc_fn.__name__, alloc_fn)
+                        new_node.body[i] = create_node_with_attrs(
                             ast.Expr, original_assign, value=ast.Call(
                                 func=ast.Name(id=obj_name, ctx=ast.Load()),
                                 args=[
@@ -142,16 +147,14 @@ class InsertMemAlloc(CompleteASTMutator):
                                 ],
                                 keywords=[],
                             ))
-                        # replace ll.empty, preserving attributes
-                        new_node.body[i] = slice_stmt
+                        break
                     elif var["scope"] == "shared" and is_target:
                         original_assign = new_node.body[i]
                         var_expr = _target_to_load_expr(var["expr"])
                         obj_name = update_context(self.ctx, alloc_shared_memory.__name__, alloc_shared_memory)
-                        # Get alignment for shared memory (if specified)
                         align_bytes = mem_ana.align_bytes.get("shared", -1)
                         if align_bytes < 0:
-                            align_bytes = 0  # No alignment specified
+                            align_bytes = 0
                         slice_stmt = create_node_with_attrs(
                             ast.Expr, original_assign, value=ast.Call(
                                 func=ast.Name(id=obj_name, ctx=ast.Load()),
@@ -163,10 +166,79 @@ class InsertMemAlloc(CompleteASTMutator):
                                 ],
                                 keywords=[],
                             ))
-                        # replace ll.empty, preserving attributes
                         new_node.body[i] = slice_stmt
+                        break
+            # Recursively replace ll.empty in nested blocks (if/while/for)
+            self._replace_empty_assigns_in_body(new_node.body, mem_ana)
         new_node = ast.fix_missing_locations(new_node)
         return new_node
+
+    def _replace_empty_assigns_in_body(self, body: list, mem_ana: MemoryAnalyzer) -> None:
+        """Replace ll.empty assigns with alloc/slice in body and nested blocks. No hardcoded sizes."""
+        i = 0
+        while i < len(body):
+            stmt = body[i]
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                var_name = None
+                if isinstance(target, ast.Name):
+                    var_name = target.id
+                elif isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant):
+                    var_name = f"{target.value.id}[{target.slice.value}]"
+                if var_name and var_name in mem_ana.variables:
+                    var = mem_ana.variables[var_name]
+                    scope = var["scope"]
+                    var_expr = _target_to_load_expr(var["expr"])
+                    if scope == "local":
+                        alloc_fn = alloc_local_zeros if var.get("is_zeros") else alloc_local_memory
+                        obj_name = update_context(self.ctx, alloc_fn.__name__, alloc_fn)
+                        body[i] = create_node_with_attrs(
+                            ast.Expr, stmt, value=ast.Call(
+                                func=ast.Name(id=obj_name, ctx=ast.Load()),
+                                args=[
+                                    var_expr,
+                                    ast.Constant(value=var["dtype"]),
+                                    ast.Constant(value=var["total_elements"]),
+                                ],
+                                keywords=[],
+                            ))
+                    elif scope == "shared":
+                        obj_name = update_context(self.ctx, alloc_shared_memory.__name__, alloc_shared_memory)
+                        align_bytes = mem_ana.align_bytes.get("shared", -1)
+                        if align_bytes < 0:
+                            align_bytes = 0
+                        body[i] = create_node_with_attrs(
+                            ast.Expr, stmt, value=ast.Call(
+                                func=ast.Name(id=obj_name, ctx=ast.Load()),
+                                args=[
+                                    var_expr,
+                                    ast.Constant(value=var["dtype"]),
+                                    ast.Constant(value=var["total_elements"]),
+                                    ast.Constant(value=align_bytes),
+                                ],
+                                keywords=[],
+                            ))
+                    elif scope == "dynamic_shared":
+                        body[i] = create_node_with_attrs(
+                            ast.Expr, stmt, value=ast.Call(
+                                func=ast.Name(id=self.slice_dyn_name, ctx=ast.Load()),
+                                args=[
+                                    var_expr,
+                                    ast.Constant(value=Tensor[var["dtype"]]),
+                                    ast.Constant(value=var["offset"]),
+                                    ast.Constant(value=var["total_bytes"]),
+                                    ast.Name(id=__INTERNAL_DYN_SHMEM__, ctx=ast.Load()),
+                                ],
+                                keywords=[],
+                            ))
+            elif isinstance(stmt, ast.If):
+                self._replace_empty_assigns_in_body(stmt.body, mem_ana)
+                self._replace_empty_assigns_in_body(stmt.orelse, mem_ana)
+            elif isinstance(stmt, ast.While):
+                self._replace_empty_assigns_in_body(stmt.body, mem_ana)
+            elif isinstance(stmt, ast.For):
+                self._replace_empty_assigns_in_body(stmt.body, mem_ana)
+            i += 1
 
 
 def insert_mem_alloc(tree: ast.AST, ctx: Dict[str, Any]) -> ast.AST:

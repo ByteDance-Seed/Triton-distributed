@@ -94,8 +94,7 @@ def kernel_wgmma_throughput(
         i = i + ll.blockDim_x()
     ll.__syncthreads()
 
-    # Init accumulator: declares float acc[128] in generated CUDA
-    ll.wgmma_init_accum()
+    acc = ll.zeros([128], dtype=ll.float32, scope="local")
 
     # Build SMEM descriptors for A and B
     base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem) >> 4
@@ -109,7 +108,7 @@ def kernel_wgmma_throughput(
 
     for _iter in range(THROUGHPUT_ITERS):
         ll.wgmma_fence()
-        ll.wgmma_compute(desc_a, desc_b)
+        ll.wgmma_compute(acc, desc_a, desc_b)
         ll.wgmma_commit()
         ll.wgmma_wait()
 
@@ -141,7 +140,7 @@ def kernel_wgmma_latency(elapsed: ll.Tensor[ll.uint64], ) -> ll.void:
         i = i + ll.blockDim_x()
     ll.__syncthreads()
 
-    ll.wgmma_init_accum()
+    acc = ll.zeros([128], dtype=ll.float32, scope="local")
 
     base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem) >> 4
     base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(B_smem) >> 4
@@ -153,7 +152,7 @@ def kernel_wgmma_latency(elapsed: ll.Tensor[ll.uint64], ) -> ll.void:
     # Warmup
     for _w in range(10):
         ll.wgmma_fence()
-        ll.wgmma_compute(desc_a, desc_b)
+        ll.wgmma_compute(acc, desc_a, desc_b)
         ll.wgmma_commit()
         ll.wgmma_wait()
 
@@ -163,7 +162,7 @@ def kernel_wgmma_latency(elapsed: ll.Tensor[ll.uint64], ) -> ll.void:
 
     for _iter in range(LATENCY_ITERS):
         ll.wgmma_fence()
-        ll.wgmma_compute(desc_a, desc_b)
+        ll.wgmma_compute(acc, desc_a, desc_b)
         ll.wgmma_commit()
         ll.wgmma_wait()
 
@@ -194,7 +193,7 @@ def kernel_wgmma_pipeline(elapsed: ll.Tensor[ll.uint64], ) -> ll.void:
         i = i + ll.blockDim_x()
     ll.__syncthreads()
 
-    ll.wgmma_init_accum()
+    acc = ll.zeros([128], dtype=ll.float32, scope="local")
 
     base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem) >> 4
     base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(B_smem) >> 4
@@ -209,7 +208,7 @@ def kernel_wgmma_pipeline(elapsed: ll.Tensor[ll.uint64], ) -> ll.void:
         ll.wgmma_fence()
         # 4x WGMMA per group to saturate tensor core pipeline
         for _d in ll.unroll(range(4)):
-            ll.wgmma_compute(desc_a, desc_b)
+            ll.wgmma_compute(acc, desc_a, desc_b)
         ll.wgmma_commit()
         ll.wgmma_wait()
 

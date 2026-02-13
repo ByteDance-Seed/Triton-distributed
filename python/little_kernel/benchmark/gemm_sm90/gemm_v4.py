@@ -92,7 +92,11 @@ def gemm_v4_kernel(
                     p_phase = p_phase ^ 1
                 p_k = p_k + 1
     else:
-        ll.wgmma_init_4acc()
+        acc_00 = ll.empty([32], dtype=ll.float32, scope="local")
+        acc_01 = ll.empty([32], dtype=ll.float32, scope="local")
+        acc_10 = ll.empty([32], dtype=ll.float32, scope="local")
+        acc_11 = ll.empty([32], dtype=ll.float32, scope="local")
+        ll.wgmma_init_4acc(acc_00, acc_01, acc_10, acc_11, 32, ll.float32)
         base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem[0]) >> 4
         base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(B_smem[0]) >> 4
         c_stage: ll.int32 = 0
@@ -101,7 +105,7 @@ def gemm_v4_kernel(
         while c_k < nk:
             ll.mbarrier_wait(full_barriers[c_stage], c_phase)
             ll.__syncwarp()
-            ll.wgmma_fence_4acc()
+            ll.wgmma_fence_4acc(acc_00, acc_01, acc_10, acc_11, 32)
             ll.wgmma_fence()
             a_s_off: ll.uint32 = ll.uint32(c_stage) * A_STAGE_STRIDE
             b_s_off: ll.uint32 = ll.uint32(c_stage) * B_STAGE_STRIDE
@@ -111,12 +115,12 @@ def gemm_v4_kernel(
                 db0: ll.uint64 = ll.uint64((base_desc_b + b_s_off + k_off) & 0x3FFF) | DESC_HI
                 da1: ll.uint64 = ll.uint64((base_desc_a + a_s_off + M_TILE_STRIDE + k_off) & 0x3FFF) | DESC_HI
                 db1: ll.uint64 = ll.uint64((base_desc_b + b_s_off + N_TILE_STRIDE + k_off) & 0x3FFF) | DESC_HI
-                ll.wgmma_compute_00(da0, db0)
-                ll.wgmma_compute_01(da0, db1)
-                ll.wgmma_compute_10(da1, db0)
-                ll.wgmma_compute_11(da1, db1)
+                ll.wgmma_compute_00(acc_00, da0, db0)
+                ll.wgmma_compute_01(acc_01, da0, db1)
+                ll.wgmma_compute_10(acc_10, da1, db0)
+                ll.wgmma_compute_11(acc_11, da1, db1)
             ll.wgmma_commit()
-            ll.wgmma_fence_4acc()
+            ll.wgmma_fence_4acc(acc_00, acc_01, acc_10, acc_11, 32)
             ll.wgmma_wait()
             if lane == 0:
                 ll.mbarrier_arrive(empty_barriers[c_stage])
@@ -126,7 +130,7 @@ def gemm_v4_kernel(
                 c_stage = 0
                 c_phase = c_phase ^ 1
             c_k = c_k + 1
-        ll.store_4acc_to_global_f32(C, bm, bn, M, N, ltid)
+        ll.store_4acc_to_global_f32(C, acc_00, acc_01, acc_10, acc_11, bm, bn, M, N, ltid)
 
 
 def build_kernel():

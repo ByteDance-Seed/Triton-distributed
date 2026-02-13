@@ -73,7 +73,8 @@ def gemm_v2_kernel(
     bm: ll.int32 = ll.blockIdx_y() * BM
     bn: ll.int32 = ll.blockIdx_x() * BN
 
-    ll.wgmma_init_accum_64x64()
+    acc64 = ll.empty([32], dtype=ll.float32, scope="local")
+    ll.wgmma_init_accum_64x64(acc64, 32, ll.float32)
 
     base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(sA) >> 4
     base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(sB) >> 4
@@ -96,21 +97,21 @@ def gemm_v2_kernel(
         ll.mbarrier_wait(mbar, phase)
         ll.__syncwarp()
 
-        ll.wgmma_fence_acc64()
+        ll.wgmma_fence_acc64(acc64, 32)
         ll.wgmma_fence()
 
         for ki in ll.unroll(range(0, BK, WGMMA_K)):
             da: ll.uint64 = ll.uint64((base_desc_a + ki * 2 // 16) & 0x3FFF) | DESC_HI
             db: ll.uint64 = ll.uint64((base_desc_b + ki * 2 // 16) & 0x3FFF) | DESC_HI
-            ll.wgmma_compute_64x64(da, db)
+            ll.wgmma_compute_64x64(acc64, da, db)
 
         ll.wgmma_commit()
-        ll.wgmma_fence_acc64()
+        ll.wgmma_fence_acc64(acc64, 32)
         ll.wgmma_wait()
 
         kb = kb + BK
 
-    ll.store_acc64_to_global_f32(C, bm, bn, M, N, tid)
+    ll.store_acc64_to_global_f32(C, acc64, bm, bn, M, N, tid)
 
 
 def build_kernel():

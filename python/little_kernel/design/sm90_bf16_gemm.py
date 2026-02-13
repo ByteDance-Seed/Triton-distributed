@@ -155,8 +155,7 @@ def gemm_kernel(
         phase: ll.int32 = 0
         first_tile: ll.int32 = 1
 
-        # Declare and init accumulator (internal 'acc' variable)
-        ll.wgmma_init_accum()
+        acc = ll.zeros([128], dtype=ll.float32, scope="local")
 
         base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem[0]) >> 4
         base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(B_smem[0]) >> 4
@@ -172,7 +171,7 @@ def gemm_kernel(
             bn: ll.int32 = tile_n * BN
             bm: ll.int32 = tile_m * (BM * CLUSTER_SIZE) + cta * BM
 
-            ll.wgmma_zero_accum()
+            ll.wgmma_zero_accum(acc, 128, ll.float32)
 
             k: ll.int32 = 0
             while k < nk:
@@ -187,7 +186,7 @@ def gemm_kernel(
                     k_off: ll.uint32 = ll.uint32(ki) * DESC_K_STRIDE
                     da: ll.uint64 = ll.uint64((base_desc_a + a_s_off + a_m_off + k_off) & 0x3FFF) | DESC_HI
                     db: ll.uint64 = ll.uint64((base_desc_b + b_s_off + k_off) & 0x3FFF) | DESC_HI
-                    ll.wgmma_compute(da, db)
+                    ll.wgmma_compute(acc, da, db)
 
                 ll.wgmma_commit()
                 ll.wgmma_wait()
@@ -209,7 +208,7 @@ def gemm_kernel(
             first_tile = 0
 
             # Store accumulators to SMEM with swizzle
-            ll.store_accum_swizzle(D_smem, warp_in_wg, lane_idx, m_offset)
+            ll.store_accum_swizzle(acc, D_smem, warp_in_wg, lane_idx, m_offset)
 
             ll.tma_store_fence()
             ll.named_barrier_sync(0, 256)
