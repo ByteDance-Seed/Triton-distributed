@@ -115,9 +115,12 @@ def wgmma_m64n256k16(acc, desc_a, desc_b):
 
 # ==============================================================================
 # High-level WGMMA Accumulator Ops
-# These manage an internal 'float acc[128]' array in generated C++ code,
-# bypassing Python type inference for the accumulator.
+# Accumulator is declared by user via ll.empty(..., scope="local"); these ops
+# take (acc, num_elems, dtype) or (acc, ...) so generated code is parameterized.
 # ==============================================================================
+
+# Map C++ scalar type (from _lltype_to_cpp) to zero literal for init/zero loops
+_ZERO_LITERAL = {"float": "0.0f", "float32": "0.0f", "double": "0.0", "float64": "0.0"}
 
 
 def _build_wgmma_fn_body():
@@ -138,37 +141,65 @@ def _build_wgmma_fn_body():
             "}\n")
 
 
-def codegen_wgmma_init_accum():
-    return Builtin(body="", includes=[], return_val="float acc[128];\nfor(int _i=0; _i<128; _i++) acc[_i]=0.0f")
+def codegen_wgmma_init_accum(acc, num_elems, dtype_cpp):
+    """Emit zero loop only; declaration is from user's ll.empty -> alloc_local_memory (or merged alloc_init)."""
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(body="", includes=[], return_val=f"for(int _i=0; _i<{num_elems}; _i++) {acc}[_i]={zero}")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_init_accum)
-def wgmma_init_accum():
-    """Declare and zero the WGMMA accumulator (128 floats named acc)."""
+def wgmma_init_accum(acc, num_elems, dtype):
+    """Zero the WGMMA accumulator (user declares acc via ll.empty)."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_zero_accum():
-    return Builtin(body="", includes=[], return_val="do {} while(0);\nfor(int _i=0; _i<128; _i++) acc[_i]=0.0f")
+def codegen_wgmma_alloc_init_accum(acc, num_elems, dtype_cpp):
+    """Emit declaration + zero loop in one (same as legacy single-statement output)."""
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(body="", includes=[],
+                   return_val=f"{dtype_cpp} {acc}[{num_elems}];\nfor(int _i=0; _i<{num_elems}; _i++) {acc}[_i]={zero}")
+
+
+def _wgmma_alloc_init_accum_eval_arg_type(ctx, acc, num_elems, dtype):
+    from little_kernel.core.type_system import Tensor
+    if isinstance(acc, str):
+        ctx[acc] = Tensor[dtype]
+
+
+@builtin(
+    eval_return_type=void,
+    eval_arg_type=_wgmma_alloc_init_accum_eval_arg_type,
+    codegen_func=codegen_wgmma_alloc_init_accum,
+)
+def wgmma_alloc_init_accum(acc, num_elems, dtype):
+    """Declare and zero accumulator in one (used when pass merges empty+init_accum)."""
+    raise RuntimeError("should not be called")
+
+
+def codegen_wgmma_zero_accum(acc, num_elems, dtype_cpp):
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(body="", includes=[],
+                   return_val=f"do {{}} while(0);\nfor(int _i=0; _i<{num_elems}; _i++) {acc}[_i]={zero}")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_zero_accum)
-def wgmma_zero_accum():
+def wgmma_zero_accum(acc, num_elems, dtype):
     """Zero the WGMMA accumulator."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_compute(desc_a, desc_b):
-    return Builtin(body=_build_wgmma_fn_body(), includes=[], return_val=f"wgmma_m64n256k16_fn(acc, {desc_a}, {desc_b})")
+def codegen_wgmma_compute(acc, desc_a, desc_b):
+    return Builtin(body=_build_wgmma_fn_body(), includes=[],
+                   return_val=f"wgmma_m64n256k16_fn({acc}, {desc_a}, {desc_b})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute)
-def wgmma_compute(desc_a, desc_b):
-    """Execute WGMMA m64n256k16 on the internal accumulator."""
+def wgmma_compute(acc, desc_a, desc_b):
+    """Execute WGMMA m64n256k16 on the given accumulator."""
     raise RuntimeError("should not be called")
 
 
-def codegen_store_accum_swizzle(sD, warp_idx, lane_idx, m_offset):
+def codegen_store_accum_swizzle(acc, sD, warp_idx, lane_idx, m_offset):
     body = ("\n__device__ __forceinline__ void stsm_x2_fn_("
             "__nv_bfloat162 v0, __nv_bfloat162 v1, void* p) {\n"
             "    uint32_t s0=*reinterpret_cast<uint32_t*>(&v0);\n"
@@ -192,12 +223,12 @@ def codegen_store_accum_swizzle(sD, warp_idx, lane_idx, m_offset):
             "        stsm_x2_fn_(v0,v1,sp);\n"
             "    }\n"
             "}\n")
-    return Builtin(body=body, includes=["<cuda_bf16.h>"], return_val=f"store_accum_swizzle_fn({sD}, acc, "
+    return Builtin(body=body, includes=["<cuda_bf16.h>"], return_val=f"store_accum_swizzle_fn({sD}, {acc}, "
                    f"{warp_idx}, {lane_idx}, {m_offset})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_store_accum_swizzle)
-def store_accum_swizzle(sD, warp_idx, lane_idx, m_offset):
+def store_accum_swizzle(acc, sD, warp_idx, lane_idx, m_offset):
     """Store WGMMA accumulator to SMEM with 128B swizzle."""
     raise RuntimeError("should not be called")
 
@@ -232,7 +263,7 @@ def wgmma_m64n64k16(acc, desc_a, desc_b):
 
 
 # ==============================================================================
-# High-level m64n64 Accumulator Ops (32 floats named acc64)
+# High-level m64n64 Accumulator Ops (parameterized acc, num_elems, dtype)
 # ==============================================================================
 
 
@@ -251,34 +282,37 @@ def _build_wgmma_64x64_fn_body():
             "}\n")
 
 
-def codegen_wgmma_init_accum_64x64():
-    return Builtin(body="", includes=[], return_val="float acc64[32];\nfor(int _i=0; _i<32; _i++) acc64[_i]=0.0f")
+def codegen_wgmma_init_accum_64x64(acc, num_elems, dtype_cpp):
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(body="", includes=[], return_val=f"for(int _i=0; _i<{num_elems}; _i++) {acc}[_i]={zero}")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_init_accum_64x64)
-def wgmma_init_accum_64x64():
-    """Declare and zero the WGMMA m64n64 accumulator (32 floats named acc64)."""
+def wgmma_init_accum_64x64(acc, num_elems, dtype):
+    """Zero the WGMMA m64n64 accumulator (user declares via ll.empty)."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_zero_accum_64x64():
-    return Builtin(body="", includes=[], return_val="do {} while(0);\nfor(int _i=0; _i<32; _i++) acc64[_i]=0.0f")
+def codegen_wgmma_zero_accum_64x64(acc, num_elems, dtype_cpp):
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(body="", includes=[],
+                   return_val=f"do {{}} while(0);\nfor(int _i=0; _i<{num_elems}; _i++) {acc}[_i]={zero}")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_zero_accum_64x64)
-def wgmma_zero_accum_64x64():
+def wgmma_zero_accum_64x64(acc, num_elems, dtype):
     """Zero the WGMMA m64n64 accumulator."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_compute_64x64(desc_a, desc_b):
+def codegen_wgmma_compute_64x64(acc, desc_a, desc_b):
     return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
-                   return_val=f"wgmma_m64n64k16_fn_(acc64, {desc_a}, {desc_b})")
+                   return_val=f"wgmma_m64n64k16_fn_({acc}, {desc_a}, {desc_b})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute_64x64)
-def wgmma_compute_64x64(desc_a, desc_b):
-    """Execute WGMMA m64n64k16 on the internal 32-float accumulator."""
+def wgmma_compute_64x64(acc, desc_a, desc_b):
+    """Execute WGMMA m64n64k16 on the given accumulator."""
     raise RuntimeError("should not be called")
 
 
@@ -320,39 +354,39 @@ def wgmma_fence_operand_array(arr, count):
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_fence_acc64():
+def codegen_wgmma_fence_acc64(acc, num_elems):
     body = """
-__device__ __forceinline__ void wgmma_fence_acc64_fn(float* a) {
+__device__ __forceinline__ void wgmma_fence_acc64_fn(float* a, int n) {
     #pragma unroll
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < n; i++) {
         asm volatile("" : "+f"(a[i]) :: "memory");
     }
 }
 """
-    return Builtin(body=body, includes=[], return_val="wgmma_fence_acc64_fn(acc64)")
+    return Builtin(body=body, includes=[], return_val=f"wgmma_fence_acc64_fn({acc}, {num_elems})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_fence_acc64)
-def wgmma_fence_acc64():
-    """Fence all 32 registers in the m64n64 accumulator (acc64)."""
+def wgmma_fence_acc64(acc, num_elems):
+    """Fence the m64n64 accumulator array."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_fence_acc():
+def codegen_wgmma_fence_acc(acc, num_elems):
     body = """
-__device__ __forceinline__ void wgmma_fence_acc_fn(float* a) {
+__device__ __forceinline__ void wgmma_fence_acc_fn(float* a, int n) {
     #pragma unroll
-    for (int i = 0; i < 128; i++) {
+    for (int i = 0; i < n; i++) {
         asm volatile("" : "+f"(a[i]) :: "memory");
     }
 }
 """
-    return Builtin(body=body, includes=[], return_val="wgmma_fence_acc_fn(acc)")
+    return Builtin(body=body, includes=[], return_val=f"wgmma_fence_acc_fn({acc}, {num_elems})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_fence_acc)
-def wgmma_fence_acc():
-    """Fence all 128 registers in the m64n256 accumulator (acc)."""
+def wgmma_fence_acc(acc, num_elems):
+    """Fence the m64n256 accumulator array."""
     raise RuntimeError("should not be called")
 
 
@@ -361,7 +395,7 @@ def wgmma_fence_acc():
 # ==============================================================================
 
 
-def codegen_store_acc64_to_global_f32(C, bm, bn, M, N, tid):
+def codegen_store_acc64_to_global_f32(C, acc, bm, bn, M, N, tid):
     body = """
 __device__ __forceinline__ void get_coord_64x64_(int tid, int reg, int& row, int& col) {
     int t0 = tid % 4, t1 = (tid / 4) % 8, t2 = tid / 32;
@@ -381,16 +415,15 @@ __device__ __forceinline__ void store_acc64_global_f32_fn(
 }
 """
     return Builtin(body=body, includes=[],
-                   return_val=f"store_acc64_global_f32_fn({C}, acc64, {bm}, {bn}, {M}, {N}, {tid})")
+                   return_val=f"store_acc64_global_f32_fn({C}, {acc}, {bm}, {bn}, {M}, {N}, {tid})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_store_acc64_to_global_f32)
-def store_acc64_to_global_f32(C, bm, bn, M, N, tid):
-    """Store m64n64 accumulator (acc64) to global float32 memory."""
+def store_acc64_to_global_f32(C, acc, bm, bn, M, N, tid):
+    """Store m64n64 accumulator to global float32 memory."""
     raise RuntimeError("should not be called")
 
 
-# Generic version that takes accumulator as a parameter (for multi-tile kernels)
 def codegen_store_acc_f32_to_global(C, acc, bm, bn, M, N, tid):
     body = """
 __device__ __forceinline__ void get_coord_64x64_g_(int tid, int reg, int& row, int& col) {
@@ -420,115 +453,88 @@ def store_acc_f32_to_global(C, acc, bm, bn, M, N, tid):
     raise RuntimeError("should not be called")
 
 
-# Generic version that takes accumulator as a parameter (for multi-tile kernels)
-def codegen_store_acc_f32_to_global(C, acc, bm, bn, M, N, tid):
-    body = """
-__device__ __forceinline__ void get_coord_64x64_g_(int tid, int reg, int& row, int& col) {
-    int t0 = tid % 4, t1 = (tid / 4) % 8, t2 = tid / 32;
-    int r0 = reg % 2, r1 = (reg / 2) % 2, r2 = reg / 4;
-    int lin = t0 * 128 + t1 * 1 + t2 * 16 + r0 * 64 + r1 * 8 + r2 * 512;
-    row = lin % 64; col = lin / 64;
-}
-__device__ __forceinline__ void store_acc_global_f32_fn(
-    float* C, float* ac, int bm, int bn, int M, int N, int tid) {
-    #pragma unroll
-    for (int r = 0; r < 32; r++) {
-        int lm, ln;
-        get_coord_64x64_g_(tid, r, lm, ln);
-        int gm = bm + lm, gn = bn + ln;
-        if (gm < M && gn < N) C[(int64_t)gm * N + gn] = ac[r];
-    }
-}
-"""
-    return Builtin(body=body, includes=[],
-                   return_val=f"store_acc_global_f32_fn({C}, {acc}, {bm}, {bn}, {M}, {N}, {tid})")
-
-
 # ==============================================================================
 # Multi-accumulator support for 2x2 tiling (128x128 with 4x m64n64k16)
 # ==============================================================================
 
 
-def codegen_wgmma_init_4acc():
-    return Builtin(
-        body="", includes=[], return_val="float acc_00[32], acc_01[32], acc_10[32], acc_11[32];\n"
-        "for(int _i=0;_i<32;_i++){acc_00[_i]=0.f;acc_01[_i]=0.f;acc_10[_i]=0.f;acc_11[_i]=0.f;}")
+def codegen_wgmma_init_4acc(acc_00, acc_01, acc_10, acc_11, num_elems, dtype_cpp):
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    loop = (f"for(int _i=0;_i<{num_elems};_i++){{{acc_00}[_i]={zero};{acc_01}[_i]={zero};"
+            f"{acc_10}[_i]={zero};{acc_11}[_i]={zero};}}")
+    return Builtin(body="", includes=[], return_val=loop)
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_init_4acc)
-def wgmma_init_4acc():
-    """Declare and zero 4 m64n64 accumulators (acc_00, acc_01, acc_10, acc_11)."""
+def wgmma_init_4acc(acc_00, acc_01, acc_10, acc_11, num_elems, dtype):
+    """Zero 4 m64n64 accumulators (user declares via ll.empty)."""
     raise RuntimeError("should not be called")
 
 
-def _mk_compute_4acc(idx):
-
-    def codegen_fn(desc_a, desc_b):
-        return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
-                       return_val=f"wgmma_m64n64k16_fn_(acc_{idx}, {desc_a}, {desc_b})")
-
-    return codegen_fn
+def codegen_wgmma_compute_00(acc_00, da, db):
+    return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
+                   return_val=f"wgmma_m64n64k16_fn_({acc_00}, {da}, {db})")
 
 
-def codegen_wgmma_compute_00(da, db):
-    return _mk_compute_4acc("00")(da, db)
+def codegen_wgmma_compute_01(acc_01, da, db):
+    return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
+                   return_val=f"wgmma_m64n64k16_fn_({acc_01}, {da}, {db})")
 
 
-def codegen_wgmma_compute_01(da, db):
-    return _mk_compute_4acc("01")(da, db)
+def codegen_wgmma_compute_10(acc_10, da, db):
+    return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
+                   return_val=f"wgmma_m64n64k16_fn_({acc_10}, {da}, {db})")
 
 
-def codegen_wgmma_compute_10(da, db):
-    return _mk_compute_4acc("10")(da, db)
-
-
-def codegen_wgmma_compute_11(da, db):
-    return _mk_compute_4acc("11")(da, db)
+def codegen_wgmma_compute_11(acc_11, da, db):
+    return Builtin(body=_build_wgmma_64x64_fn_body(), includes=[],
+                   return_val=f"wgmma_m64n64k16_fn_({acc_11}, {da}, {db})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute_00)
-def wgmma_compute_00(desc_a, desc_b):
+def wgmma_compute_00(acc_00, desc_a, desc_b):
     """WGMMA m64n64k16 on acc_00."""
     raise RuntimeError("should not be called")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute_01)
-def wgmma_compute_01(desc_a, desc_b):
+def wgmma_compute_01(acc_01, desc_a, desc_b):
     """WGMMA m64n64k16 on acc_01."""
     raise RuntimeError("should not be called")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute_10)
-def wgmma_compute_10(desc_a, desc_b):
+def wgmma_compute_10(acc_10, desc_a, desc_b):
     """WGMMA m64n64k16 on acc_10."""
     raise RuntimeError("should not be called")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_compute_11)
-def wgmma_compute_11(desc_a, desc_b):
+def wgmma_compute_11(acc_11, desc_a, desc_b):
     """WGMMA m64n64k16 on acc_11."""
     raise RuntimeError("should not be called")
 
 
-def codegen_wgmma_fence_4acc():
+def codegen_wgmma_fence_4acc(acc_00, acc_01, acc_10, acc_11, num_elems):
     body = """
-__device__ __forceinline__ void wgmma_fence_4acc_fn(float* a0, float* a1, float* a2, float* a3) {
+__device__ __forceinline__ void wgmma_fence_4acc_fn(float* a0, float* a1, float* a2, float* a3, int n) {
     #pragma unroll
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < n; i++) {
         asm volatile("" : "+f"(a0[i]), "+f"(a1[i]), "+f"(a2[i]), "+f"(a3[i]) :: "memory");
     }
 }
 """
-    return Builtin(body=body, includes=[], return_val="wgmma_fence_4acc_fn(acc_00, acc_01, acc_10, acc_11)")
+    return Builtin(body=body, includes=[],
+                   return_val=f"wgmma_fence_4acc_fn({acc_00}, {acc_01}, {acc_10}, {acc_11}, {num_elems})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_wgmma_fence_4acc)
-def wgmma_fence_4acc():
+def wgmma_fence_4acc(acc_00, acc_01, acc_10, acc_11, num_elems):
     """Fence all 4 m64n64 accumulators."""
     raise RuntimeError("should not be called")
 
 
-def codegen_store_4acc_to_global_f32(C, bm, bn, M, N, tid):
+def codegen_store_4acc_to_global_f32(C, acc_00, acc_01, acc_10, acc_11, bm, bn, M, N, tid):
     body = """
 __device__ __forceinline__ void get_coord_4ac_(int tid, int reg, int& row, int& col) {
     int t0 = tid % 4, t1 = (tid / 4) % 8, t2 = tid / 32;
@@ -554,12 +560,13 @@ __device__ __forceinline__ void store_4acc_f32_fn(
     }
 }
 """
-    return Builtin(body=body, includes=[],
-                   return_val=f"store_4acc_f32_fn({C}, acc_00, acc_01, acc_10, acc_11, {bm}, {bn}, {M}, {N}, {tid})")
+    return Builtin(
+        body=body, includes=[],
+        return_val=f"store_4acc_f32_fn({C}, {acc_00}, {acc_01}, {acc_10}, {acc_11}, {bm}, {bn}, {M}, {N}, {tid})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_store_4acc_to_global_f32)
-def store_4acc_to_global_f32(C, bm, bn, M, N, tid):
+def store_4acc_to_global_f32(C, acc_00, acc_01, acc_10, acc_11, bm, bn, M, N, tid):
     """Store 4 m64n64 accumulators (2x2 layout) to global float32."""
     raise RuntimeError("should not be called")
 
@@ -569,7 +576,7 @@ def store_4acc_to_global_f32(C, bm, bn, M, N, tid):
 # ==============================================================================
 
 
-def codegen_store_acc_to_global_n256(C, bm, bn, M, N, tid):
+def codegen_store_acc_to_global_n256(C, acc, bm, bn, M, N, tid):
     body = ("\n__device__ __forceinline__ void get_coord_n256_fn("
             "int ltid, int r, int& row, int& col) {\n"
             "    int chunk = r / 32;\n"
@@ -591,12 +598,12 @@ def codegen_store_acc_to_global_n256(C, bm, bn, M, N, tid):
             "    }\n"
             "}\n")
     return Builtin(body=body, includes=[],
-                   return_val=f"store_acc_global_n256_fn({C}, acc, {bm}, {bn}, {M}, {N}, {tid})")
+                   return_val=f"store_acc_global_n256_fn({C}, {acc}, {bm}, {bn}, {M}, {N}, {tid})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_store_acc_to_global_n256)
-def store_acc_to_global_n256(C, bm, bn, M, N, tid):
-    """Store m64n256 accumulator (128 regs named acc) to global float32."""
+def store_acc_to_global_n256(C, acc, bm, bn, M, N, tid):
+    """Store m64n256 accumulator to global float32."""
     raise RuntimeError("should not be called")
 
 
@@ -605,7 +612,7 @@ def store_acc_to_global_n256(C, bm, bn, M, N, tid):
 # ==============================================================================
 
 
-def codegen_store_acc_to_smem_bf16_n256(sC, ltid, row_offset):
+def codegen_store_acc_to_smem_bf16_n256(sC, acc, ltid, row_offset):
     body = ("\n__device__ __forceinline__ void store_acc_smem_bf16_n256_fn(\n"
             "    __nv_bfloat16* sC, float* ac, int ltid, int row_offset) {\n"
             "    int warp = ltid >> 5;\n"
@@ -623,10 +630,10 @@ def codegen_store_acc_to_smem_bf16_n256(sC, ltid, row_offset):
             "    }\n"
             "}\n")
     return Builtin(body=body, includes=["<cuda_bf16.h>"],
-                   return_val=f"store_acc_smem_bf16_n256_fn({sC}, acc, {ltid}, {row_offset})")
+                   return_val=f"store_acc_smem_bf16_n256_fn({sC}, {acc}, {ltid}, {row_offset})")
 
 
 @builtin(eval_return_type=void, codegen_func=codegen_store_acc_to_smem_bf16_n256)
-def store_acc_to_smem_bf16_n256(sC, ltid, row_offset):
-    """Store m64n256 accumulator (acc[128]) to SMEM as BF16 row-major."""
+def store_acc_to_smem_bf16_n256(sC, acc, ltid, row_offset):
+    """Store m64n256 accumulator to SMEM as BF16 row-major."""
     raise RuntimeError("should not be called")

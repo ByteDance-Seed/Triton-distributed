@@ -114,7 +114,8 @@ def gemm_v3_kernel(
                 p_k = p_k + 1
     # ======================== Consumer warpgroup ========================
     else:
-        ll.wgmma_init_accum_64x64()
+        acc64 = ll.empty([32], dtype=ll.float32, scope="local")
+        ll.wgmma_init_accum_64x64(acc64, 32, ll.float32)
 
         base_desc_a: ll.uint32 = ll.cvta_generic_to_shared(A_smem[0]) >> 4
         base_desc_b: ll.uint32 = ll.cvta_generic_to_shared(B_smem[0]) >> 4
@@ -126,7 +127,7 @@ def gemm_v3_kernel(
             ll.mbarrier_wait(full_barriers[c_stage], c_phase)
             ll.__syncwarp()
 
-            ll.wgmma_fence_acc64()
+            ll.wgmma_fence_acc64(acc64, 32)
             ll.wgmma_fence()
 
             a_s_off: ll.uint32 = ll.uint32(c_stage) * A_STAGE_STRIDE
@@ -135,10 +136,10 @@ def gemm_v3_kernel(
                 k_off: ll.int32 = ki * 2 // 16
                 da: ll.uint64 = ll.uint64((base_desc_a + a_s_off + k_off) & 0x3FFF) | DESC_HI
                 db: ll.uint64 = ll.uint64((base_desc_b + b_s_off + k_off) & 0x3FFF) | DESC_HI
-                ll.wgmma_compute_64x64(da, db)
+                ll.wgmma_compute_64x64(acc64, da, db)
 
             ll.wgmma_commit()
-            ll.wgmma_fence_acc64()
+            ll.wgmma_fence_acc64(acc64, 32)
             ll.wgmma_wait()
 
             if lane == 0:
@@ -151,7 +152,7 @@ def gemm_v3_kernel(
                 c_phase = c_phase ^ 1
             c_k = c_k + 1
 
-        ll.store_acc64_to_global_f32(C, bm, bn, M, N, ltid)
+        ll.store_acc64_to_global_f32(C, acc64, bm, bn, M, N, ltid)
 
 
 def build_kernel():

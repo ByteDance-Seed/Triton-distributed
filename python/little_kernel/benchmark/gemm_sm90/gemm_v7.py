@@ -139,7 +139,7 @@ def gemm_v7_kernel(
                         p_phase = p_phase ^ 1
                     p_k = p_k + 1
         else:
-            ll.wgmma_init_accum()
+            acc = ll.zeros([128], dtype=ll.float32, scope="local")
             a_m_off: ll.uint32 = ll.uint32(wg - 1) * M_TILE_STRIDE
             m_wg_off: ll.int32 = (wg - 1) * 64
 
@@ -159,7 +159,7 @@ def gemm_v7_kernel(
                     k_off: ll.int32 = ki * 2 // 16
                     da: ll.uint64 = ll.uint64((base_desc_a + a_s_off + a_m_off + k_off) & 0x3FFF) | DESC_HI
                     db: ll.uint64 = ll.uint64((base_desc_b + b_s_off + k_off) & 0x3FFF) | DESC_HI
-                    ll.wgmma_compute(da, db)
+                    ll.wgmma_compute(acc, da, db)
                 ll.wgmma_commit()
                 ll.wgmma_wait()
                 if lane < CLUSTER_SIZE:
@@ -170,7 +170,7 @@ def gemm_v7_kernel(
                     c_stage = 0
                     c_phase = c_phase ^ 1
                 c_k = c_k + 1
-            ll.store_acc_to_global_n256(C, t_bm + m_wg_off, t_bn, M, N, ltid)
+            ll.store_acc_to_global_n256(C, acc, t_bm + m_wg_off, t_bn, M, N, ltid)
 
         ll.cluster_sync()
         p_tile = p_tile + num_clusters

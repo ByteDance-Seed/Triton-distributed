@@ -30,7 +30,7 @@ from collections import OrderedDict
 
 from little_kernel.core.type_system import get_dtype_size
 from .utils.resolve_attribute import recursive_resolve_attribute
-from little_kernel.language.intrin.memory import empty, align_memory
+from little_kernel.language.intrin.memory import empty, zeros, align_memory
 from little_kernel.core.internal import __LITTLE_KERNEL_ENTRY__
 from .utils.extract_empty_params import extract_empty_params, get_shape_size
 
@@ -66,8 +66,11 @@ class MemoryAnalyzer(ast.NodeVisitor):
         """
         align_memory_signature = inspect.signature(align_memory)
         valid = isinstance(node.parent, ast.Expr)
-        valid = valid and isinstance(node.parent.parent, ast.FunctionDef)
-        valid = valid and self.ctx[__LITTLE_KERNEL_ENTRY__].__name__ == node.parent.parent.name
+        if valid:
+            parent = node.parent
+            while parent is not None and not isinstance(parent, ast.FunctionDef):
+                parent = getattr(parent, "parent", None)
+            valid = parent is not None and self.ctx[__LITTLE_KERNEL_ENTRY__].__name__ == parent.name
         if not valid:
             raise ValueError(
                 f"ll.align_memory must be called inside the body of main function, see {ast.unparse(node)}")
@@ -113,9 +116,17 @@ class MemoryAnalyzer(ast.NodeVisitor):
         if self.first_mem_call[scope] is None:
             self.first_mem_call[scope] = node.parent
 
+    def _handle_zeros_call(self, node: ast.Call) -> None:
+        """Handle `ll.zeros` like ll.empty (same shape/dtype/scope, alloc+zero)."""
+        self._handle_empty_like_call(node, "ll.zeros")
+
     def _handle_empty_call(self, node: ast.Call) -> None:
+        """Handle `ll.empty` calls."""
+        self._handle_empty_like_call(node, "ll.empty")
+
+    def _handle_empty_like_call(self, node: ast.Call, api_name: str) -> None:
         """
-        Handle `ll.empty` calls, extract shape, dtype, and scope, then update memory analysis.
+        Handle `ll.empty` / `ll.zeros` calls, extract shape, dtype, and scope, then update memory analysis.
         """
         # Trace back to find the variable name being assigned (e.g., "D_smem_tensor" in "D_smem_tensor = ll.empty(...)")
         var_name = None
@@ -135,41 +146,45 @@ class MemoryAnalyzer(ast.NodeVisitor):
                 raise NotImplementedError(f"Unsupported target type for ll.empty: {type(target).__name__}")
         if not var_name:
             raise RuntimeError(
-                f"ll.empty call is not assigned to a variable: {ast.dump(node)}\nMaybe should use flatten_empty pass first."
+                f"{api_name} call is not assigned to a variable: {ast.dump(node)}\nMaybe should use flatten_empty pass first."
             )
 
-        valid = isinstance(node.parent.parent, ast.FunctionDef)
-        valid = valid and self.ctx[__LITTLE_KERNEL_ENTRY__].__name__ == node.parent.parent.name
+        # Find enclosing FunctionDef (may be nested inside if/while/for)
+        parent = node.parent
+        while parent is not None and not isinstance(parent, ast.FunctionDef):
+            parent = getattr(parent, "parent", None)
+        valid = parent is not None and self.ctx[__LITTLE_KERNEL_ENTRY__].__name__ == parent.name
         if not valid:
             raise ValueError(
-                f"ll.empty must be called inside the body of main function, see {ast.unparse(node)}\nMaybe should use flatten_empty pass first."
+                f"{api_name} must be called inside the body of main function, see {ast.unparse(node)}\nMaybe should use flatten_empty pass first."
             )
 
         shape_expr, dtype_expr, scope_expr = extract_empty_params(node)
         assert isinstance(dtype_expr,
-                          ast.Constant), f"ll.empty dtype must be a constant, got {type(dtype_expr).__name__}"
+                          ast.Constant), f"{api_name} dtype must be a constant, got {type(dtype_expr).__name__}"
         dtype = dtype_expr.value
         assert isinstance(scope_expr,
-                          ast.Constant), f"ll.empty scope must be a constant, got {type(scope_expr).__name__}"
+                          ast.Constant), f"{api_name} scope must be a constant, got {type(scope_expr).__name__}"
         scope = scope_expr.value
         total_elements = get_shape_size(shape_expr)
 
         # Calculate total bytes for this allocation
         element_size = get_dtype_size(dtype)
         total_bytes = int(total_elements * element_size)
-        assert total_bytes > 0, f"ll.empty call for {var_name} with shape {shape_expr} and dtype {dtype} results in zero bytes allocation"
+        assert total_bytes > 0, f"{api_name} call for {var_name} with shape {shape_expr} and dtype {dtype} results in zero bytes allocation"
 
         # Record offset (current offset before allocation) and update scope offset
         offset = self.scope_offsets[scope]
         self.scope_offsets[scope] += total_bytes
 
-        # Store detailed info about this variable
+        # Store detailed info about this variable (empty and zeros both go here)
         if var_name in self.variables:
-            raise ValueError(f"ll.empty call for {var_name} has already been recorded")
+            raise ValueError(f"{api_name} call for {var_name} has already been recorded")
         self.variables[var_name] = ({
             "name": var_name, "expr": var_expr, "scope": scope, "dtype": dtype, "element_size": element_size,
             "total_elements": total_elements, "total_bytes": total_bytes, "offset":
-            offset  # Offset within its scope (bytes)
+            offset,  # Offset within its scope (bytes)
+            "is_zeros": (api_name == "ll.zeros"),  # Pass uses this to replace with alloc_local_zeros
         })
 
         # record the call if it's the first
@@ -195,6 +210,8 @@ class MemoryAnalyzer(ast.NodeVisitor):
             # For alloc by empty
             elif func.__name__ == empty.__name__:
                 self._handle_empty_call(node)
+            elif func.__name__ == zeros.__name__:
+                self._handle_zeros_call(node)
 
         self.generic_visit(node)
 

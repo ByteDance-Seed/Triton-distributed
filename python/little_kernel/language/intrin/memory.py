@@ -143,6 +143,45 @@ def empty(shape: list, dtype: LLType, scope: str):
     raise RuntimeError("empty should never be called in compilation")
 
 
+# Zero literal for C++ codegen (decl+init in one)
+_ZERO_LITERAL = {"float": "0.0f", "float32": "0.0f", "double": "0.0", "float64": "0.0"}
+
+
+def codegen_alloc_local_zeros(var_name, dtype_cpp, elems):
+    """Emit local decl + zero loop in one (stable codegen order, no pattern matching)."""
+    zero = _ZERO_LITERAL.get(str(dtype_cpp), "0.0f")
+    return Builtin(
+        body="",
+        includes=[],
+        return_val=f"{dtype_cpp} {var_name}[{elems}];\nfor(int _i=0; _i<{elems}; _i++) {var_name}[_i]={zero}",
+    )
+
+
+def alloc_local_zeros_eval_arg_type(ctx, var_name, dtype, elems):
+    ctx[var_name] = Tensor[dtype]
+
+
+@builtin(
+    eval_return_type=void,
+    eval_arg_type=alloc_local_zeros_eval_arg_type,
+    codegen_func=codegen_alloc_local_zeros,
+)
+def alloc_local_zeros(var_name: str, dtype: LLType, elems: int):
+    """Allocate local memory and zero it (internal: inserted by pass for x = ll.zeros(..., scope=\"local\"))."""
+    raise RuntimeError("alloc_local_zeros should never be called in compilation")
+
+
+def codegen_zeros(shape, dtype, scope):
+    """User-facing zeros is replaced by pass for local scope; never codegen directly."""
+    raise RuntimeError("ll.zeros must be used as x = ll.zeros(..., scope=\"local\") and is replaced by the pass")
+
+
+@builtin(eval_return_type=lambda shape, dtype, scope: Tensor[dtype], codegen_func=codegen_zeros)
+def zeros(shape: list, dtype: LLType, scope: str):
+    """Allocate and zero-initialize (same shape/dtype/scope as empty). Use x = ll.zeros(...); one intrinsic, no separate init."""
+    raise RuntimeError("zeros should never be called in compilation")
+
+
 def codegen_ldcg(ptr, offset):
     return Builtin(body="", includes=["<device_functions.h>"], return_val=f"__ldcg({ptr} + {offset})")
 

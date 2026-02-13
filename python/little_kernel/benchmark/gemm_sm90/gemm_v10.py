@@ -166,7 +166,7 @@ def gemm_v10_kernel(
             c_bn: ll.int32 = tile_n_c * BN
             c_bm: ll.int32 = tile_m_c * (BM * CLUSTER_SIZE) + ll.val_cast(cta, ll.int32) * BM
 
-            ll.wgmma_init_accum()
+            acc = ll.zeros([128], dtype=ll.float32, scope="local")
 
             ck: ll.int32 = 0
             while ck < nk:
@@ -179,7 +179,7 @@ def gemm_v10_kernel(
                     k_off: ll.int32 = ki * 2 // 16
                     da: ll.uint64 = ll.uint64((base_desc_a + a_s_off + a_m_off + k_off) & 0x3FFF) | DESC_HI
                     db: ll.uint64 = ll.uint64((base_desc_b + b_s_off + k_off) & 0x3FFF) | DESC_HI
-                    ll.wgmma_compute(da, db)
+                    ll.wgmma_compute(acc, da, db)
                 ll.wgmma_commit()
                 ll.wgmma_wait()
                 if lane < CLUSTER_SIZE:
@@ -200,7 +200,7 @@ def gemm_v10_kernel(
             c_first = 0
 
             # Store acc to SMEM with B128 swizzle using STSM
-            ll.store_accum_swizzle(D_smem, warp_in_wg, lane, m_wg_off)
+            ll.store_accum_swizzle(acc, D_smem, warp_in_wg, lane, m_wg_off)
 
             # Fence and sync math warpgroups
             ll.tma_store_fence()

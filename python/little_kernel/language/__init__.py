@@ -102,6 +102,7 @@ from .intrin.memory import (
     __ldcg,
     __ldca,
     empty,
+    zeros,
     align_memory,
     alloc_dynamic_shared_memory,
     alloc_local_memory,
