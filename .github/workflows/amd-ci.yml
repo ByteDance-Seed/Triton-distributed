@@ -45,6 +45,8 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_rocshmem_api.py
           # distributed ops
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_distributed-notify-wait.py
+          # all-gather
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_allgather.py
           # ag gemm
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
           # gemm rs
