@@ -46,14 +46,17 @@ def pathlib_wrapper(func):
 
     def wrapper(*kargs, **kwargs):
         include_dirs, library_dirs, libraries = func(*kargs, **kwargs)
-        return map(str, include_dirs), map(str, library_dirs), map(str, libraries)
+        return map(str, include_dirs), map(str,
+                                           library_dirs), map(str, libraries)
 
     return wrapper
 
 
 @pathlib_wrapper
 def rocshmem_deps():
-    rocshmem_home = Path(os.environ.get("ROCSHMEM_HOME", root_path / "../rocshmem_build/install"))
+    rocshmem_home = Path(
+        os.environ.get("ROCSHMEM_HOME",
+                       root_path / "../rocshmem_build/install"))
     include_dirs = [rocshmem_home / "include"]
     library_dirs = [rocshmem_home / "lib"]
     libraries = []
@@ -85,8 +88,9 @@ def hip_deps():
     include_dirs = [hip_home / "include"]
     library_dirs = [hip_home / "lib"]
     libraries = [
-        "amdhip64", "hiprtc", "hsa-runtime64", "hipfft", "amd_comgr", "rocrand", "hiprand", "rocblas", "hipblaslt",
-        "hipfft", "hipsparse", "rccl", "hipsolver", "ibverbs"
+        "amdhip64", "hiprtc", "hsa-runtime64", "hipfft", "amd_comgr",
+        "rocrand", "hiprand", "rocblas", "hipblaslt", "hipfft", "hipsparse",
+        "rccl", "hipsolver", "ibverbs"
     ]
     return include_dirs, library_dirs, libraries
 
@@ -134,7 +138,10 @@ def setup_pytorch_extension() -> setuptools.Extension:
         libraries=libraries,
         dlink=True,
         dlink_libraries=[],
-        extra_compile_args={"cxx": cxx_flags, "hipcc": ["-fgpu-rdc"]},
+        extra_compile_args={
+            "cxx": cxx_flags,
+            "hipcc": ["-fgpu-rdc"]
+        },
         extra_link_args=ld_flags,
     )
 

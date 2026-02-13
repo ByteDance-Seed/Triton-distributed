@@ -107,14 +107,13 @@ def test_ag_gemm(args):
     ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, num_local_ranks=LOCAL_WORLD_SIZE)
     if rank == 0:
         print(f"all gather with: {ctx.all_gather_method}")
-    
-        
+
     for i in range(5):
         # every time, use a new input data to check correctness
         A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
         ctx.symm_workspace[:M].random_()
         if not args.local_copy:
-            ctx.symm_workspace[rank * M // num_ranks: min(M, (rank + 1) * M // num_ranks)].copy_(A)
+            ctx.symm_workspace[rank * M // num_ranks:min(M, (rank + 1) * M // num_ranks)].copy_(A)
         C_triton = ag_gemm(A, B, ctx=ctx, autotune=args.autotune, local_copy=args.local_copy)
         C_torch = ag_gemm_torch(A, B, args.default_group)
 
@@ -143,9 +142,10 @@ def perf_ag_gemm(args):
     A, B = make_data(M, N, K, dtype, args.trans_b, args.default_group)
 
     ctx = create_ag_gemm_context(M, N, K, dtype, rank, num_ranks, LOCAL_WORLD_SIZE)
-    
+
     if not args.local_copy:
-        ctx.symm_workspace[rank * M // num_ranks: min(M, (rank + 1) * M // num_ranks)].copy_(A)
+        ctx.symm_workspace[rank * M // num_ranks:min(M, (rank + 1) * M // num_ranks)].copy_(A)
+
     def func():
         return ag_gemm(A, B, ctx=ctx, autotune=args.autotune, local_copy=args.local_copy)
 

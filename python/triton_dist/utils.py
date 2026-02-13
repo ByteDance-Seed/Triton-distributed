@@ -56,6 +56,22 @@ def is_cuda():
         return False
 
 
+if is_cuda():
+    # Use cuda.core.experimental.Device; requires cuda-python (e.g. 12.4). If you see
+    # cudaErrorInsufficientDriver, ensure cuda-bindings (e.g. 13.x) is not installed,
+    # as it overrides the CUDA runtime and can require a newer driver.
+    from cuda.core.experimental import Device
+
+    try:
+        from cuda import cuda as _cuda, cudart as _cudart
+        cuda = _cuda
+        cudart = _cudart
+    except Exception:
+        from cuda.bindings import driver, runtime
+        cuda = driver
+        cudart = runtime
+
+
 def is_hip():
     if shutil.which("rocm-smi"):
         return True
@@ -97,7 +113,6 @@ def is_mori_shmem():
 if is_cuda():
     import nvshmem
     import nvshmem.core
-    from cuda import cuda, cudart
     from .nv_utils import (
         get_numa_node,
         _get_pynvml_device_id,
@@ -219,7 +234,6 @@ def init_nvshmem_by_torch_process_group(pg: torch.distributed.ProcessGroup):
     broadcast_objects = [nvshmem.core.get_unique_id(empty=rank_id != 0)]
     torch.distributed.broadcast_object_list(broadcast_objects, src=torch.distributed.get_global_rank(pg, 0), group=pg)
     torch.distributed.barrier(group=pg)
-    from cuda.core.experimental import Device
     nvshmem.core.init(device=Device(torch.cuda.current_device()), uid=broadcast_objects[0], rank=rank_id,
                       nranks=num_ranks, initializer_method="uid")
     # nvshmem.core.utils._configure_logging("DEBUG")

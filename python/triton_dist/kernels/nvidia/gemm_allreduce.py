@@ -487,7 +487,7 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
                                       BLOCK_SIZE_K: tl.constexpr,  #
                                       GROUP_SIZE_M: tl.constexpr,  #
                                       NUM_GEMM_SMS: tl.constexpr,  #
-                                      EPILOGUE_SUBTILE: tl.constexpr = False, #
+                                      EPILOGUE_SUBTILE: tl.constexpr = False,  #
                                       FUSE_START_OFFSET: tl.constexpr = 0):
     a_desc = tl.make_tensor_descriptor(
         a_ptr,
@@ -536,7 +536,6 @@ def kernel_persistent_tma_gemm_notify(a_ptr, b_ptr, c_ptr, gemm_barrier_ptr,  #
         offs_bn = pid_n * BLOCK_SIZE_N
 
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
 
         for ki in tl.range(k_tiles):
             offs_k = ki * BLOCK_SIZE_K

@@ -86,7 +86,7 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
                                        hip.hipMemcpyKind.hipMemcpyHostToDevice)
                 HIP_CHECK(cp_res)
             else:
-                hip.hipGetLastError() # Discard the last error
+                hip.hipGetLastError()  # Discard the last error
         elif backend == 'mori_shmem':
             # Initialize mori_shmem device symbols in this kernel module
             import mori.shmem as mori_shmem

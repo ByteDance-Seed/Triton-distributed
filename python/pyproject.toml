@@ -31,6 +31,11 @@ max_line_length = 88
 
 [tool.ruff]
 line-length = 120
+exclude = [
+    "python/little_kernel/atom/barrier",
+    "python/little_kernel/atom/mma",
+    "python/little_kernel/atom/tma",
+]
 
 [tool.ruff.lint]
 ignore = ["E501", "E701", "E731", "E741"]

@@ -171,8 +171,12 @@ rocshmem_ulong_wait_until_wrapper(void *sig_addr, int cmp, uint64_t cmp_val) {
 }
 
 __device__ void __attribute__((visibility("default")))
-rocshmem_ulong_put_signal_wrapper(void *dest, const void *source, size_t nelems, void *sig_addr, uint64_t signal, int32_t sig_op, int32_t pe) {
-  rocshmem_ulong_put_signal(static_cast<uint64_t *>(dest), static_cast<const uint64_t *>(source), nelems, static_cast<uint64_t *>(sig_addr), signal, sig_op, pe);
+rocshmem_ulong_put_signal_wrapper(void *dest, const void *source, size_t nelems,
+                                  void *sig_addr, uint64_t signal,
+                                  int32_t sig_op, int32_t pe) {
+  rocshmem_ulong_put_signal(
+      static_cast<uint64_t *>(dest), static_cast<const uint64_t *>(source),
+      nelems, static_cast<uint64_t *>(sig_addr), signal, sig_op, pe);
 }
 
 __device__ void __attribute__((visibility("default")))

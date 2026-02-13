@@ -31,7 +31,7 @@ from typing import List
 import math
 
 from dataclasses import dataclass
-from cuda import cudart
+from triton_dist.utils import cudart
 
 import triton_dist
 from triton_dist.utils import CUDA_CHECK, nvshmem_create_tensors, nvshmem_free_tensor_sync

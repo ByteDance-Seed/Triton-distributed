@@ -31,7 +31,7 @@ import torch
 import triton
 import triton_dist
 import triton.language as tl
-from cuda import cudart
+from triton_dist.utils import cudart
 import nvshmem.bindings.nvshmem as pynvshmem
 from triton_dist.kernels.nvidia.common_ops import _set_signal_cuda, _wait_eq_cuda
 from triton_dist.language.extra import libshmem_device

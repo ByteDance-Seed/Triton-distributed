@@ -86,6 +86,14 @@ Python API
 
 .. toctree::
    :maxdepth: 10
+   :caption: LittleKernel
+   :hidden:
+
+   little_kernel/index
+
+
+.. toctree::
+   :maxdepth: 10
    :caption: Advanced Topics
    :hidden:
 

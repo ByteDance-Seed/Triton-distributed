@@ -45,7 +45,7 @@ import pyrocshmem
 from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
 from triton_dist.profiler_utils import perf_func
-from triton_dist.utils import finalize_distributed, initialize_distributed, rocshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, sleep_async
+from triton_dist.utils import finalize_distributed, initialize_distributed, rocshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE
 
 
 @dataclass
@@ -61,7 +61,8 @@ class AllGatherContext:
 
 @triton_dist.jit(do_not_specialize=["rank", "signal_value"])
 def all_gather_push_1d_kernel(symm_ptr, bytes_per_rank, symm_flag,
-                              WORLD_SIZE: tl.constexpr, rank, signal_value, ctx):
+                              WORLD_SIZE: tl.constexpr, rank, signal_value,
+                              ctx):
     libshmem_device.set_rocshmem_ctx(ctx)
     pid = tl.program_id(0)
     thread_idx = tid(0)
@@ -101,14 +102,9 @@ def all_gather_push_1d(ctx: AllGatherContext, symm_buffer: torch.Tensor):
     ctx.signal_value += 1
     rctx = pyrocshmem.rocshmem_get_device_ctx()
     all_gather_push_1d_kernel[(ctx.num_ranks, )](
-        symm_buffer,
-        symm_buffer.nbytes // ctx.num_ranks,
-        ctx.symm_signals[ctx.signal_value % 2],
-        ctx.num_ranks,
-        ctx.rank,
-        ctx.signal_value,
-        rctx
-    )
+        symm_buffer, symm_buffer.nbytes // ctx.num_ranks,
+        ctx.symm_signals[ctx.signal_value % 2], ctx.num_ranks, ctx.rank,
+        ctx.signal_value, rctx)
     return symm_buffer
 
 
@@ -193,7 +189,8 @@ ctx = AllGatherContext(
     num_ranks=WORLD_SIZE,
     num_nodes=NNODES,
     symm_signals=[
-        pyrocshmem.rocshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE) for _ in range(2)
+        pyrocshmem.rocshmem_create_tensor((1, ), NVSHMEM_SIGNAL_DTYPE)
+        for _ in range(2)
     ],
     signal_value=10,
 )

@@ -34,7 +34,7 @@ from string import Template
 import sysconfig
 
 from threading import Lock
-from cuda import cuda
+from triton_dist.utils import cuda
 
 _HAS_PYNVML = False
 try:

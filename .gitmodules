@@ -8,3 +8,6 @@
 	path = 3rdparty/mori
 	url = https://github.com/ROCm/mori.git
 	branch = jiahzhou/triton_dis_support
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
