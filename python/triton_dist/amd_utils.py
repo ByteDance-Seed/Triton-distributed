@@ -28,6 +28,8 @@ import subprocess
 import json
 import warnings
 import re
+import os
+import sys
 from threading import Lock
 from hip import hip
 
@@ -206,7 +208,19 @@ def _get_gpu_uuid_by_physical_device_id(device_id: int):
     _ensure_amdsmi_initialized()
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
-    return amdsmi.amdsmi_get_gpu_device_uuid(handle)
+    # Due to a change in how UUIDs are generated for CPX mode, amdsmi no longer reports any uuid value that
+    # matches HIP/pytorch. HIP gets the value from sysfs, and we can also get the value there by getting
+    # the KFD info from amdsmi and then probing the sysfs directly.
+    kfd_info = amdsmi.amdsmi_get_gpu_kfd_info(handle)
+    node_id = kfd_info["node_id"]
+    kfd_path = os.path.join("/sys/devices/virtual/kfd/kfd/topology/nodes", str(node_id), "properties")
+    key = "unique_id"
+    with open(kfd_path, "r") as fd:
+        for line in fd:
+            if line.startswith(key):
+                uuid_str = line[len(key)+1:]
+    uuid_str = hex(int(uuid_str))
+    return uuid_str
 
 
 def torch_uuid_to_unique_id(torch_uuid: str) -> str:
@@ -232,7 +246,8 @@ def get_uuid_by_physical_device_id(device_id: int | None = None):
     try:
         if has_amdsmi():
             return _get_gpu_uuid_by_physical_device_id(device_id)
-    except Exception:
+    except Exception as e:
+        print(e, file=sys.stderr)
         warnings.warn("get_uuid_by_physical_device_id failed with amdsmi, try using rocm-smi")
 
     return _get_physical_gpu_uuid_rocm(device_id)
