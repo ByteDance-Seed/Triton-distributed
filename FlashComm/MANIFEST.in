@@ -1,0 +1,13 @@
+recursive-include python *.py
+recursive-include python *.pyi
+recursive-include csrc *.h
+recursive-include csrc *.hpp
+recursive-include csrc *.c
+recursive-include csrc *.cc
+recursive-include csrc *.cpp
+recursive-include csrc *.cu
+recursive-include csrc *.cuh
+recursive-include include *.h
+recursive-include include *.hpp
+recursive-include include *.cuh
+global-exclude *.o *.obj *.so *.a *.dylib *.dll
