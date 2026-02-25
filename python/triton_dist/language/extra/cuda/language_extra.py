@@ -111,10 +111,11 @@ def __syncthreads(_semantic=None):
 
 
 @core.extern
-def __fence(scope: core.constexpr = core.constexpr("gpu"), _semantic=None):
+def __fence(
+        semantic: core.constexpr = core.constexpr("sc"), scope: core.constexpr = core.constexpr("gpu"), _semantic=None):
     return core.inline_asm_elementwise(
         asm=f"""
-        fence.sc.{scope.value};
+        fence.{semantic.value}.{scope.value};
         """,
         constraints="=r",  # force have a return value, even not used.
         args=[],
