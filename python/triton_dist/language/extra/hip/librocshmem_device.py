@@ -359,6 +359,22 @@ def putmem_signal_nbi_wave(dest, source, nbytes, sig_addr, signal, sig_op, pe, _
 
 
 @core.extern
+def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
+    return extern_call(
+        "librocshmem_device", "", [
+            tl.cast(sig_addr, pi_u64_t, _semantic=_semantic),
+            tl.cast(signal, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_op, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ], {
+            (pi_u64_t, tl.uint64, tl.int32, tl.int32): (
+                "rocshmem_signal_op",
+                (),
+            ),
+        }, is_pure=False, _semantic=_semantic)
+
+
+@core.extern
 def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
     tl.static_assert(sig_addr.dtype == pi_u64_t or sig_addr.dtype == pi_i64_t,
                      "sig_addr should be a pointer of uint64_t/int64_t", _semantic=_semantic)

@@ -22,6 +22,7 @@
  */
 #include <hip/hip_runtime.h>
 #include <rocshmem/rocshmem.hpp>
+#include <util.hpp>
 using namespace rocshmem;
 
 extern "C" {
@@ -163,6 +164,21 @@ __device__ void __attribute__((visibility("default")))
 rocshmem_putmem_nbi_wg_wrapper(void *dest, const void *source, size_t nbytes,
                                int pe) {
   rocshmem_putmem_nbi_wg(dest, source, nbytes, pe);
+}
+
+__device__ void __attribute__((visibility("default")))
+rocshmem_signal_op(uint64_t *sig_addr, uint64_t signal, int sig_op, int pe) {
+  switch (sig_op) {
+  case ROCSHMEM_SIGNAL_SET:
+    rocshmem_ulong_atomic_set(sig_addr, signal, pe);
+    break;
+  case ROCSHMEM_SIGNAL_ADD:
+    rocshmem_ulong_atomic_add(sig_addr, signal, pe);
+    break;
+  default:
+    DPRINTF("[%s] Invalid sig_op value (%d)\n", __func__, sig_op);
+    break;
+  }
 }
 
 __device__ void __attribute__((visibility("default")))
