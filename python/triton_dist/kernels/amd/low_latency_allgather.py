@@ -31,19 +31,24 @@ import triton_dist
 from triton_dist.kernels.common_ops import pack_b32_v2
 
 from triton_dist.language.extra import libshmem_device
-from triton_dist.language.extra.cuda.language_extra import (
+from triton_dist.language.extra.hip.language_extra import (
     __syncthreads,
     tid,
     ntid,
-    load_v4_u32,
-    load_v2_b64,
-    st_v2_u32,
+    #load_v4_u32,
+    #load_v2_b64,
+    #st_v2_u32,
     st,
-    multimem_st_b64,
+    #multimem_st_b64,
+    load,
 )
 from pyrocshmem import rocshmem_create_tensor
 from triton_dist.utils import NVSHMEM_SIGNAL_DTYPE
 
+load_v4_u32 = load
+load_v2_b64 = load
+st_v2_u32 = st
+multimem_st_b64 = st
 
 @triton_dist.jit(do_not_specialize=["rank", "signal_target"])
 def _forward_pull_kernel(symm_ptr, bytes_per_rank, symm_flag, world_size, rank, signal_target):
@@ -61,7 +66,7 @@ def _forward_pull_kernel(symm_ptr, bytes_per_rank, symm_flag, world_size, rank, 
     else:
         peer = pid
         if thread_idx == 0:
-            libshmem_device.signal_wait_until(symm_flag + peer, libshmem_device.ROCSHMEM_CMP_EQ, signal_target)
+            libshmem_device.signal_wait_until(symm_flag + peer, libshmem_device.ROCSHMEM_CMP_GE, signal_target)
         __syncthreads()
         libshmem_device.getmem_wg(
             tl.cast(symm_ptr, tl.pointer_type(tl.int8)) + peer * bytes_per_rank,
@@ -371,7 +376,7 @@ def _forward_push_2d_kernel(symm_ptr, bytes_per_rank, symm_flag, NNODES, WORLD_S
             if thread_idx < WORLD_SIZE and thread_idx != rank:
                 libshmem_device.signal_wait_until(
                     symm_flag + thread_idx,
-                    libshmem_device.ROCSHMEM_CMP_EQ,
+                    libshmem_device.ROCSHMEM_CMP_GE,
                     signal_target,
                 )
             __syncthreads()
@@ -382,7 +387,7 @@ def _forward_push_2d_kernel(symm_ptr, bytes_per_rank, symm_flag, NNODES, WORLD_S
             if thread_idx == 0:
                 libshmem_device.signal_wait_until(
                     symm_flag + segment,
-                    libshmem_device.ROCSHMEM_CMP_EQ,
+                    libshmem_device.ROCSHMEM_CMP_GE,
                     signal_target,
                 )
             __syncthreads()
@@ -452,7 +457,7 @@ def _forward_push_3d_kernel(
 
                 if wid < NNODES and wid != node_id:
                     peer = wid * LOCAL_WORLD_SIZE + local_rank
-                    libshmem_device.putmem_nbi_warp(
+                    libshmem_device.putmem_nbi_wave(
                         symm_ll_buffer + segment * bytes_per_rank * 2,
                         symm_ll_buffer + segment * bytes_per_rank * 2,
                         bytes_per_rank * 2,
@@ -462,7 +467,7 @@ def _forward_push_3d_kernel(
                 if wid < NNODES and wid != node_id:
                     peer = wid * LOCAL_WORLD_SIZE + local_rank
                     segment = rank
-                    libshmem_device.putmem_signal_nbi_warp(
+                    libshmem_device.putmem_signal_nbi_wave(
                         symm_ptr + segment * bytes_per_rank,
                         symm_ptr + segment * bytes_per_rank,
                         bytes_per_rank,
@@ -476,7 +481,7 @@ def _forward_push_3d_kernel(
             if thread_idx < WORLD_SIZE and thread_idx != rank:
                 libshmem_device.signal_wait_until(
                     symm_flag + thread_idx,
-                    libshmem_device.ROCSHMEM_CMP_EQ,
+                    libshmem_device.ROCSHMEM_CMP_GE,
                     signal_target,
                 )
             __syncthreads()
@@ -487,7 +492,7 @@ def _forward_push_3d_kernel(
             if thread_idx < WORLD_SIZE and (thread_idx % LOCAL_WORLD_SIZE == local_rank and thread_idx != rank):
                 libshmem_device.signal_wait_until(
                     symm_flag + thread_idx,
-                    libshmem_device.ROCSHMEM_CMP_EQ,
+                    libshmem_device.ROCSHMEM_CMP_GE,
                     signal_target,
                 )
             __syncthreads()
@@ -512,7 +517,7 @@ def _forward_push_3d_kernel(
                 if thread_idx == 0:
                     libshmem_device.signal_wait_until(
                         symm_flag + segment,
-                        libshmem_device.ROCSHMEM_CMP_EQ,
+                        libshmem_device.ROCSHMEM_CMP_GE,
                         signal_target,
                     )
                 __syncthreads()

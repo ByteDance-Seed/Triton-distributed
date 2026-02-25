@@ -59,7 +59,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
         return symm_buffer
@@ -73,7 +73,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
         return symm_buffer
@@ -91,7 +91,7 @@ class AllGatherLayer:
             self.rank,
             self.signal_target,
             INTER_NODE_WITH_LL=use_ll_protocol,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
 
@@ -116,7 +116,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
         return symm_buffer
@@ -137,7 +137,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
         return symm_buffer
@@ -156,7 +156,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
 
         self.signal_target += 1
@@ -175,7 +175,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
         return symm_buffer
@@ -191,7 +191,7 @@ class AllGatherLayer:
             self.num_ranks,
             self.rank,
             self.signal_target,
-            num_warps=32,
+            num_warps=16,
         )
         self.signal_target += 1
 
