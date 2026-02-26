@@ -208,19 +208,23 @@ def _get_gpu_uuid_by_physical_device_id(device_id: int):
     _ensure_amdsmi_initialized()
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
-    # Due to a change in how UUIDs are generated for CPX mode, amdsmi no longer reports any uuid value that
-    # matches HIP/pytorch. HIP gets the value from sysfs, and we can also get the value there by getting
-    # the KFD info from amdsmi and then probing the sysfs directly.
-    kfd_info = amdsmi.amdsmi_get_gpu_kfd_info(handle)
-    node_id = kfd_info["node_id"]
-    kfd_path = os.path.join("/sys/devices/virtual/kfd/kfd/topology/nodes", str(node_id), "properties")
-    key = "unique_id"
-    with open(kfd_path, "r") as fd:
-        for line in fd:
-            if line.startswith(key):
-                uuid_str = line[len(key)+1:]
-    uuid_str = hex(int(uuid_str))
-    return uuid_str
+    major_version = int(torch.version.hip.split('.')[0])
+    if major_version >= 7:
+        # Due to a change in how UUIDs are generated for CPX mode, amdsmi no longer reports any uuid value that
+        # matches HIP/pytorch. HIP gets the value from sysfs, and we can also get the value there by getting
+        # the KFD info from amdsmi and then probing the sysfs directly.
+        kfd_info = amdsmi.amdsmi_get_gpu_kfd_info(handle)
+        node_id = kfd_info["node_id"]
+        kfd_path = os.path.join("/sys/devices/virtual/kfd/kfd/topology/nodes", str(node_id), "properties")
+        key = "unique_id"
+        with open(kfd_path, "r") as fd:
+            for line in fd:
+                if line.startswith(key):
+                    uuid_str = line[len(key)+1:]
+        uuid_str = hex(int(uuid_str))
+        return uuid_str
+    else:
+        return amdsmi.amdsmi_get_gpu_device_uuid(handle)
 
 
 def torch_uuid_to_unique_id(torch_uuid: str) -> str:
