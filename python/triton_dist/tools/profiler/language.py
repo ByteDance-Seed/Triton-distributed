@@ -118,11 +118,12 @@ class Profiler:
 
     @triton.jit
     def record(self, is_start, task_type):
+        next_buffer = self.buffer
         if self.ENABLE_PROFILING:
             fence(semantic="sc", scope="cta")
             if self.is_leader:
                 entry = self.get_profile_entry(is_start, task_type)
                 tl.store(self.buffer, entry)
-            self.buffer += self.stride
+            next_buffer = self.buffer + self.stride
             fence(semantic="sc", scope="cta")
-        return self
+        return Profiler(next_buffer, self.stride, self.group_id, self.num_groups, self.is_leader, self.ENABLE_PROFILING)
