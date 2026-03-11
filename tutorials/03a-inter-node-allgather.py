@@ -45,7 +45,7 @@ import pyrocshmem
 from triton_dist.language.extra.language_extra import __syncthreads, tid
 from triton_dist.language.extra import libshmem_device
 from triton_dist.profiler_utils import perf_func
-from triton_dist.utils import finalize_distributed, initialize_distributed, rocshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE
+from triton_dist.utils import finalize_distributed, initialize_distributed, rocshmem_barrier_all_on_stream, NVSHMEM_SIGNAL_DTYPE, sleep_async
 
 
 @dataclass
@@ -139,7 +139,7 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
     print(f"✅ RANK[{RANK}] check passed")
 
     # perf all-gather by NCCL
-    #sleep_async(1000)  # in case CPU bound # Broken in rocm 7+
+    sleep_async(1000)  # in case CPU bound # Broken in rocm 7+
     _, duration_per_iter_ms = perf_func(
         _run_all_gather_nccl,
         warmup_iters=5,
@@ -153,7 +153,7 @@ def perf_ag(func, ag_buffers: torch.Tensor, nbytes: int,
 
     # perf all-gather by triton-distributed
     rocshmem_barrier_all_on_stream(torch.cuda.current_stream())
-    #sleep_async(1000)  # in case CPU bound
+    sleep_async(1000)  # in case CPU bound
     _, duration_per_iter_ms = perf_func(
         _run_all_gather_triton,
         warmup_iters=5,
