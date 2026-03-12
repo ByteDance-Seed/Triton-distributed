@@ -59,6 +59,12 @@ def parse_args():
         default=False,
         help="Enable profiling (default False)",
     )
+    parser.add_argument(
+        "--noperf",
+        action="store_true",
+        default=False,
+        help="Disable performance measurement"
+    )
     parser.add_argument("--stream_priority", "--stream_priority", default=0, type=int,
                         help="stream priority, 0 or -1 supported")
     parser.add_argument("--N", "-N", type=int, default=1376)
@@ -137,25 +143,30 @@ if __name__ == "__main__":
     for name, fn_triton in triton_fns.items():
         torch.distributed.barrier(TP_GROUP)
         fn_triton()
+        torch.cuda.synchronize()
         assert_bitwise_equal(A_full.view(8, -1, args.N), A_full_torch.view(8, -1, args.N))
         torch.distributed.barrier(TP_GROUP)
         A_full.random_()
 
-    _run_id = os.environ.get("TORCHELASTIC_RUN_ID")
-    exp_name = f"allgather_{_run_id}"
-    with group_profile(exp_name, do_prof=args.profile, merge_group=TP_GROUP):
-        sleep_async(10)
-        _, duration_ms_torch = perf_func(fn_torch, args.iters, args.warmup_iters)
-        triton_durations_ms = {}
-        for name, fn_triton in triton_fns.items():
+    if not args.noperf:
+        _run_id = os.environ.get("TORCHELASTIC_RUN_ID")
+        exp_name = f"allgather_{_run_id}"
+        with group_profile(exp_name, do_prof=args.profile, merge_group=TP_GROUP):
             sleep_async(10)
-            _, triton_durations_ms[name] = perf_func(fn_triton, args.iters, args.warmup_iters)
+            _, duration_ms_torch = perf_func(fn_torch, args.iters, args.warmup_iters)
+            triton_durations_ms = {}
+            for name, fn_triton in triton_fns.items():
+                sleep_async(10)
+                _, triton_durations_ms[name] = perf_func(fn_triton, args.iters, args.warmup_iters)
 
-    bw_gpbs_torch = nbytes_per_rank * (TP_GROUP.size() - 1) / 2**30 / duration_ms_torch * 1e3
+        bw_gpbs_torch = nbytes_per_rank * (TP_GROUP.size() - 1) / 2**30 / duration_ms_torch * 1e3
 
-    print(f"RANK #{TP_GROUP.rank()} AllGather torch: {duration_ms_torch:0.3f} ms/iter {bw_gpbs_torch:0.1f} GB/s.")
-    for name, duration_ms in triton_durations_ms.items():
-        bw_gpbs_fn = (nbytes_per_rank * (TP_GROUP.size() - 1) / 2**30 / duration_ms * 1e3)
-        print(f" triton {duration_ms:0.3f} ms/iter {bw_gpbs_fn:0.1f} GB/s.")
+        print(f"RANK #{TP_GROUP.rank()} AllGather torch: {duration_ms_torch:0.3f} ms/iter {bw_gpbs_torch:0.1f} GB/s.")
+        for name, duration_ms in triton_durations_ms.items():
+            bw_gpbs_fn = (nbytes_per_rank * (TP_GROUP.size() - 1) / 2**30 / duration_ms * 1e3)
+            print(f" triton {duration_ms:0.3f} ms/iter {bw_gpbs_fn:0.1f} GB/s.")
+
+    del A_full
+    del group_barrier
 
     finalize_distributed()
