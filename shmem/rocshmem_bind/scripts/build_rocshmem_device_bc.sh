@@ -19,6 +19,7 @@ CLANG_FLAGS=(
     -emit-llvm
     -mcode-object-version=5
     --offload-arch=${BITCODE_LIB_ARCH}
+    -DHIP_ENABLE_WARP_SYNC_BUILTINS
     -I${ROCSHMEM_INSTALL_DIR}/include/rocshmem
     -I${ROCSHMEM_INSTALL_DIR}/include
     -I${ROCSHMEM_INSTALL_DIR}/../
