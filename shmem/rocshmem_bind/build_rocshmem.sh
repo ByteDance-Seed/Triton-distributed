@@ -7,6 +7,44 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT=$(realpath ${SCRIPT_DIR})
 ROCSHMEM_SRC_DIR=${PROJECT_ROOT}/../../3rdparty/rocshmem
 
+sys_path="${PROJECT_ROOT}/../../3rdparty/rocm-systems"
+
+if [ -d "${ROCSHMEM_SRC_DIR}" ]; then
+  pushd "${PROJECT_ROOT}/../.."
+  active=$(git config submodule.3rdparty/rocshmem.active || echo "nil")
+  if [ "${active}" = "true" ]; then
+    echo "Error: Rocshmem submodule still active, please delete it"
+    quit=1
+  fi
+  popd
+  pushd "${ROCSHMEM_SRC_DIR}"
+  url=$(git remote get-url origin || echo "nil")
+  if [ "${url}" = "https://github.com/ROCm/rocSHMEM.git" ]; then
+    echo "Error: Old rocshmem checkout found, please delete it"
+    quit=1
+  fi
+  popd
+  if ! [ -z "${quit}" ]; then
+    exit $quit
+  fi
+
+  if ! [ "$(ls -A "${ROCSHMEM_SRC_DIR}")" ]; then
+    rmdir "${ROCSHMEM_SRC_DIR}"
+  fi
+fi
+
+if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
+  echo "Creating sparse checkout"
+  tag=hip-version_7.12.60610
+  pushd "${PROJECT_ROOT}/../.."
+  git clone "https://github.com/ROCm/rocm-systems.git" -b "${tag}" --depth 1 --sparse "${sys_path}"
+  popd
+  pushd "${sys_path}"
+  git config core.sparseCheckoutCone true
+  git sparse-checkout set projects/rocshmem
+  ln -s rocm-systems/projects/rocshmem ../rocshmem
+  popd
+fi
 
 pushd ${ROCSHMEM_SRC_DIR}
 
