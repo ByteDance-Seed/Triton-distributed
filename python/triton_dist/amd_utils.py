@@ -276,7 +276,14 @@ def _get_amdsmi_device_index(device_id: int | None):
     uuid = _get_gpu_uuid(device_id)
 
     uuid_map = {get_uuid_by_physical_device_id(i)[-12:]: i for i in range(get_physical_device_count())}
-    return uuid_map[uuid[-12:]]
+    # TODO-rocm fix error
+    uuid_tail = uuid[-12:]
+    if uuid_tail not in uuid_map:
+        warnings.warn(f"UUID mapping miss in _get_amdsmi_device_index: device_id={device_id}, "
+                      f"uuid_tail={uuid_tail}, available_tails={sorted(uuid_map.keys())}. "
+                      f"Fallback to logical device_id.")
+        return device_id
+    return uuid_map[uuid_tail]
 
 
 def get_physical_device_count():

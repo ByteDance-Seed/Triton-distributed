@@ -118,6 +118,14 @@ private:
         llvm_unreachable("unknown scope string");
     };
 
+    auto skipBitwidthPrefix =
+        [](const SmallVector<StringRef> &parts) -> size_t {
+      if (!parts.empty() &&
+          llvm::all_of(parts[0], [](char c) { return std::isdigit(c); }))
+        return 1;
+      return 0;
+    };
+
     auto operands = callOp.getOperands();
     auto result = callOp.getResult();
 
@@ -193,10 +201,12 @@ private:
     if (auto maybeParts =
             matchPrefixAndSplitRemainder(calleeName, "__triton_hip_load_")) {
       auto parts = maybeParts.value();
-      assert(parts.size() == 2 &&
-             "expected load function to have 2 parts after prefix");
-      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[0]);
-      auto scopeStr = strToScope(parts[1]);
+      size_t idx = skipBitwidthPrefix(parts);
+      assert(parts.size() - idx == 2 &&
+             "expected load function to have 2 parts (memOrder, scope) after "
+             "optional bitwidth prefix");
+      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
+      auto scopeStr = strToScope(parts[idx + 1]);
       assert(operands.size() == 1 && "expected load to have 1 operand");
 
       replacementOp = buildAtomicLoad(operands[0], memOrder, scopeStr);
@@ -206,10 +216,12 @@ private:
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_store_")) {
       auto parts = maybeParts.value();
-      assert(parts.size() == 2 &&
-             "expected store function to have 2 parts after prefix");
-      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[0]);
-      auto scopeStr = strToScope(parts[1]);
+      size_t idx = skipBitwidthPrefix(parts);
+      assert(parts.size() - idx == 2 &&
+             "expected store function to have 2 parts (memOrder, scope) after "
+             "optional bitwidth prefix");
+      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
+      auto scopeStr = strToScope(parts[idx + 1]);
       assert(operands.size() == 2 && "expected store to have 2 operands");
       buildAtomicStore(operands[1], operands[0], memOrder, scopeStr);
       rewriter.eraseOp(callOp);
@@ -220,11 +232,13 @@ private:
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_atom_add_")) {
       auto parts = maybeParts.value();
-      assert(parts.size() == 2 &&
-             "expected atomic add function to have 2 parts after prefix");
+      size_t idx = skipBitwidthPrefix(parts);
+      assert(parts.size() - idx == 2 &&
+             "expected atomic add function to have 2 parts (memOrder, scope) "
+             "after optional bitwidth prefix");
       assert(operands.size() == 2 && "expected atomic add to have 2 operands");
-      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[0]);
-      auto scopeStr = strToScope(parts[1]);
+      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
+      auto scopeStr = strToScope(parts[idx + 1]);
       replacementOp =
           buildAtomicFetchAdd(operands[0], operands[1], memOrder, scopeStr);
     }
@@ -233,12 +247,15 @@ private:
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_atom_cas_")) {
       auto parts = maybeParts.value();
-      assert(parts.size() == 3 &&
-             "expected atomic cas function to have 3 parts after prefix");
+      size_t idx = skipBitwidthPrefix(parts);
+      assert(parts.size() - idx == 3 &&
+             "expected atomic cas function to have 3 parts "
+             "(successOrder, failureOrder, scope) after optional bitwidth "
+             "prefix");
       assert(operands.size() == 3 && "expected atomic cas to have 3 operands");
-      LLVM::AtomicOrdering successOrdering = strToMemoryOrder(parts[0]);
-      LLVM::AtomicOrdering failureOrdering = strToMemoryOrder(parts[1]);
-      auto scopeStr = strToScope(parts[2]);
+      LLVM::AtomicOrdering successOrdering = strToMemoryOrder(parts[idx]);
+      LLVM::AtomicOrdering failureOrdering = strToMemoryOrder(parts[idx + 1]);
+      auto scopeStr = strToScope(parts[idx + 2]);
       replacementOp = buildAtomicCompareExchangeStrong(
           operands[0], operands[1], operands[2], successOrdering,
           failureOrdering, scopeStr);

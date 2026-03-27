@@ -31,7 +31,12 @@ from typing import Optional
 
 from triton_dist.language.extra.hip.language_extra import load, atomic_add, sync_grid, atomic_cas, tid, __syncthreads
 from hip import hip
-from triton_dist.utils import HIP_CHECK, rocshmem_barrier_all_on_stream
+from triton_dist.utils import (
+    HIP_CHECK,
+    get_shmem_backend,
+    mori_shmem_barrier_all_on_stream,
+    rocshmem_barrier_all_on_stream,
+)
 
 
 @triton.jit
@@ -175,9 +180,9 @@ def barrier_all_kernel(rank, num_ranks, comm_buf_ptr):
 
 
 def barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
-    '''
-    call rocshmem barrier api
-    '''
+    """Call shmem barrier on stream: mori_shmem when backend is mori_shmem, else rocshmem."""
+    if get_shmem_backend() == "mori_shmem":
+        return mori_shmem_barrier_all_on_stream(stream)
     return rocshmem_barrier_all_on_stream(stream)
 
 

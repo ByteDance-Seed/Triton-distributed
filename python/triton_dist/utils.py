@@ -256,6 +256,13 @@ def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
     return tensor
 
 
+def mori_shmem_create_tensor(shape, dtype) -> torch.Tensor:
+    # torch.cuda.synchronize()
+    tensor = mori_shmem.mori_shmem_create_tensor(shape, dtype=dtype)
+    # torch.cuda.synchronize()
+    return tensor
+
+
 def nvshmem_create_tensors(shape, dtype, rank, local_world_size) -> List[torch.Tensor]:
 
     def _get_peer_tensor(t, peer) -> torch.Tensor:
@@ -278,6 +285,12 @@ def nvshmem_free_tensor_sync(tensor):
     torch.cuda.synchronize()
     nvshmem.core.free_tensor(tensor)
     torch.cuda.synchronize()
+
+
+def mori_shmem_free_tensor_sync(tensor):
+    # torch.cuda.synchronize()
+    mori_shmem.mori_shmem_free_tensor(tensor)
+    # torch.cuda.synchronize()
 
 
 def finalize_distributed():
@@ -311,6 +324,12 @@ def nvshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
 def rocshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
     stream = stream.cuda_stream or torch.cuda.current_stream().cuda_stream
     pyrocshmem.rocshmem_barrier_all_on_stream(stream)
+
+
+def mori_shmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    mori_shmem.shmem_barrier_on_stream(stream)
 
 
 def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.distributed.ProcessGroup:
@@ -669,12 +688,25 @@ def get_mori_version():
     return "unknown"
 
 
+# mori_shmem C++ device API uses uint64_t for signals.
+MORI_SHMEM_SIGNAL_DTYPE = torch.uint64
+
+
 def _get_mori_shmem_libdevice():
     if os.getenv("MORI_HOME") is not None:
-        mori_lib_dir = Path(os.getenv("MORI_HOME")) / "lib"
-    else:
-        mori_lib_dir = Path(triton_dist.__path__[0]) / "tools" / "compile"
-    return mori_lib_dir / "libmori_shmem_device.bc"
+        p = Path(os.getenv("MORI_HOME")) / "lib" / "libmori_shmem_device.bc"
+        if p.exists():
+            return p
+    p = Path(triton_dist.__path__[0]) / "tools" / "compile" / "libmori_shmem_device.bc"
+    if p.exists():
+        return p
+    try:
+        from mori.ir.bitcode import find_bitcode
+        return Path(find_bitcode())
+    except Exception:
+        pass
+    raise FileNotFoundError("libmori_shmem_device.bc not found. Either run scripts/build_mori_shmem.sh, "
+                            "set MORI_HOME, or install mori with JIT support.")
 
 
 def get_mori_shmem_hash():

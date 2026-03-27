@@ -148,16 +148,23 @@ def extern_elementwise(lib_name: str, lib_path: str, args: list, arg_type_symbol
             arithmetic_check = False
         broadcast_arg = dispatch_args[0]
         if check_args:
-            # Get the broadcast shape over all the arguments
-            for item in dispatch_args:
-                _, broadcast_arg = _semantic.binary_op_type_checking_impl(item, broadcast_arg, allow_lhs_ptr=True,
-                                                                          allow_rhs_ptr=True,
-                                                                          arithmetic_check=arithmetic_check)
-            # Change the shape of each argument based on the broadcast shape
-            for i in builtins.range(len(dispatch_args)):
-                dispatch_args[i], _ = _semantic.binary_op_type_checking_impl(dispatch_args[i], broadcast_arg,
-                                                                             allow_lhs_ptr=True, allow_rhs_ptr=True,
-                                                                             arithmetic_check=arithmetic_check)
+            if arithmetic_check:
+                # Get the broadcast shape over all the arguments
+                for item in dispatch_args:
+                    _, broadcast_arg = _semantic.binary_op_type_checking_impl(item, broadcast_arg, allow_lhs_ptr=True,
+                                                                              allow_rhs_ptr=True,
+                                                                              arithmetic_check=arithmetic_check)
+                # Change the shape of each argument based on the broadcast shape
+                for i in builtins.range(len(dispatch_args)):
+                    dispatch_args[i], _ = _semantic.binary_op_type_checking_impl(dispatch_args[i], broadcast_arg,
+                                                                                 allow_lhs_ptr=True, allow_rhs_ptr=True,
+                                                                                 arithmetic_check=arithmetic_check)
+            else:
+                # Types matched — skip type check, only find broadcast shape.
+                for item in dispatch_args:
+                    if item.type.is_block():
+                        broadcast_arg = item
+                        break
             if not all_scalar:
                 ret_shape = broadcast_arg.shape
     func = _semantic.builder.create_extern_elementwise
