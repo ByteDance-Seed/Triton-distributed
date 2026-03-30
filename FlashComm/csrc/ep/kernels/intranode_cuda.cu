@@ -29,6 +29,7 @@
 #include "flash_comm/common.h"
 #include "flash_comm/copy.cuh"
 #include "flash_comm/ep/intranode.h"
+#include "flash_comm/launch_utils.cuh"
 #include "flash_comm/utils.cuh"
 
 namespace flash_comm {
@@ -434,7 +435,11 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
   const int32_t num_experts_per_rank = num_experts / num_ranks;
   __shared__ __align__(1024) int32_t scan_warp_prefix_sum[kNumWarps];
 
-  // pull mode all gather
+  // push-mode all gather: each block writes local_splits to a remote rank's
+  // symmetric buffer. The writes go across NVLink to peer GPUs, so a
+  // system-scope fence is required to guarantee they are visible to remote
+  // ranks before the subsequent barrier signals readiness.
+  // grid().sync() alone only orders within the local GPU.
   for (int32_t i = block_id; i < num_ranks; i += num_block) {
     int32_t *remote_full_splits =
         full_splits_ptrs[i] + rank * (num_experts + 1);
@@ -442,11 +447,13 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
       remote_full_splits[j] = local_splits[j];
     }
   }
+  __threadfence_system();
 
   cooperative_groups::this_grid().sync();
   if (block_id == 0) {
     barrier_all_block<int32_t>(barrier_ptrs, rank, num_ranks);
   }
+  __threadfence_system();
   cooperative_groups::this_grid().sync();
 
   int32_t *local_full_splits_ptr = full_splits_ptrs[rank];
@@ -1826,7 +1833,16 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
       smem::CombineIntraNodeSmem<token_t, weight_t, kHiddenSize, kNumLoadStages,
                                  kNumStoreStages, kNumWGPerBlock>;
 
+  // When kHasWeight is true, the last warp is a dedicated weight-combine warp
+  // that does not belong to any warp group. Its warp_group_id would be
+  // kNumWGPerBlock (out of bounds for warp_group_smem[kNumWGPerBlock]).
+  // Clamp to a valid index so we never form an out-of-bounds reference.
+  // The weight warp never enters the TMA-load / consumer paths, so the
+  // particular wg_smem / mbar pointers it gets are never dereferenced.
   const int32_t warp_group_id = warp_id / kWarpsPerWG;
+  const int32_t safe_wg_id = (warp_group_id < kNumWGPerBlock)
+                                  ? warp_group_id
+                                  : (kNumWGPerBlock - 1);
   const int32_t global_warp_group_id =
       block_id * kNumWGPerBlock + warp_group_id;
   const int32_t total_warp_groups = num_block * kNumWGPerBlock;
@@ -1834,14 +1850,15 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
   constexpr int32_t kHiddenSizeInt4 = kHiddenSize / kElemsPerInt4;
 
   auto &smem = *reinterpret_cast<smem_t *>(smem_buffer);
-  auto &wg_smem = smem.warp_group_smem[warp_group_id];
+  auto &wg_smem = smem.warp_group_smem[safe_wg_id];
   uint64_t *mbar_full_ptr = wg_smem.mbar_full;
   uint64_t *mbar_empty_ptr = wg_smem.mbar_empty;
 
   token_t **symm_buffer_ptrs = smem.x_ptrs;
   weight_t **smem_symm_weight_ptrs = smem.weight_ptrs;
 
-  // the first warp in each warpgroup as leader to initialize the barrier
+  // Only the leading warp of each real warp group initializes barriers.
+  // The weight warp (when kHasWeight) is excluded by the range check.
   bool is_init_warp =
       (warp_id % kWarpsPerWG == 0) && warp_id < kNumWGPerBlock * kWarpsPerWG;
   int32_t consumer_arr_cnt = (kWarpsPerWG - 1);
@@ -2178,9 +2195,10 @@ void compute_dispatch_layout_cuda(
                          &num_experts,
                          &rank,
                          &num_ranks};
-  CUDA_CHECK(cudaLaunchCooperativeKernel(
+  flash_comm::launch_kernel_ex(
       (void *)kernels::kernel_compute_dispatch_layout<kNumWarps>, grid_dim,
-      block_dim, kernel_args, smem_size, stream));
+      block_dim, kernel_args, smem_size, stream,
+      flash_comm::internal::get_cga_cluster_size(), true);
   CUDA_CHECK(cudaGetLastError());
 }
 
@@ -2220,18 +2238,20 @@ void dispatch_intranode_cuda(
                       token_t, weight_t, offset_t, kHiddenSize, kTopk,
                       kNumStages, kNumConsumerGroups, kHasWeight>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-              kernels::kernel_dispatch_intranode_v1<
-                  token_t, weight_t, offset_t, kHiddenSize, kTopk, kNumStages,
-                  kNumConsumerGroups, kHasWeight>
-                  <<<grid_dim, block_dim, smem_size, stream>>>(
-                      x, reinterpret_cast<int32_t *>(topk_send_mask),
-                      kHasWeight ? topk_weights : nullptr,
-                      reinterpret_cast<offset_t *>(topk_indices),
-                      reinterpret_cast<offset_t *>(token_dst_scatter_indices),
-                      num_token, hidden_size, num_experts_per_rank, rank,
-                      num_ranks, recv_x_ptrs, recv_weights_ptrs,
-                      reinterpret_cast<offset_t **>(
-                          recv_topk_scatter_indices_ptrs));
+              flash_comm::launch_kernel_ex(
+                  kernels::kernel_dispatch_intranode_v1<
+                      token_t, weight_t, offset_t, kHiddenSize, kTopk,
+                      kNumStages, kNumConsumerGroups, kHasWeight>,
+                  grid_dim, block_dim, smem_size, stream,
+                  flash_comm::internal::get_cga_cluster_size(), x,
+                  reinterpret_cast<int32_t *>(topk_send_mask),
+                  kHasWeight ? topk_weights : nullptr,
+                  reinterpret_cast<offset_t *>(topk_indices),
+                  reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                  num_token, hidden_size, num_experts_per_rank, rank, num_ranks,
+                  recv_x_ptrs, recv_weights_ptrs,
+                  reinterpret_cast<offset_t **>(
+                      recv_topk_scatter_indices_ptrs));
             });
 
             // constexpr int32_t kNumWarpPerConsumerGroup = kTopk;
@@ -2310,18 +2330,21 @@ void dispatch_intranode_chunk_cuda(
                         kNumStages, kNumConsumerGroups, kHasWeight,
                         kNumDispatchChunkSize>,
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                kernels::kernel_dispatch_intranode_chunk<
-                    token_t, weight_t, offset_t, kHiddenSize, kTopk, kNumStages,
-                    kNumConsumerGroups, kHasWeight, kNumDispatchChunkSize>
-                    <<<grid_dim, block_dim, smem_size, stream>>>(
-                        x, reinterpret_cast<int32_t *>(topk_send_mask),
-                        kHasWeight ? topk_weights : nullptr,
-                        reinterpret_cast<offset_t *>(topk_indices),
-                        reinterpret_cast<offset_t *>(token_dst_scatter_indices),
-                        num_token, hidden_size, num_experts_per_rank, rank,
-                        num_ranks, recv_x_ptrs, recv_weights_ptrs,
-                        reinterpret_cast<offset_t **>(
-                            recv_topk_scatter_indices_ptrs));
+                flash_comm::launch_kernel_ex(
+                    kernels::kernel_dispatch_intranode_chunk<
+                        token_t, weight_t, offset_t, kHiddenSize, kTopk,
+                        kNumStages, kNumConsumerGroups, kHasWeight,
+                        kNumDispatchChunkSize>,
+                    grid_dim, block_dim, smem_size, stream,
+                    flash_comm::internal::get_cga_cluster_size(), x,
+                    reinterpret_cast<int32_t *>(topk_send_mask),
+                    kHasWeight ? topk_weights : nullptr,
+                    reinterpret_cast<offset_t *>(topk_indices),
+                    reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                    num_token, hidden_size, num_experts_per_rank, rank,
+                    num_ranks, recv_x_ptrs, recv_weights_ptrs,
+                    reinterpret_cast<offset_t **>(
+                        recv_topk_scatter_indices_ptrs));
               });
             } else {
               dispatch_intranode_cuda(
@@ -2457,17 +2480,18 @@ void combine_intranode_cuda(
                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
               dim3 block_dim(kNumThreads);
               dim3 grid_dim(num_sm);
-              kernels::kernel_combine_intranode_v2<
-                  token_t, weight_t, offset_t, kTopk, kHiddenSize,
-                  kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
-                  kElemsPerThread, kHasWeight>
-                  <<<grid_dim, block_dim, smem_size, stream>>>(
-                      x_ptrs, weight_ptrs,
-                      reinterpret_cast<offset_t *>(topk_send_mask),
-                      reinterpret_cast<offset_t *>(topk_indices),
-                      reinterpret_cast<offset_t *>(token_dst_scatter_indices),
-                      recv_x, recv_weight, num_token, num_experts_per_rank,
-                      rank, num_ranks);
+              flash_comm::launch_kernel_ex(
+                  kernels::kernel_combine_intranode_v2<
+                      token_t, weight_t, offset_t, kTopk, kHiddenSize,
+                      kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
+                      kElemsPerThread, kHasWeight>,
+                  grid_dim, block_dim, smem_size, stream,
+                  flash_comm::internal::get_cga_cluster_size(), x_ptrs,
+                  weight_ptrs, reinterpret_cast<offset_t *>(topk_send_mask),
+                  reinterpret_cast<offset_t *>(topk_indices),
+                  reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                  recv_x, recv_weight, num_token, num_experts_per_rank, rank,
+                  num_ranks);
             });
           });
         });

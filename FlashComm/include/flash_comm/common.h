@@ -38,6 +38,29 @@ constexpr int32_t kMaxWorldSize = 72;
 
 namespace internal {
 
+inline bool is_power_of_two(int32_t n) { return n > 0 && (n & (n - 1)) == 0; }
+
+inline int32_t get_cga_cluster_size() {
+  static int32_t cluster_size = -1;
+  if (cluster_size < 0) {
+    const char *env = std::getenv("FLASH_COMM_CGA_CLUSTER_SIZE");
+    if (env != nullptr) {
+      int32_t val = std::atoi(env);
+      if (val >= 0 && val <= 16 && (val == 0 || is_power_of_two(val))) {
+        cluster_size = val;
+      } else {
+        std::cerr << "Warning: FLASH_COMM_CGA_CLUSTER_SIZE=" << env
+                  << " is invalid (must be 0 or power of 2 up to 16), ignoring."
+                  << std::endl;
+        cluster_size = 0;
+      }
+    } else {
+      cluster_size = 0;
+    }
+  }
+  return cluster_size;
+}
+
 class CheckError {
 public:
   CheckError(const char *file, int line, const char *condition) {
@@ -133,8 +156,10 @@ private:
   }
 
 #define SUPPORTED_HIDDEN_SIZES(OP, ...)                                        \
+  OP(1024, __VA_ARGS__)                                                        \
   OP(1536, __VA_ARGS__)                                                        \
   OP(2048, __VA_ARGS__)                                                        \
+  OP(3328, __VA_ARGS__)                                                        \
   OP(3584, __VA_ARGS__)                                                        \
   OP(5120, __VA_ARGS__)                                                        \
   OP(6144, __VA_ARGS__)                                                        \
