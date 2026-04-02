@@ -33,11 +33,12 @@ if [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   fi
 fi
 
+rocm_systems_tag=hip-version_7.12.60610
+
 if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   echo "Creating sparse checkout"
-  tag=hip-version_7.12.60610
   pushd "${PROJECT_ROOT}/../.."
-  git clone "https://github.com/ROCm/rocm-systems.git" -b "${tag}" --depth 1 --sparse "${sys_path}"
+  git clone "https://github.com/ROCm/rocm-systems.git" -b "${rocm_systems_tag}" --depth 1 --sparse "${sys_path}"
   popd
   pushd "${sys_path}"
   git config core.sparseCheckoutCone true
@@ -45,6 +46,10 @@ if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   ln -s rocm-systems/projects/rocshmem ../rocshmem
   popd
 fi
+
+pushd "${sys_path}"
+git checkout "${rocm_systems_tag}"
+popd
 
 pushd ${ROCSHMEM_SRC_DIR}
 
@@ -55,7 +60,6 @@ OMPI_INSTALL_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}"
 # build ompi, ucx
 if [ ! -e "${OMPI_INSTALL_DIR}" ]; then
     # prepare for building ompi, ucx
-    apt-get install autoconf libtool flex -y
     BUILD_DIR=${OMPI_INSTALL_DIR} bash ${ROCSHMEM_SRC_DIR}/scripts/install_dependencies.sh
 else
     echo "ompi exists, skip building ompi and ucx"
