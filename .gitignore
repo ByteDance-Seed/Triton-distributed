@@ -61,6 +61,9 @@ python/triton_dist/_C/*nvshmem
 hf_configs*
 *.whl
 
+3rdparty/rocm-systems
+3rdparty/rocshmem
+
 # conflicts
 temp_conflicts
 temp_merge_repo
