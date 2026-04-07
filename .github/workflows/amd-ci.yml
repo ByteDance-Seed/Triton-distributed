@@ -15,7 +15,7 @@ jobs:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
@@ -61,7 +61,7 @@ jobs:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
@@ -106,7 +106,7 @@ jobs:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
