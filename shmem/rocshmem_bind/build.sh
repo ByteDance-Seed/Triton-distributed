@@ -6,11 +6,6 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT=$(realpath ${SCRIPT_DIR})
 
-function apt_install_deps() {
-    apt update -y
-    apt-get install -y miopen-hip
-}
-
 function build_pyrocshmem_cmake() {
   pushd ${PROJECT_ROOT}/pyrocshmem
   mkdir -p build
@@ -57,8 +52,6 @@ export ROCM_INSTALL_DIR="/opt/rocm"
 
 export PATH="${OPENMPI_UCX_INSTALL_DIR}/bin:$PATH"
 export LD_LIBRARY_PATH="${OPENMPI_UCX_INSTALL_DIR}/lib:$LD_LIBRARY_PATH"
-
-apt_install_deps
 
 # build rocshmem
 bash -x ${PROJECT_ROOT}/build_rocshmem.sh

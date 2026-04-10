@@ -12,10 +12,10 @@ jobs:
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 45
     container:
-        image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
@@ -26,8 +26,8 @@ jobs:
       - name: Install dependencies
         run: |
           rm -f /usr/local/bin/cmake
-          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
-          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake miopen-hip autoconf libtool flex ninja-build clang lld
+          pip3 install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,10 +58,10 @@ jobs:
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 60
     container:
-        image: rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
+        image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
@@ -72,9 +72,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update -y && apt install -y libopenmpi-dev
-          pip3 install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
-          pip3 install pybind11
+          apt-get update -y && apt install -y libopenmpi-dev cmake miopen-hip autoconf libtool flex ninja-build clang lld
+          pip3 install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
+          pip3 install pybind11 psutil
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -103,10 +103,10 @@ jobs:
     runs-on: "amd-gfx942-mi325"
     timeout-minutes: 45
     container:
-        image: rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.5.1
+        image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
           --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
-          --volume /home/runner/.triton:/github/home/.triton
+          --volume /home/runner/.triton:/github/home/.triton --shm-size=512MB
     env:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
       TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
@@ -118,8 +118,8 @@ jobs:
       - name: Install dependencies
         run: |
           rm -f /usr/local/bin/cmake
-          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake
-          pip3 install -i https://test.pypi.org/simple hip-python==6.4.3.555.40
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake ninja-build clang lld
+          pip3 install -i https://test.pypi.org/simple hip-python>=7.1
           pip3 install pybind11
       - name: Checkout
         uses: actions/checkout@v4
