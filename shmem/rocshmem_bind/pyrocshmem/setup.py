@@ -108,7 +108,7 @@ def setup_pytorch_extension() -> setuptools.Extension:
     """Setup CppExtension for PyTorch support"""
     include_dirs, library_dirs, libraries = [], [], []
 
-    deps = [hip_deps(), mpi_deps(), rocshmem_deps()]
+    deps = [rocshmem_deps(), hip_deps(), mpi_deps()]
 
     for include_dir, library_dir, library in deps:
         include_dirs += include_dir
