@@ -32,7 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -78,7 +78,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -124,7 +124,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build triton-distributed
         run: |
           pip3 install -e python --verbose --no-build-isolation --use-pep517
