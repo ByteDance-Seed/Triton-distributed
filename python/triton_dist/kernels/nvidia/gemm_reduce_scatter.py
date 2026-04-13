@@ -637,7 +637,8 @@ def gemm_rs_op(A: torch.Tensor, B: torch.Tensor, ctx: GEMMReduceScatterTensorPar
 
     # fast path: cuBLAS + NCCL for small GEMMs where overlap overhead > benefit
     gemm_flops = 2 * M * N * local_K
-    if gemm_flops < _SMALL_GEMM_FLOPS_THRESHOLD and ctx.tp_group is not None and not reduce_st:
+    if (gemm_flops < _SMALL_GEMM_FLOPS_THRESHOLD and ctx.tp_group is not None and not reduce_st
+            and A.dtype.is_floating_point):
         output = torch.empty((M_per_rank, N), dtype=output_dtype, device=A.device)
         gemm_out = torch.matmul(A, B)
         if gemm_out.dtype != output_dtype:
