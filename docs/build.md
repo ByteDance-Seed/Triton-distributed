@@ -8,8 +8,8 @@
 We recommend installation in [Nvidia PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags).
 
 #### if for AMD GPU:
-- ROCM 6.3.0
-- Torch 2.4.1 with ROCM support
+- ROCM 7.1
+- Torch 2.7.1 with ROCM support
 
 
 
@@ -139,7 +139,7 @@ bash .codebase/scripts/nvidia/run_tutorial_test.sh
 See examples in the `tutorials` directory at the project root.
 
 ## To use Triton-distributed with the AMD backend:
-Starting from the rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.4 Docker container
+Starting from the rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1 Docker container
 #### AMD Build Steps
 1. Clone the repo
 ```sh
@@ -150,14 +150,21 @@ git clone https://github.com/ByteDance-Seed/Triton-distributed.git
 cd Triton-distributed/
 git submodule update --init --recursive
 ```
+If you are updating an old repo, there may be issues if the rocshmem submodule is still present. Erase it if necessary:
+```sh
+rm -rf 3rdparty/rocshmem # only for updated repo
+```
 3. Install dependencies
 ```sh
-sudo apt-get update -y
-sudo apt install -y libopenmpi-dev
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --no-deps
-bash ./shmem/rocshmem_bind/build.sh
-python3 -m pip install -i https://test.pypi.org/simple hip-python>=6.3.0 # (or whatever Rocm version you have)
+export TRITON_BUILD_WITH_CLANG_LLD=TRUE
+export TRITON_USE_ASSERT_ENABLED_LLVM=TRUE
+export TRITON_BUILD_PROTON=0
+rm -f /usr/local/bin/cmake
+apt-get update -y
+apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake miopen-hip autoconf libtool flex ninja-build clang lld
+python3 -m pip install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
 pip3 install pybind11
+bash ./shmem/rocshmem_bind/build.sh
 ```
 4. Build Triton-distributed
 ```sh
@@ -167,7 +174,7 @@ pip3 install -e python --verbose --no-build-isolation --use-pep517
 #### GEMM ReduceScatter example on single node
 ```sh
 bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 8192 29568
- ```
+```
 and see the following (reduced) output
 ```sh
 ✅ Triton and Torch match
