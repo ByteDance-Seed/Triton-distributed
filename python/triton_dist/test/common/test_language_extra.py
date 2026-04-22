@@ -207,10 +207,50 @@ def test_ld_st_main():
                     _test_ld_st(ld_semantic, st_semantic, scope, dtype)
 
 
+def test_ld_st_mixed_bitwidth():
+    print("Testing ld/st mixed bitwidth (int32 + uint64 in same kernel)")
+    device = torch.cuda.current_device()
+
+    @triton.jit
+    def _mixed_kernel(
+        input32,
+        input64,
+        out32,
+        out64,
+        size,
+    ):
+        threads_per_block = language_extra.num_threads()
+        t = language_extra.tid(0)
+        pid = tl.program_id(axis=0)
+        num_pid = tl.num_programs(axis=0)
+        total_threads = threads_per_block * num_pid
+        global_tid = pid * threads_per_block + t
+
+        for i in range(global_tid, size, total_threads):
+            v32 = language_extra.ld(input32 + i)
+            v64 = language_extra.ld(input64 + i)
+            language_extra.st(out32 + i, v32 + 1)
+            language_extra.st(out64 + i, v64 + 1)
+
+    SIZE = 4096
+    x32 = torch.randint(0, 1000, (SIZE, ), dtype=torch.int32, device=device)
+    x64 = torch.randint(0, 1000, (SIZE, ), dtype=torch.int64, device=device).to(torch.uint64)
+    ref32 = (x32 + 1).to(torch.int32)
+    ref64 = (x64.to(torch.int64) + 1).to(torch.uint64)
+    o32 = torch.empty_like(x32)
+    o64 = torch.empty_like(x64)
+
+    _mixed_kernel[(16, )](x32, x64, o32, o64, SIZE, num_warps=4)
+    torch.testing.assert_close(o32, ref32, atol=0, rtol=0)
+    torch.testing.assert_close(o64, ref64, atol=0, rtol=0)
+    print("✅ ld_st_mixed_bitwidth (int32 + uint64) Triton and Torch match")
+
+
 if __name__ == "__main__":
 
     torch.cuda.set_device(0)
     test_atomic_cas_main()
     test_atomic_add_main()
     test_ld_st_main()
+    test_ld_st_mixed_bitwidth()
     print("All tests passed!")

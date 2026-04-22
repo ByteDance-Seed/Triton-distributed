@@ -32,7 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -78,7 +78,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build rocmshmem bind
         run: |
           bash ./shmem/rocshmem_bind/build.sh
@@ -124,14 +124,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'true'
       - name: Build triton-distributed
         run: |
           pip3 install -e python --verbose --no-build-isolation --use-pep517
       - name: Build mori shmem
         run: |
-          bash ./scripts/build_mori_shmem.sh 
-      - name: Mori SHMEM API tests
+          bash ./scripts/build_mori_shmem.sh
+      - name: MoRI SHMEM API tests
         run: |
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py
+      - name: EP A2A intra-node tests
+        run: |
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a.py --check
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a.py --check --with-scatter-indices
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a.py --check --enable-local-combine
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a.py --rounds 3 --bench_iters 10
+      - name: EP Low Latency v2 tests
+        run: |
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_ll_a2a.py --check -M 64 -N 7168 -G 256 --topk 8
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_ll_a2a.py -M 64 -N 7168 -G 256 --topk 8 --rounds 3
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_ll_a2a.py -M 128 -N 7168 -G 256 --topk 8 --rounds 3
+

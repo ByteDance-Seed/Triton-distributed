@@ -88,9 +88,9 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
             else:
                 hip.hipGetLastError()  # Discard the last error
         elif backend == 'mori_shmem':
-            # Initialize mori_shmem device symbols in this kernel module
-            import mori.shmem as mori_shmem
-            mori_shmem.shmem_module_init(kernel_module)
+            if "mori_shmem" in kernel.asm.get('llir', ''):
+                import mori.shmem as mori_shmem
+                mori_shmem.shmem_module_init(kernel_module)
     elif is_maca():
         if "mxshmem" in kernel.asm['ttir']:
             import pymxshmem

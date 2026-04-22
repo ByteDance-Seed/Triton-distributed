@@ -131,7 +131,10 @@ def atomic_cas(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    callee_name = f"__triton_hip_atom_cas_{core._unwrap_if_constexpr(semantic)}_{core._unwrap_if_constexpr(failure_order)}_{core._unwrap_if_constexpr(scope)}"
+    _sem = core._unwrap_if_constexpr(semantic)
+    _fail = core._unwrap_if_constexpr(failure_order)
+    _scp = core._unwrap_if_constexpr(scope)
+
     return dist_core.extern_elementwise(
         "",
         "",
@@ -140,7 +143,10 @@ def atomic_cas(
             core.cast(value, dtype=ptr.dtype.element_ty, _semantic=_semantic),
             core.cast(target_value, dtype=ptr.dtype.element_ty, _semantic=_semantic),
         ],
-        {(core.pointer_type(dtype), dtype, dtype): (callee_name, dtype)
+        {(core.pointer_type(dtype), dtype, dtype): (
+             f"__triton_hip_atom_cas_{dtype.primitive_bitwidth}_{_sem}_{_fail}_{_scp}",
+             dtype,
+         )
          for dtype in [
              core.dtype("int32"),
              core.dtype("uint32"),
@@ -179,7 +185,9 @@ def atomic_add(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    callee_name = f"__triton_hip_atom_add_{core._unwrap_if_constexpr(semantic)}_{core._unwrap_if_constexpr(scope)}"
+    _sem = core._unwrap_if_constexpr(semantic)
+    _scp = core._unwrap_if_constexpr(scope)
+
     return dist_core.extern_elementwise(
         "",
         "",
@@ -187,7 +195,10 @@ def atomic_add(
             ptr,
             core.cast(value, dtype=ptr.dtype.element_ty, _semantic=_semantic),
         ],
-        {(core.pointer_type(dtype), dtype): (callee_name, dtype)
+        {(core.pointer_type(dtype), dtype): (
+             f"__triton_hip_atom_add_{dtype.primitive_bitwidth}_{_sem}_{_scp}",
+             dtype,
+         )
          for dtype in [
              core.dtype("int32"),
              core.dtype("uint32"),
@@ -222,17 +233,25 @@ def ld(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    callee_name = f"__triton_hip_load_{core._unwrap_if_constexpr(semantic)}_{core._unwrap_if_constexpr(scope)}"
+    _sem = core._unwrap_if_constexpr(semantic)
+    _scp = core._unwrap_if_constexpr(scope)
+
     return dist_core.extern_elementwise(
         "",
         "",
         [ptr],
-        {(core.pointer_type(dtype), ): (callee_name, dtype)
+        {(core.pointer_type(dtype), ): (
+             f"__triton_hip_load_{dtype.primitive_bitwidth}_{_sem}_{_scp}",
+             dtype,
+         )
          for dtype in [
              core.dtype("int32"),
              core.dtype("uint32"),
              core.dtype("int64"),
              core.dtype("uint64"),
+             core.dtype("fp16"),
+             core.dtype("bf16"),
+             core.dtype("fp32"),
          ]},
         is_pure=False,
         _semantic=_semantic,
@@ -263,17 +282,25 @@ def st(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    callee_name = f"__triton_hip_store_{core._unwrap_if_constexpr(semantic)}_{core._unwrap_if_constexpr(scope)}"
+    _sem = core._unwrap_if_constexpr(semantic)
+    _scp = core._unwrap_if_constexpr(scope)
+
     return dist_core.extern_elementwise(
         "",
         "",
         [ptr, core.cast(val, dtype=ptr.dtype.element_ty, _semantic=_semantic)],
-        {(core.pointer_type(dtype), dtype): (callee_name, dtype)
+        {(core.pointer_type(dtype), dtype): (
+             f"__triton_hip_store_{dtype.primitive_bitwidth}_{_sem}_{_scp}",
+             dtype,
+         )
          for dtype in [
              core.dtype("int32"),
              core.dtype("uint32"),
              core.dtype("int64"),
              core.dtype("uint64"),
+             core.dtype("fp16"),
+             core.dtype("bf16"),
+             core.dtype("fp32"),
          ]},
         is_pure=False,
         _semantic=_semantic,
@@ -448,45 +475,91 @@ def laneid(_semantic=None):
     return core.tensor(_semantic.builder.create_laneid(), core.int32)
 
 
+# ---------------------------------------------------------------------------
+# Warp shuffle primitives via GCN inline assembly (ds_bpermute_b32).
+#
+# gpu.shuffle (mlir::gpu::ShuffleOp) does not reliably lower to LLVM for
+# wavefront-64 targets on the current Triton AMD backend.  We emit
+# ds_bpermute_b32 directly instead, which reads the source VGPR from an
+# arbitrary lane specified by a byte-offset (lane_id * 4).
+# ---------------------------------------------------------------------------
+
+
 @core.extern
-def __shfl_sync_with_mode_i32(
-    value,
-    offset,
-    mode: core.constexpr = "up",
-    width: int = 64,
-    _semantic=None,
-):
-    shfl_mode = _str_to_gpu_shfl_mode(mode.value)
-    if isinstance(offset, core.constexpr):
-        offset = core.to_tensor(offset, _semantic=_semantic)
-
-    return core.tensor(
-        _semantic.builder.create_warp_shuffle(
-            value.handle,
-            offset.handle,
-            core.to_tensor(width, _semantic=_semantic).handle,
-            shfl_mode,
-        ), value.dtype)
+def _ds_bpermute_b32(value, byte_offset, _semantic=None):
+    """Low-level ds_bpermute_b32: read *value* from the lane at *byte_offset/4*."""
+    tl.static_assert(value.dtype == tl.int32 or value.dtype == tl.uint32, "_ds_bpermute_b32 only supports int32/uint32",
+                     _semantic=_semantic)
+    return tl.inline_asm_elementwise(
+        asm="ds_bpermute_b32 $0, $1, $2\ns_waitcnt lgkmcnt(0)",
+        constraints="=v,v,v",
+        args=[byte_offset, value],
+        dtype=tl.int32,
+        is_pure=True,
+        pack=1,
+        _semantic=_semantic,
+    )
 
 
 @triton.jit
-def __shfl_sync_i32(value, laneid):
-    return __shfl_sync_with_mode_i32(value, laneid, "idx", 64)
+def __shfl_sync_i32(value, lane):
+    """Shuffle idx: read *value* from *lane* (broadcast if lane is constant)."""
+    byte_offset = tl.cast(lane, tl.int32) * 4
+    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
 
 
 @triton.jit
-def __shfl_up_sync_i32(value, offset):
-    return __shfl_sync_with_mode_i32(value, offset, "up", 64)
+def __shfl_up_sync_i32(value, delta):
+    """Shuffle up: each lane reads from (laneid - delta), clamped to 0."""
+    _lid = laneid()
+    src_lane = _lid - tl.cast(delta, tl.int32)
+    if src_lane < 0:
+        src_lane = _lid
+    byte_offset = src_lane * 4
+    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
 
 
 @triton.jit
-def __shfl_down_sync_i32(value, offset):
-    return __shfl_sync_with_mode_i32(value, offset, "down", 64)
+def __shfl_down_sync_i32(value, delta):
+    """Shuffle down: each lane reads from (laneid + delta), clamped to 63."""
+    WARP_SIZE: tl.constexpr = 64
+    _lid = laneid()
+    src_lane = _lid + tl.cast(delta, tl.int32)
+    if src_lane >= WARP_SIZE:
+        src_lane = _lid
+    byte_offset = src_lane * 4
+    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
 
 
 @triton.jit
-def __shfl_xor_sync_i32(value, offset):
-    return __shfl_sync_with_mode_i32(value, offset, "xor", 64)
+def __shfl_xor_sync_i32(value, mask):
+    """Shuffle xor (butterfly): each lane reads from (laneid ^ mask)."""
+    _lid = laneid()
+    src_lane = _lid ^ tl.cast(mask, tl.int32)
+    byte_offset = src_lane * 4
+    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
+
+
+@triton.jit
+def pack_b32_v2(val0, val1):
+    """Pack two 32-bit values into one 64-bit value (val0: low 32, val1: high 32)."""
+    lo = tl.cast(tl.cast(val0, tl.uint32), tl.uint64)
+    hi = tl.cast(tl.cast(val1, tl.uint32), tl.uint64)
+    return lo | (hi << 32)
+
+
+@triton.jit
+def atomic_add_per_warp(barrier_ptr, value, scope: core.constexpr, semantic: core.constexpr):
+    """Warp-level atomic add: lane 0 performs atomic_add, result is broadcast to all lanes.
+
+    AMD equivalent of the NVIDIA atomic_add_per_warp. Uses wavefront64 shuffle
+    (no mask needed — AMD wavefronts are always fully synchronized).
+    """
+    _laneid = laneid()
+    x = tl.cast(0, barrier_ptr.dtype.element_ty)
+    if _laneid == 0:
+        x = atomic_add(barrier_ptr, value, scope, semantic)
+    return __shfl_sync_i32(x, 0)
 
 
 __all__ = [
@@ -496,12 +569,16 @@ __all__ = [
     "laneid",
     "atomic_cas",
     "atomic_add",
+    "pack_b32_v2",
+    "atomic_add_per_warp",
     "__shfl_sync_i32",
     "__shfl_up_sync_i32",
     "__shfl_down_sync_i32",
     "__shfl_xor_sync_i32",
     "load",
     "store",
+    "sync_grid",
+    "smid",
     "sync_grid",
     "smid",
     "seid",

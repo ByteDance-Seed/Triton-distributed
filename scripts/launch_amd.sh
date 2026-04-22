@@ -20,7 +20,7 @@ case ":${PYTHONPATH}:" in
         ;;
 esac
 
-export TRITON_CACHE_DIR=triton_cache
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-triton_cache}
 export ROCSHMEM_HOME=${ROCSHMEM_ROOT}
 export ROCSHMEM_BACKEND=${ROCSHMEM_BACKEND:=IPC}
 export ROCSHMEM_GDA_PROVIDER=${ROCSHMEM_GDA_PROVIDER:=mlx5} # Only used with backend GDA
@@ -31,7 +31,7 @@ export GPU_STREAMOPS_CP_WAIT=1
 export DEBUG_CLR_KERNARG_HDP_FLUSH_WA=1
 # export AMD_LOG_LEVEL=5 # for debug
 
-mkdir -p triton_cache
+mkdir -p ${TRITON_CACHE_DIR}
 
 nproc_per_node=${ARNOLD_WORKER_GPU:=$(rocm-smi | grep W | wc -l)}
 nnodes=${ARNOLD_WORKER_NUM:=1}

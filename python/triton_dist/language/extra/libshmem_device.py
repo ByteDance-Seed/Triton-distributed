@@ -275,7 +275,7 @@ def putmem_signal(dest, source, bytes, sig_addr, signal, sig_op, pe):
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe, qp_id=0):
     ...
 
 
@@ -321,6 +321,11 @@ def signal_op(sig_addr, signal, sig_op, pe):
 
 @_shmem_module.dispatch
 def signal_wait_until(sig_addr, cmp_, cmp_val):
+    ...
+
+
+@_shmem_module.dispatch
+def uint64_wait_until_equals(addr, val):
     ...
 
 
@@ -515,6 +520,15 @@ ROCSHMEM_CMP_GT = 2
 ROCSHMEM_CMP_GE = 3
 ROCSHMEM_CMP_LT = 4
 ROCSHMEM_CMP_LE = 5
+
+# class mori_shmemi_cmp_type(Enum):
+MORI_CMP_EQ = 0
+MORI_CMP_NE = 1
+MORI_CMP_GT = 2
+MORI_CMP_LE = 3
+MORI_CMP_LT = 4
+MORI_CMP_GE = 5
+MORI_CMP_SENTINEL = sys.maxsize
 
 # ROCSHMEM_SIGNAL_OPS (enum)
 ROCSHMEM_SIGNAL_SET = 0

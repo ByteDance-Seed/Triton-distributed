@@ -22,7 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-"""
+r"""
 MoRI SHMEM Bandwidth Test For P2P And IBGDA
 ==============================
 Example usage:
