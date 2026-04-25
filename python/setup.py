@@ -102,7 +102,8 @@ class BackendInstaller:
     def prepare(backend_name: str, backend_src_dir: str = None, is_external: bool = False):
         # Initialize submodule if there is one for in-tree backends.
         if not is_external:
-            root_dir = os.path.join(get_base_dir(), "3rdparty", "triton", "third_party")
+            triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+            root_dir = os.path.join(get_base_dir(), "3rdparty", triton_subdir, "third_party")
             assert backend_name in os.listdir(
                 root_dir), f"{backend_name} is requested for install but not present in {root_dir}"
 
@@ -131,7 +132,8 @@ class BackendInstaller:
         for file in ["compiler.py", "driver.py"]:
             assert os.path.exists(os.path.join(backend_path, file)), f"${file} does not exist in ${backend_path}"
 
-        install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+        triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+        install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", "triton",
                                    "backends", backend_name)
 
         dist_backend_path = None
@@ -274,7 +276,8 @@ def get_llvm_package_info():
         return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
     # use_assert_enabled_llvm = check_env_flag("TRITON_USE_ASSERT_ENABLED_LLVM", "False")
     # release_suffix = "assert" if use_assert_enabled_llvm else "release"
-    llvm_hash_path = os.path.join(get_base_dir(), "3rdparty", "triton", "cmake", "llvm-hash.txt")
+    triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+    llvm_hash_path = os.path.join(get_base_dir(), "3rdparty", triton_subdir, "cmake", "llvm-hash.txt")
     with open(llvm_hash_path, "r") as llvm_hash_file:
         rev = llvm_hash_file.read(8)
     name = f"llvm-{rev}-{system_suffix}"
@@ -386,7 +389,8 @@ def download_and_copy(name, src_func, dst_path, variable, version, url_func):
     url = url_func(supported[system], arch, version)
     src_path = src_func(supported[system], arch, version)
     tmp_path = os.path.join(triton_cache_path, "nvidia", name)  # path to cache the download
-    dst_path = os.path.join(base_dir, os.pardir, "3rdparty", "triton", "third_party", "nvidia", "backend",
+    triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+    dst_path = os.path.join(base_dir, os.pardir, "3rdparty", triton_subdir, "third_party", "nvidia", "backend",
                             dst_path)  # final binary path
     src_path = os.path.join(tmp_path, src_path)
     download = not os.path.exists(src_path)
@@ -596,14 +600,15 @@ class CMakeBuild(build_ext):
     def get_proton_cmake_args(self):
         cmake_args = get_thirdparty_packages([get_json_package_info()])
         cmake_args += self.get_pybind11_cmake_args()
+        triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
         cupti_include_dir = get_env_with_keys(["TRITON_CUPTI_INCLUDE_PATH"])
         if cupti_include_dir == "":
-            cupti_include_dir = os.path.join(get_base_dir(), "3rdparty", "triton", "third_party", "nvidia", "backend",
+            cupti_include_dir = os.path.join(get_base_dir(), "3rdparty", triton_subdir, "third_party", "nvidia", "backend",
                                              "include")
         cmake_args += ["-DCUPTI_INCLUDE_DIR=" + cupti_include_dir]
         roctracer_include_dir = get_env_with_keys(["TRITON_ROCTRACER_INCLUDE_PATH"])
         if roctracer_include_dir == "":
-            roctracer_include_dir = os.path.join(get_base_dir(), "3rdparty", "triton", "third_party", "amd", "backend",
+            roctracer_include_dir = os.path.join(get_base_dir(), "3rdparty", triton_subdir, "third_party", "amd", "backend",
                                                  "include")
         cmake_args += ["-DROCTRACER_INCLUDE_DIR=" + roctracer_include_dir]
         return cmake_args
@@ -689,6 +694,7 @@ class CMakeBuild(build_ext):
             "TRITON_BUILD_DISTRIBUTED",
             "TRITON_BUILD_WITH_CCACHE",
             "TRITON_PARALLEL_LINK_JOBS",
+            "TRITON_USE_ASCEND",
         ]
         cmake_args += [f"-D{option}={os.getenv(option)}" for option in passthrough_args if option in os.environ]
 
@@ -706,6 +712,10 @@ class CMakeBuild(build_ext):
         if cmake_args_append is not None:
             cmake_args += shlex.split(cmake_args_append)
 
+        # LLVM version compatibility for Ascend
+        if check_env_flag("TRITON_USE_ASCEND", "OFF"):
+            cmake_args += ["-DLLVM_MAJOR_VERSION_22_COMPATIBLE=ON"]
+
         # USE MACA
         if _is_maca_platform() and check_env_flag("TRITON_USE_MACA", "OFF"):  # Default OFF
             cmake_args += ["-DTRITON_USE_MACA=ON"]
@@ -718,8 +728,29 @@ class CMakeBuild(build_ext):
         subprocess.check_call(["cmake", "--build", "."] + build_args, cwd=cmake_dir)
         subprocess.check_call(["cmake", "--build", ".", "--target", "mlir-doc"], cwd=cmake_dir)
 
+        if check_env_flag("TRITON_USE_ASCEND", "OFF"):
+            # Copy triton-mlir-opt tool to extdir for runtime use
+            # This tool is needed for converting MLIR to Bytecode
+            triton_mlir_opt_src = os.path.join(
+                cmake_dir, "3rdparty", "triton-ascend", "bin", "triton-mlir-opt"
+            )
+            if os.path.exists(triton_mlir_opt_src):
+                triton_mlir_opt_dst = os.path.join(extdir, "triton-mlir-opt")
+                shutil.copy2(triton_mlir_opt_src, triton_mlir_opt_dst)
+                # Make it executable (Unix-like systems)
+                if platform.system() != "Windows":
+                    os.chmod(triton_mlir_opt_dst, 0o755)
+                    # Strip debug symbols to reduce binary size (can reduce size by ~80%)
+                    try:
+                        subprocess.check_call(["strip", "--strip-all", triton_mlir_opt_dst])
+                        print("Stripped triton-mlir-opt to reduce size")
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        # strip command not available or failed, continue without stripping
+                        pass
+                print(f"Copied triton-mlir-opt to {triton_mlir_opt_dst}")
 
-nvidia_version_path = os.path.join(get_base_dir(), "3rdparty", "triton", "cmake", "nvidia-toolchain-version.json")
+
+nvidia_version_path = os.path.join(get_base_dir(), "3rdparty", "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton", "cmake", "nvidia-toolchain-version.json")
 with open(nvidia_version_path, "r") as nvidia_version_file:
     # parse this json file to get the version of the nvidia toolchain
     NVIDIA_TOOLCHAIN_VERSION = json.load(nvidia_version_file)
@@ -754,15 +785,17 @@ download_and_copy(
     url_func=lambda system, arch, version:
     f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvdisasm/{system}-{arch}/cuda_nvdisasm-{system}-{arch}-{version}-archive.tar.xz",
 )
-download_and_copy(
-    name="nvcc",
-    src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/nvlink{exe_extension}",
-    dst_path="bin/nvlink",
-    variable="TRITON_NVLINK_PATH",
-    version=NVIDIA_TOOLCHAIN_VERSION["nvlink"],
-    url_func=lambda system, arch, version:
-    f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
-)
+# nvlink is only needed for non-ascend builds (triton-ascend nvidia-toolchain-version.json does not have nvlink)
+if not check_env_flag("TRITON_USE_ASCEND", "OFF"):
+    download_and_copy(
+        name="nvcc",
+        src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/nvlink{exe_extension}",
+        dst_path="bin/nvlink",
+        variable="TRITON_NVLINK_PATH",
+        version=NVIDIA_TOOLCHAIN_VERSION["nvlink"],
+        url_func=lambda system, arch, version:
+        f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
+    )
 download_and_copy(
     name="nvcc",
     src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/include",
@@ -799,7 +832,10 @@ download_and_copy(
     url_func=lambda system, arch, version:
     f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_cupti/{system}-{arch}/cuda_cupti-{system}-{arch}-{version}-archive.tar.xz",
 )
-backends = [*BackendInstaller.copy(["nvidia", "amd"]), *BackendInstaller.copy_externals()]
+backends = [
+    *BackendInstaller.copy(["ascend", "nvidia", "amd"]),
+    *BackendInstaller.copy_externals(),
+]
 
 
 def add_link_to_backends(external_only, materialization=False):
@@ -835,7 +871,8 @@ def add_link_to_backends(external_only, materialization=False):
         if backend.language_dir:
             # Link the contents of each backend's `language` directory into
             # `triton.language.extra`.
-            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+            triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", "triton",
                                      "language", "extra")
             for x in os.listdir(backend.language_dir):
                 src_dir = os.path.join(backend.language_dir, x)
@@ -845,7 +882,8 @@ def add_link_to_backends(external_only, materialization=False):
         if backend.tools_dir:
             # Link the contents of each backend's `tools` directory into
             # `triton.tools.extra`.
-            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+            triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+            extra_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", "triton",
                                      "tools", "extra")
             for x in os.listdir(backend.tools_dir):
                 src_dir = os.path.join(backend.tools_dir, x)
@@ -854,16 +892,18 @@ def add_link_to_backends(external_only, materialization=False):
 
 
 def add_link_to_proton():
+    triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
     proton_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "third_party", "proton", "proton"))
-    proton_install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton",
+        os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "third_party", "proton", "proton"))
+    proton_install_dir = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", "triton",
                                       "profiler")
     update_symlink(proton_install_dir, proton_dir)
 
 
 def add_link_to_distributed():
+    triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
     triton_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", "triton", "python", "triton"))
+        os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", "triton"))
     triton_install_dir = os.path.join(os.path.dirname(__file__), "triton")
     update_symlink(triton_install_dir, triton_dir)
 
@@ -954,26 +994,49 @@ def get_extra_packages(extra_name):
     return list(packages)
 
 
+def get_triton_subpackages(base_dir, package_prefix):
+    """Walk a triton subdirectory to enumerate all subpackages dynamically."""
+    packages = []
+    triton_subdir = "triton-ascend" if check_env_flag("TRITON_USE_ASCEND", "OFF") else "triton"
+    full_path = os.path.join(os.path.dirname(__file__), os.pardir, "3rdparty", triton_subdir, "python", base_dir)
+
+    if not os.path.exists(full_path):
+        return packages
+
+    for dir, dirs, files in os.walk(full_path, followlinks=True):
+        # Check if directory contains Python files (has __init__.py or other .py files)
+        if not any(f.endswith(".py") for f in files):
+            continue
+        # Get relative path from the base directory
+        rel_path = os.path.relpath(dir, full_path)
+        if rel_path == ".":
+            # The base directory itself
+            packages.append(package_prefix)
+        else:
+            # Subdirectories
+            package = os.path.join(package_prefix, rel_path).replace(os.sep, "/")
+            packages.append(package)
+
+    return packages
+
+
 def get_packages():
     _packages = [
         "triton",
         "triton/_C",
         "triton/backends",
         "triton/compiler",
-        "triton/experimental",
-        "triton/experimental/gluon",
-        "triton/experimental/gluon/language",
-        "triton/experimental/gluon/nvidia",
-        "triton/experimental/gluon/language/nvidia",
-        "triton/experimental/gluon/language/nvidia/ampere",
-        "triton/experimental/gluon/language/nvidia/hopper",
-        "triton/experimental/gluon/language/nvidia/blackwell",
         "triton/language",
         "triton/language/extra",
         "triton/runtime",
         "triton/tools",
         "triton/tools/extra",
     ]
+    # Dynamically enumerate triton/experimental subpackages
+    _packages += get_triton_subpackages("triton/experimental", "triton/experimental")
+    # Dynamically enumerate triton/extension subpackages (for Ascend)
+    if check_env_flag("TRITON_USE_ASCEND", "OFF"):
+        _packages += get_triton_subpackages("triton/extension", "triton/extension")
     _packages += [f'triton/backends/{backend.name}' for backend in backends]
     _packages += get_extra_packages("language")
     _packages += get_extra_packages("tools")
@@ -992,6 +1055,7 @@ def get_packages():
             "triton_dist/language/extra",
             "triton_dist/language/extra/cuda",
             "triton_dist/language/extra/hip",
+            "triton_dist/language/extra/ascend",
             "triton_dist/mega_triton_kernel",
             "triton_dist/function",
             "triton_dist/function/nvidia",
@@ -1000,6 +1064,7 @@ def get_packages():
             "triton_dist/layers/amd",
             "triton_dist/models",
             "triton_dist/test",
+            "triton_dist/test/ascend",
             "triton_dist/tools",
             "triton_dist/tools/compile",
             "triton_dist/tools/profiler",
@@ -1082,7 +1147,10 @@ def get_git_version_suffix():
 
 
 # set ext_modules
-ext_modules = [CMakeExtension("3rdparty/triton/python/triton", "triton/_C/")]
+if check_env_flag("TRITON_USE_ASCEND", "OFF"):
+    ext_modules = [CMakeExtension("3rdparty/triton-ascend/python/triton", "triton/_C/")]
+else:
+    ext_modules = [CMakeExtension("3rdparty/triton/python/triton", "triton/_C/")]
 
 # Dynamically define supported Python versions and classifiers
 MIN_PYTHON = (3, 9)

@@ -37,8 +37,15 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
+#ifndef TRITON_USE_ASCEND
 #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
+#endif
+
+#ifdef TRITON_USE_ASCEND
+#include "third_party/proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
+#else
 #include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#endif
 
 namespace {
 
@@ -135,14 +142,16 @@ void init_triton_distributed_ir(py::module &&m) {
 
   m.def("load_dialects", [](MLIRContext &context) {
     DialectRegistry registry;
-    registry
-        .insert<TritonDialect, ::mlir::triton::gpu::TritonGPUDialect,
-                math::MathDialect, arith::ArithDialect, scf::SCFDialect,
-                tensor::TensorDialect, ::mlir::gpu::GPUDialect,
-                cf::ControlFlowDialect, ::mlir::triton::proton::ProtonDialect,
-                ::mlir::triton::distributed::DistributedDialect,
-                ::mlir::triton::simt::SIMTDialect, LLVM::LLVMDialect,
-                mlir::ub::UBDialect>();
+    registry.insert<TritonDialect, ::mlir::triton::gpu::TritonGPUDialect,
+                    math::MathDialect, arith::ArithDialect, scf::SCFDialect,
+                    tensor::TensorDialect, ::mlir::gpu::GPUDialect,
+                    cf::ControlFlowDialect,
+                    ::mlir::triton::proton::ProtonDialect,
+                    ::mlir::triton::distributed::DistributedDialect,
+#ifndef TRITON_USE_ASCEND
+                    ::mlir::triton::simt::SIMTDialect,
+#endif
+                    LLVM::LLVMDialect, mlir::ub::UBDialect>();
     mlir::LLVM::registerInlinerInterface(registry);
     registerBuiltinDialectTranslation(registry);
     registerLLVMDialectTranslation(registry);
@@ -151,7 +160,8 @@ void init_triton_distributed_ir(py::module &&m) {
     context.loadAllAvailableDialects();
   });
 
-  // simt ops
+// simt ops
+#ifndef TRITON_USE_ASCEND
   py::class_<triton::simt::BlockYieldOp, OpState>(m, "BlockYieldOp",
                                                   py::module_local());
   py::class_<triton::simt::SIMTExecRegionOp, OpState>(m, "SIMTExecRegionOp",
@@ -162,7 +172,7 @@ void init_triton_distributed_ir(py::module &&m) {
             return &self.getDefaultRegion().front();
           },
           ret::reference);
-
+#endif
   // DistributedOpBuilder inherit the original triton builder and add the
   // support of TritonDitributed. In this way, we can directly use this new
   // builder without maintaining two builders on the Python side. Because the
@@ -170,7 +180,8 @@ void init_triton_distributed_ir(py::module &&m) {
   py::class_<DistributedOpBuilder, TritonOpBuilder>(
       m, "DistributedOpBuilder", py::module_local(), py::dynamic_attr())
       .def(py::init<MLIRContext *>())
-      // SIMT ops
+// SIMT ops
+#ifndef TRITON_USE_ASCEND
       .def("create_get_thread_id",
            [](TritonOpBuilder &self) -> Value {
              // triton only use 1D thread block
@@ -247,7 +258,7 @@ void init_triton_distributed_ir(py::module &&m) {
                                                              width, shflMode);
              return shflOp.getShuffleResult();
            })
-
+#endif
       // Distributed Ops
       .def("create_distributed_wait",
            [](TritonOpBuilder &self, Value &barrierPtrs, Value &numBarriers,

@@ -86,6 +86,14 @@ def is_maca():
         return False
 
 
+def is_ascend():
+    """Checks if 'npu-smi' is available on the system's PATH."""
+    if shutil.which("npu-smi"):
+        return True
+    else:
+        return False
+
+
 def get_shmem_backend():
     if is_cuda():
         return 'nvshmem'
@@ -142,6 +150,8 @@ elif is_hip():
                               "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
 elif is_maca():
     from maca import macart
+elif is_ascend():
+    pass
 else:
     raise Exception("either CUDA or HIP platform is supported")
 

@@ -7,3 +7,9 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "3rdparty/shmem"]
+	path = 3rdparty/shmem
+	url = https://gitcode.com/cann/shmem.git
+[submodule "3rdparty/triton-ascend"]
+	path = 3rdparty/triton-ascend
+	url = https://gitcode.com/Ascend/triton-ascend.git

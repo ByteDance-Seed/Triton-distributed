@@ -179,3 +179,86 @@ and see the following (reduced) output
 ```sh
 ✅ Triton and Torch match
 ```
+
+## To use Triton-distributed with the Ascend backend:
+#### Ascend Build from source
+1. Clone the repo
+```sh
+git clone https://github.com/ByteDance-Seed/Triton-distributed.git
+```
+2. Update submodules
+```sh
+cd Triton-distributed/
+git submodule update --init --depth=1
+cd 3rdparty/triton-ascend
+git submodule update --init --depth=1
+git apply ../triton-ascend.patch
+```
+3. Install dependencies
+
+triton-ascend depends on specified LLVM version
+- step 1：Build LLVM with clang and lld：
+
+  ```bash
+  apt-get install -y clang-15 lld-15 ccache
+  ```
+
+- step 2：set LLVM_INSTALL_PREFIX：
+
+   ```bash
+   export LLVM_INSTALL_PREFIX=/path/to/llvm-install
+   ```
+
+- step 3：Build and Install LLVM：
+
+  ```bash
+  git clone --no-checkout https://github.com/llvm/llvm-project.git
+  cd llvm-project
+  git checkout fad3272286528b8a491085183434c5ad4b59ab92
+  wget https://raw.gitcode.com/Ascend/triton-ascend/blobs/2b0a06eb21438359d6d0576b622e3bb5e0292d17/fad3272.patch
+  git apply fad3272.patch
+  mkdir build
+  cd build
+  cmake ../llvm \
+    -G Ninja \
+    -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
+    -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
+    -DCMAKE_LINKER=/usr/bin/lld-15 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_ENABLE_ASSERTIONS=ON \
+    -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
+    -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
+    -DLLVM_ENABLE_LLD=ON \
+    -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX}
+  ninja install
+  ```
+
+- step 4：copy FileCheck and llvm-lit to Install directory：
+
+   ```bash
+   cp  {PATH_TO}/llvm_project/build/bin/FileCheck ${LLVM_INSTALL_PREFIX}/bin/FileCheck
+   cp  {PATH_TO}/llvm_project/build/bin/llvm-lit ${LLVM_INSTALL_PREFIX}/bin/llvm-lit
+   ```
+4. Build Triton-distributed
+```sh
+cd {PATH_TO}/Triton-distributed
+LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} TRITON_BUILD_WITH_CLANG_LLD=ON TRITON_BUILD_PROTON=OFF TRITON_BUILD_LITTLE_KERNEL=OFF TRITON_USE_ASCEND=ON pip install ./python --verbose --no-build-isolation
+```
+
+5. Build and Install shmem
+```sh
+cd 3rdparty/shmem
+bash scripts/build.sh -python_extension
+pip install dist/shmem-xxx.whl
+```
+### Test Ascend Installation
+#### Allgather GEMM example on single node
+```sh
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+torchrun --nproc-per-node=2 tutorials/11-ascend-allgather-gemm.py
+```
+and see the following (reduced) output
+```sh
+[PASS] Rank0: C_golden and C match within tolerances (rtol=1e-3, atol=1e-3).
+[PASS] Rank1: C_golden and C match within tolerances (rtol=1e-3, atol=1e-3).
+```

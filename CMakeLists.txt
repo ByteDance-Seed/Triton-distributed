@@ -15,7 +15,17 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 project(triton CXX C)
 include(CTest)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/cmake")
+option(TRITON_USE_ASCEND "Build the Triton Ascend" OFF)
+
+if(TRITON_USE_ASCEND)
+  add_compile_definitions(TRITON_USE_ASCEND=1)
+endif()
+
+if(TRITON_USE_ASCEND)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton-ascend/cmake")
+else()
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/cmake")
+endif()
 
 # Options
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
@@ -85,7 +95,11 @@ if(TRITON_BUILD_UT)
 endif()
 
 # Compiler flags
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/include)
+if(TRITON_USE_ASCEND)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton-ascend/include)
+else()
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/include)
+endif()
 if(NOT MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17")
 else()
@@ -101,6 +115,12 @@ endif()
 # #########
 if(NOT MLIR_DIR)
   set(MLIR_DIR ${LLVM_LIBRARY_DIR}/cmake/mlir)
+endif()
+
+if(TRITON_USE_ASCEND)
+  if(NOT LLD_DIR)
+    set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
+  endif()
 endif()
 
 # MLIR
@@ -155,23 +175,57 @@ endif()
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include)
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton)
+if(TRITON_USE_ASCEND)
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton-ascend)
+else()
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton)
+endif()
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/include)
-include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/include) # Tablegen'd files
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party)
-include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablegen'd files
-# backend
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
+if(TRITON_USE_ASCEND)
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton-ascend/include)
+  include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton-ascend/include) # Tablegen'd files
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton-ascend/third_party)
+  include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton-ascend/third_party) # Tablegen'd files
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton-ascend/third_party/ascend/AscendNPU-IR/bishengir/include)
+  include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton-ascend/third_party/ascend/AscendNPU-IR/bishengir/include) # Tablegen'd files
+else()
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/include)
+  include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/include) # Tablegen'd files
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party)
+  include_directories(${PROJECT_BINARY_DIR}/3rdparty/triton/third_party) # Tablegen'd files
+  # backend
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/amd/include)
+  include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/nvidia/include)
+endif()
 if(TRITON_USE_MACA)
   include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton/third_party/metax/include)
 endif()
 
+# Adapter LLVM VERSION For AscendNPU IR
+option(LLVM_MAJOR_VERSION_21_COMPATIBLE "NPUIR build with LLVM 21 or later" OFF)
+if(LLVM_MAJOR_VERSION_21_COMPATIBLE)
+  message(STATUS "[TA]Building AscendNPU IR with LLVM 21 or later")
+  add_definitions(-D__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
+endif()
+
+# Some compatibility changes for LLVM 21 are also needed on LLVM 22.
+# Therefore __LLVM_MAJOR_VERSION_21_COMPATIBLE__ would be enabled too.
+option(LLVM_MAJOR_VERSION_22_COMPATIBLE "NPUIR build with LLVM 22" OFF)
+if(LLVM_MAJOR_VERSION_22_COMPATIBLE)
+  message(STATUS "[TA]Building AscendNPU IR with LLVM 22 or later")
+  add_definitions(-D__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
+  add_definitions(-D__LLVM_MAJOR_VERSION_22_COMPATIBLE__)
+endif()
+
 # link_directories(${LLVM_LIBRARY_DIR})
-add_subdirectory(3rdparty/triton/include)
-add_subdirectory(3rdparty/triton/lib)
+if(TRITON_USE_ASCEND)
+  add_subdirectory(3rdparty/triton-ascend/include)
+  add_subdirectory(3rdparty/triton-ascend/lib)
+else()
+  add_subdirectory(3rdparty/triton/include)
+  add_subdirectory(3rdparty/triton/lib)
+endif()
 add_subdirectory(include)
 add_subdirectory(lib)
 
@@ -190,10 +244,16 @@ endif()
 if(TRITON_BUILD_PYTHON_MODULE)
   message(STATUS "Adding Python module for TritonDistributed")
   set(PYTHON_DIST_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/python/src)
-  add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
-                                      ${PYTHON_DIST_SRC_PATH}/passes.cc
-                                      ${PYTHON_DIST_SRC_PATH}/ir.cc)
-  if(TRITON_USE_MACA)
+  if(TRITON_USE_ASCEND)
+    add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
+                                        ${PYTHON_DIST_SRC_PATH}/ascend_passes.cc
+                                        ${PYTHON_DIST_SRC_PATH}/ir.cc)
+  else()
+    add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
+                                        ${PYTHON_DIST_SRC_PATH}/passes.cc
+                                        ${PYTHON_DIST_SRC_PATH}/ir.cc)
+  endif()
+  if(TRITON_USE_MACA OR TRITON_USE_ASCEND)
     target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
   else()
     target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
@@ -202,12 +262,20 @@ endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)
   message(STATUS "Adding Python module")
-  set(PYTHON_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/python/src)
+  if(TRITON_USE_ASCEND)
+    set(PYTHON_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton-ascend/python/src)
+  else()
+    set(PYTHON_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/triton/python/src)
+  endif()
   include_directories(${PYTHON_SRC_PATH})
 
   # Python Interpreter is used to run lit tests
   find_package(Python3 REQUIRED COMPONENTS Development.Module Interpreter)
   find_package(pybind11 CONFIG REQUIRED HINTS "${Python3_SITELIB}")
+  if(TRITON_USE_ASCEND)
+    include_directories(${Python3_INCLUDE_DIR})
+    include_directories(${pybind11_INCLUDE_DIR})
+  endif()
 
   if (DEFINED TRITON_PLUGIN_DIRS)
     foreach(PLUGIN_DIR ${TRITON_PLUGIN_DIRS})
@@ -227,19 +295,34 @@ if(TRITON_BUILD_PYTHON_MODULE)
   endif()
 
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
-    add_subdirectory(3rdparty/triton/third_party/${CODEGEN_BACKEND})
+    if(TRITON_USE_ASCEND)
+      add_subdirectory(3rdparty/triton-ascend/third_party/${CODEGEN_BACKEND})
+    else()
+      add_subdirectory(3rdparty/triton/third_party/${CODEGEN_BACKEND})
+    endif()
   endforeach()
 
   if (TRITON_BUILD_PROTON)
-    add_subdirectory(3rdparty/triton/third_party/proton)
+    if(TRITON_USE_ASCEND)
+      add_subdirectory(3rdparty/triton-ascend/third_party/proton)
+    else()
+      add_subdirectory(3rdparty/triton/third_party/proton)
+    endif()
+  endif()
+  if(TRITON_USE_ASCEND)
+    # We always build proton dialect
+    list(APPEND TRITON_PLUGIN_NAMES "proton")
+    add_subdirectory(3rdparty/triton-ascend/third_party/proton/Dialect)
   endif()
   if (TRITON_BUILD_DISTRIBUTED)
     add_subdirectory(csrc)
   endif()
   # build proton dialect
   if(NOT TRITON_USE_MACA)
-    list(APPEND TRITON_PLUGIN_NAMES "proton")
-    add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+    if(NOT TRITON_USE_ASCEND)
+      list(APPEND TRITON_PLUGIN_NAMES "proton")
+      add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+    endif()
   endif()
   # We always build distributed dialect
   list(APPEND TRITON_PLUGIN_NAMES "distributed")
@@ -330,6 +413,14 @@ if(TRITON_BUILD_PYTHON_MODULE)
                     ${PYTHON_SRC_PATH}/passes.cc
                     ${PYTHON_SRC_PATH}/interpreter.cc
                     ${PYTHON_SRC_PATH}/llvm.cc)
+  elseif(TRITON_USE_ASCEND)
+    add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
+                ${PYTHON_SRC_PATH}/ir.cc
+                ${PYTHON_SRC_PATH}/../triton/extension/buffer/src/buffer_ir.cc
+                ${PYTHON_SRC_PATH}/gluon_ir.cc
+                ${PYTHON_SRC_PATH}/passes.cc
+                ${PYTHON_SRC_PATH}/interpreter.cc
+                ${PYTHON_SRC_PATH}/llvm.cc)
   else()
     add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                     ${PYTHON_SRC_PATH}/ir.cc
@@ -382,19 +473,37 @@ endif()
 
 if(NOT TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
-    add_subdirectory(3rdparty/triton/third_party/${CODEGEN_BACKEND})
+    if(TRITON_USE_ASCEND)
+      add_subdirectory(3rdparty/triton-ascend/third_party/${CODEGEN_BACKEND})
+    else()
+      add_subdirectory(3rdparty/triton/third_party/${CODEGEN_BACKEND})
+    endif()
   endforeach()
-  add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+  if(TRITON_USE_ASCEND)
+    add_subdirectory(3rdparty/triton-ascend/third_party/proton/Dialect)
+  else()
+    add_subdirectory(3rdparty/triton/third_party/proton/dialect)
+  endif()
 endif()
 
 find_package(Threads REQUIRED)
 
-add_subdirectory(3rdparty/triton/third_party/f2reduce)
-add_subdirectory(3rdparty/triton/bin)
-add_subdirectory(3rdparty/triton/test)
+if(TRITON_USE_ASCEND)
+  add_subdirectory(3rdparty/triton-ascend/third_party/f2reduce)
+  add_subdirectory(3rdparty/triton-ascend/bin)
+  add_subdirectory(3rdparty/triton-ascend/test)
+else()
+  add_subdirectory(3rdparty/triton/third_party/f2reduce)
+  add_subdirectory(3rdparty/triton/bin)
+  add_subdirectory(3rdparty/triton/test)
+endif()
 
 if(TRITON_BUILD_UT)
-  add_subdirectory(3rdparty/triton/unittest)
+  if(TRITON_USE_ASCEND)
+    add_subdirectory(3rdparty/triton-ascend/unittest)
+  else()
+    add_subdirectory(3rdparty/triton/unittest)
+  endif()
   # This target runs all the unit tests.
   add_custom_target(check-triton-unit-tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
