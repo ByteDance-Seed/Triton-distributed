@@ -23,443 +23,451 @@
 #
 ################################################################################
 from .utils import ModuleProxy
-from triton_dist.utils import is_cuda, is_rocshmem, is_mori_shmem, is_maca
-import triton_dist.language.extra.cuda.libnvshmem_device as libnvshmem_device
-import triton_dist.language.extra.hip.librocshmem_device as librocshmem_device
-import triton_dist.language.extra.hip.libmori_shmem_device as libmori_shmem_device
-import triton_dist.language.extra.maca.libmxshmem_device as libmxshmem_device
+from triton_dist.utils import is_ascend, is_cuda, is_rocshmem, is_mori_shmem, is_maca
+
+proxy_list = []
+if is_cuda():
+    import triton_dist.language.extra.cuda.libnvshmem_device as libnvshmem_device
+    proxy_list.append((is_cuda, libnvshmem_device))
+if is_rocshmem():
+    import triton_dist.language.extra.hip.librocshmem_device as librocshmem_device
+    proxy_list.append((is_rocshmem, librocshmem_device))
+if is_mori_shmem():
+    import triton_dist.language.extra.hip.libmori_shmem_device as libmori_shmem_device
+    proxy_list.append((is_mori_shmem, libmori_shmem_device))
+if is_maca():
+    import triton_dist.language.extra.maca.libmxshmem_device as libmxshmem_device
+    proxy_list.append((is_maca, libmxshmem_device))
+if is_ascend():
+    import triton_dist.language.extra.ascend.libaclshmem_device as libaclshmem_device
+    proxy_list.append((is_ascend, libaclshmem_device))
 
 import sys
 
-_shmem_module = ModuleProxy([
-    (is_cuda, libnvshmem_device),
-    (is_rocshmem, librocshmem_device),
-    (is_mori_shmem, libmori_shmem_device),
-    (is_maca, libmxshmem_device),
-])
+_shmem_module = ModuleProxy(proxy_list)
 
 
 @_shmem_module.dispatch
-def set_rocshmem_ctx(ctx):
+def set_rocshmem_ctx(ctx, _semantic=None):
     """ROCSHMEM only"""
     ...
 
 
 @_shmem_module.dispatch
-def my_pe():
+def my_pe(_semantic=None):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 @_shmem_module.dispatch
-def n_pes():
+def n_pes(_semantic=None):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 @_shmem_module.dispatch
-def team_my_pe(team):
+def team_my_pe(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def team_n_pes(team):
+def team_n_pes(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def int_p(dest, value, pe, qp_id=0):
+def int_p(dest, value, pe, qp_id=0, _semantic=None):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 @_shmem_module.dispatch
-def remote_ptr(local_ptr, pe):
+def remote_ptr(local_ptr, pe, _semantic=None):
     """Both NVSHMEM and ROCSHMEM"""
     ...
 
 
 @_shmem_module.dispatch
-def remote_mc_ptr(team, ptr):
+def remote_mc_ptr(team, ptr, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_all():
+def barrier_all(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_all_block():
+def barrier_all_vec(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_all_warp():
+def barrier_all_block(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_all_wave():
+def barrier_all_warp(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_all_wg():
+def barrier_all_wave(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier(team):
+def barrier_all_wg(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_block(team):
+def barrier(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def barrier_warp(team):
+def barrier_block(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def sync_all():
+def barrier_warp(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def sync_all_block():
+def sync_all(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def sync_all_warp():
+def sync_all_block(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def team_sync_block(team):
+def sync_all_warp(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def team_sync_warp(team):
+def team_sync_block(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def quiet():
+def team_sync_warp(team, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def quiet_pe():
+def quiet(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fence():
+def quiet_pe(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_nbi_block(dest, source, bytes, pe):
+def fence(_semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_block(dest, source, bytes, pe):
+def getmem_nbi_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_nbi_warp(dest, source, bytes, pe):
+def getmem_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_warp(dest, source, bytes, pe):
+def getmem_nbi_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_nbi(dest, source, bytes, pe):
+def getmem_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_nbi_wave(dest, source, bytes, pe):
+def getmem_nbi(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_nbi_wg(dest, source, bytes, pe):
+def getmem_nbi_wave(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem(dest, source, bytes, pe):
+def getmem_nbi_wg(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_wave(dest, source, bytes, pe):
+def getmem(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def getmem_wg(dest, source, bytes, pe):
+def getmem_wave(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_block(dest, source, bytes, pe):
+def getmem_wg(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_nbi_block(dest, source, bytes, pe):
+def putmem_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_warp(dest, source, bytes, pe):
+def putmem_nbi_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_nbi_warp(dest, source, bytes, pe):
+def putmem_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem(dest, source, bytes, pe):
+def putmem_nbi_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_wave(dest, source, bytes, pe):
+def putmem(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_wg(dest, source, bytes, pe):
+def putmem_wave(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_nbi(dest, source, bytes, pe, qp_id=0):
+def putmem_wg(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_nbi_wave(dest, source, bytes, pe):
+def putmem_nbi(dest, source, bytes, pe, qp_id=0, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_nbi_wg(dest, source, bytes, pe):
+def putmem_nbi_wave(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_nbi_wg(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe, qp_id=0):
+def putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe, qp_id=0, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_block(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi_warp(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_block(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_warp(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi_warp(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_warp(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_wave(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_wg(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi_wave(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def signal_op(sig_addr, signal, sig_op, pe):
+def putmem_signal_nbi_wg(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def signal_wait_until(sig_addr, cmp_, cmp_val):
+def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def uint64_wait_until_equals(addr, val):
+def uint64_wait_until_equals(addr, val, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def ulong_put_signal(dest, source, nelems, sig_addr, signal, sig_op, pe):
+def ulong_put_signal(dest, source, nelems, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 # DON'T USE THIS. NVSHMEM 3.2.5 does not implement this
 @_shmem_module.dispatch
-def broadcastmem(team, dest, source, nelems, pe_root):
+def broadcastmem(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def broadcastmem_warp(team, dest, source, nelems, pe_root):
+def broadcastmem_warp(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def broadcastmem_block(team, dest, source, nelems, pe_root):
+def broadcastmem_block(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def broadcast(team, dest, source, nelems, pe_root):
+def broadcast(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def broadcast_warp(team, dest, source, nelems, pe_root):
+def broadcast_warp(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def broadcast_block(team, dest, source, nelems, pe_root):
+def broadcast_block(team, dest, source, nelems, pe_root, _semantic=None):
     ...
 
 
 # DON'T USE THIS. NVSHMEM 3.2.5 does not implement this
 @_shmem_module.dispatch
-def fcollectmem(team, dest, source, nelems):
+def fcollectmem(team, dest, source, nelems, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fcollectmem_warp(team, dest, source, nelems):
+def fcollectmem_warp(team, dest, source, nelems, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fcollectmem_block(team, dest, source, nelems):
+def fcollectmem_block(team, dest, source, nelems, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fcollect(team, dest, source, nelems):
+def fcollect(team, dest, source, nelems, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fcollect_warp(team, dest, source, nelems):
+def fcollect_warp(team, dest, source, nelems, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def fcollect_block(team, dest, source, nelems):
+def fcollect_block(team, dest, source, nelems, _semantic=None):
     ...
 
 
 ### putmem_rma_* and putmem_signal_rma_* requires nvshmemi_* APIs. and you have to compile the .bc file yourself with shmem/nvshmem_bind/nvshmemi/build_nvshmemi_bc.sh
 @_shmem_module.dispatch
-def putmem_rma(dest, source, bytes, pe):
+def putmem_rma(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_rma_block(dest, source, bytes, pe):
+def putmem_rma_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_rma_warp(dest, source, bytes, pe):
+def putmem_rma_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_rma_nbi(dest, source, bytes, pe):
+def putmem_rma_nbi(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_rma_nbi_block(dest, source, bytes, pe):
+def putmem_rma_nbi_block(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_rma_nbi_warp(dest, source, bytes, pe):
+def putmem_rma_nbi_warp(dest, source, bytes, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma_nbi(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma_warp(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma_warp(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma_nbi_warp(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma_nbi_warp(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma_block(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma_block(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 @_shmem_module.dispatch
-def putmem_signal_rma_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe):
+def putmem_signal_rma_nbi_block(dest, source, bytes, sig_addr, signal, sig_op, pe, _semantic=None):
     ...
 
 
 # TEAM translate
 @_shmem_module.dispatch
-def team_translate_pe(src_team, pe_in_src_team, dest_team):
+def team_translate_pe(src_team, pe_in_src_team, dest_team, _semantic=None):
     ...
 
 

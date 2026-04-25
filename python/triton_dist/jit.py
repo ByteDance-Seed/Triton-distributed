@@ -35,7 +35,7 @@ import triton
 from triton.runtime.errors import PTXASError
 from triton.runtime.jit import JITFunction, KernelInterface
 from triton import knobs
-from triton_dist.utils import is_cuda, is_hip, is_maca, HIP_CHECK
+from triton_dist.utils import is_ascend, is_cuda, is_hip, is_maca, HIP_CHECK
 
 T = TypeVar("T")
 
@@ -95,6 +95,8 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
         if "mxshmem" in kernel.asm['ttir']:
             import pymxshmem
             pymxshmem.mxshmemx_mcmodule_init(kernel_module)
+    elif is_ascend():
+        pass
     else:
         raise ValueError("Unsupported device type for shmem kernel module init hook.")
 
