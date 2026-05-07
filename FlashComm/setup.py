@@ -47,6 +47,19 @@ def get_extension():
         cuda_arch = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
     os.environ['TORCH_CUDA_ARCH_LIST'] = cuda_arch
     print(f"Using CUDA architecture: {cuda_arch}")
+
+    # Derive max dynamic shared memory per block (bytes) from target arch.
+    # Reference: NVIDIA Programming Guide per-arch shared memory limits.
+    #   SM 8.x (Ampere):   164 KB per SM → max per block = 163 KB
+    #   SM 9.0 (Hopper):   228 KB per SM → max per block = 227 KB
+    #   SM 10.0 (Blackwell): 228 KB per SM → max per block = 227 KB
+    _smem_per_block_kb = {8: 163, 9: 227, 10: 227}
+    arch_tokens = [a.strip() for a in cuda_arch.replace('+PTX', '').replace('a', '').split(';') if a.strip()]
+    max_major = max(int(float(a)) for a in arch_tokens) if arch_tokens else 9
+    max_smem_kb = _smem_per_block_kb.get(max_major, 227)
+    max_smem_bytes = max_smem_kb * 1024
+    print(f"Max dynamic shared memory per block: {max_smem_kb} KB ({max_smem_bytes} bytes) for SM major={max_major}")
+
     sources = [
         os.path.join("csrc", "ep", "kernels", "intranode_cuda.cu"),
         os.path.join("csrc", "ep", "intranode.cpp"),
@@ -83,16 +96,19 @@ def get_extension():
     library_dirs = [str(p) for p in candidate_lib_dirs if p and p.exists()]
     extra_compile_args = {}
     extra_link_args = ['-lcuda', '-lcudart']
+    smem_define = f"-DFLASH_COMM_MAX_SMEM_BYTES={max_smem_bytes}"
     nvcc_flags = [
         "-std=c++17",
         "--expt-relaxed-constexpr",
         "-Xcompiler",
         "-fPIC,-fvisibility=hidden",
         "-O3",
+        smem_define,
     ]
     cxx_flags = [
         "-std=c++17",
         "-fvisibility=hidden",
+        smem_define,
     ]
     extra_compile_args["nvcc"] = nvcc_flags
     extra_compile_args["cxx"] = cxx_flags

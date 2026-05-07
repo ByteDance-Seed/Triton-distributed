@@ -33,6 +33,7 @@ import os
 from contextlib import nullcontext
 from flash_comm.ep import EPKernels
 from flash_comm.ep.ep_kernels import EPCommLayoutDesc
+import flash_comm._C.ep_intranode as _ep
 
 EP_GROUP = None
 RANK = int(os.environ.get("RANK", 0))
@@ -102,7 +103,7 @@ torch.set_printoptions(precision=4)
 def _check(out: torch.Tensor, ref: torch.Tensor, msg: str = "FlashComm"):
     try:
         torch.testing.assert_close(out, ref, rtol=0, atol=0)
-        print(f"✅ RANK[{RANK}] check {msg} passed")
+        # print(f"✅ RANK[{RANK}] check {msg} passed")
     except Exception as e:
         print(f"❌ RANK[{RANK}] check {msg} failed")
         raise e
@@ -145,6 +146,19 @@ def calc_full_scatter_indices(exp_indices):
     return ag_scatter_idx
 
 
+def densify_aligned_output(aligned_out: torch.Tensor, expert_counts: torch.Tensor,
+                           expert_alignment: int) -> torch.Tensor:
+    """Extract actual tokens from an expert-aligned buffer, removing padding gaps."""
+    parts = []
+    offset = 0
+    for le in range(len(expert_counts)):
+        n = expert_counts[le].item()
+        parts.append(aligned_out[offset:offset + n])
+        aligned_n = ((n + expert_alignment - 1) // expert_alignment) * expert_alignment
+        offset += aligned_n
+    return torch.cat(parts, dim=0)
+
+
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -176,6 +190,8 @@ def parse_args():
     parser.add_argument("--num_worst_tokens", default=-1, type=int, help="num worst tokens")
     parser.add_argument("--disable-weight-combine", action="store_true", help="disable weight combine")
     parser.add_argument("--disable-weight-dispatch", action="store_true", help="disable weight dispatch")
+    parser.add_argument("--expert-alignment", default=1, type=int,
+                        help="pad each expert's recv buffer to a multiple of this value (default 1 = no padding)")
     return parser.parse_args()
 
 
@@ -277,7 +293,9 @@ def torch_forward_single(input, weight, exp_indices, num_experts):
         permute_a2a_expert_weight = torch.cat(permute_a2a_expert_weight_list, dim=0)
     else:
         permute_a2a_expert_weight = None
-    return permute_a2a_expert_input, permute_a2a_expert_weight
+
+    local_expert_counts = a2a_splits_cpu.reshape(ep_size, num_experts_per_rank).sum(dim=0)
+    return permute_a2a_expert_input, permute_a2a_expert_weight, local_expert_counts
 
 
 def torch_backward_single(input, exp_indices, num_experts, enable_local_combine=False):
@@ -418,7 +436,8 @@ if __name__ == "__main__":
         return input, weight, exp_indices
 
     ep_kernels = EPKernels(max_m=args.M, hidden=args.N, topk=args.topk, num_experts=args.G, local_world_size=WORLD_SIZE,
-                           ep_group=EP_GROUP, num_sm=args.num_sm, num_worst_tokens=args.num_worst_tokens)
+                           ep_group=EP_GROUP, num_sm=args.num_sm, num_worst_tokens=args.num_worst_tokens,
+                           expert_alignment=args.expert_alignment)
 
     def _run_dispatch(input, weight, exp_indices, copy_out=False):
         token_within_expert_offset, expert_counts = ep_kernels.compute_stable_local_token_within_expert_offset_and_expert_counts(
@@ -453,6 +472,37 @@ if __name__ == "__main__":
                                                              weight_preprocessed=combine_weight_buf)
         return combine_out, combine_out_weight
 
+    def _run_layout_only(exp_indices):
+        token_within_expert_offset, expert_counts = ep_kernels.compute_stable_local_token_within_expert_offset_and_expert_counts(
+            exp_indices)
+        layout_desc = EPCommLayoutDesc(token_within_expert_offset=token_within_expert_offset,
+                                       expert_counts=expert_counts)
+        ep_kernels.ep_group_barrier()
+        (
+            layout_desc.recv_base_offset,
+            layout_desc.token_dst_scatter_indices,
+            layout_desc.token_topk_send_mask,
+            layout_desc.recv_token_count_cpu,
+            layout_desc.recv_token_count,
+            layout_desc.recv_aligned_token_count_cpu,
+            layout_desc.recv_aligned_token_count,
+            layout_desc.recv_expert_counts,
+        ) = _ep.compute_dispatch_layout(
+            exp_indices,
+            layout_desc.token_within_expert_offset,
+            layout_desc.expert_counts,
+            ep_kernels.ep_context.full_splits_buf_ptrs,
+            ep_kernels.ep_context.nvl_barrier_buf_ptrs,
+            ep_kernels.ep_context.config.num_experts,
+            ep_kernels.ep_context.config.rank,
+            ep_kernels.ep_context.config.world_size,
+            ep_kernels.num_sm,
+            ep_kernels.ep_context.recv_token_count_cpu,
+            expert_alignment=ep_kernels.expert_alignment,
+        )
+        ep_kernels.ep_group_barrier()
+        return layout_desc
+
     if args.disable_weight_dispatch:
         assert args.disable_weight_combine, "disable-weight-dispatch requires --disable-weight-combine"
     if RANK == 0:
@@ -486,19 +536,20 @@ if __name__ == "__main__":
                 flash_combine_input_buf = _prepare_combine_input(flash_combine_input)
                 flash_combine_out, flash_combine_weight = _run_combine(flash_combine_input_buf, flash_layout_desc,
                                                                        weight=flash_combine_weight, zero_copy=True)
-                flash_dispatch_out_list.append((flash_dispatch_out, flash_dispatch_weight))
+                flash_dispatch_out_list.append((flash_dispatch_out, flash_dispatch_weight, flash_layout_desc))
                 flash_combine_out_list.append((flash_combine_out, flash_combine_weight))
 
             # torch impl
             for input, weight, exp_indices in input_list:
-                ref_dispatch_out, ref_dispatch_weight = torch_forward_single(input, weight, exp_indices, args.G)
+                ref_dispatch_out, ref_dispatch_weight, local_expert_counts = torch_forward_single(
+                    input, weight, exp_indices, args.G)
                 if ref_dispatch_weight is None:
                     ref_combine_input = ref_dispatch_out.to(input_dtype)
                 else:
                     ref_combine_input = (ref_dispatch_weight.reshape(-1, 1) * ref_dispatch_out).to(input_dtype)
                 ref_combine_out = torch_backward_single(ref_combine_input, exp_indices, args.G,
                                                         enable_local_combine=args.enable_local_combine)
-                ref_dispatch_out_list.append((ref_dispatch_out, ref_dispatch_weight))
+                ref_dispatch_out_list.append((ref_dispatch_out, ref_dispatch_weight, local_expert_counts))
                 if not args.disable_weight_combine:
                     if weight is None:
                         ref_combine_weight = None
@@ -511,27 +562,36 @@ if __name__ == "__main__":
 
             # verify dispatch
             for idx, (ref_out, flash_out) in enumerate(zip(ref_dispatch_out_list, flash_dispatch_out_list)):
-                ref_dispatch_out, ref_dispatch_weight = ref_out
+                ref_dispatch_out, ref_dispatch_weight, local_expert_counts = ref_out
                 num_recv_token = ref_dispatch_out.shape[0]
-                flash_dispatch_out, flash_dispatch_weight = flash_out
-                flash_dispatch_out = flash_dispatch_out[:num_recv_token]
-                if flash_dispatch_weight is not None:
-                    flash_dispatch_weight = flash_dispatch_weight[:num_recv_token]
+                flash_dispatch_out, flash_dispatch_weight, flash_layout_desc = flash_out
+
+                if args.expert_alignment > 1:
+                    flash_dispatch_out = densify_aligned_output(flash_dispatch_out, local_expert_counts,
+                                                                args.expert_alignment)
+                    if flash_dispatch_weight is not None:
+                        flash_dispatch_weight = densify_aligned_output(flash_dispatch_weight, local_expert_counts,
+                                                                       args.expert_alignment)
+                else:
+                    flash_dispatch_out = flash_dispatch_out[:num_recv_token]
+                    if flash_dispatch_weight is not None:
+                        flash_dispatch_weight = flash_dispatch_weight[:num_recv_token]
+
                 if RANK == 0:
                     print(
                         f"dispatch: shape = {ref_dispatch_out.shape}, {flash_dispatch_out.shape}, ref_sum = {ref_dispatch_out.to(torch.float32).sum()}, flash_sum = {flash_dispatch_out.to(torch.float32).sum()}"
                     )
-                    # mask = ref_dispatch_out != flash_dispatch_out
-                    # print(f"mask = {mask.nonzero()}, sum = {mask.sum()}, x[mask] = {ref_dispatch_out[mask]}, y[mask] = {flash_dispatch_out[mask]}")
 
                 torch.testing.assert_close(ref_dispatch_out, flash_dispatch_out, rtol=0, atol=0)
+                if flash_layout_desc.recv_expert_counts is not None:
+                    _check(flash_layout_desc.recv_expert_counts.cpu(), local_expert_counts.to(torch.int32),
+                           f"recv_expert_counts[{idx}]")
                 assert (ref_dispatch_weight is None) == (flash_dispatch_weight is None), \
                     f"Weight None-ness mismatch: ref={ref_dispatch_weight is None}, flash={flash_dispatch_weight is None}"
                 if ref_dispatch_weight is not None:
                     torch.testing.assert_close(ref_dispatch_weight, flash_dispatch_weight, rtol=0, atol=0)
                     bitwise_equal(ref_dispatch_weight, flash_dispatch_weight)
                 bitwise_equal(ref_dispatch_out, flash_dispatch_out)
-                # assert_close(ref_dispatch_out, flash_dispatch_out, rtol=0, atol=0)
 
             # verify combine
             for idx, ((ref_combine_out, ref_combine_weight),
@@ -566,9 +626,9 @@ if __name__ == "__main__":
         ctx = get_torch_prof_ctx(args.profile)
         copy_dispatch_out = False
         with ctx:
-            (ref_dispatch_out,
-             ref_dispatch_weight), _ = perf_func(partial(torch_forward_single, input, weight, exp_indices, args.G),
-                                                 iters=10, warmup_iters=2)
+            (ref_dispatch_out, ref_dispatch_weight,
+             ref_local_expert_counts), _ = perf_func(partial(torch_forward_single, input, weight, exp_indices, args.G),
+                                                     iters=10, warmup_iters=2)
             if ref_dispatch_weight is None:
                 ref_combine_input = ref_dispatch_out.to(input_dtype)
             else:
@@ -577,6 +637,8 @@ if __name__ == "__main__":
             ref_combine_out, _ = perf_func(
                 partial(torch_backward_single, ref_combine_input, exp_indices, args.G,
                         enable_local_combine=args.enable_local_combine), iters=10, warmup_iters=2)
+
+            _, flash_comm_layout_perf = perf_func(partial(_run_layout_only, exp_indices), iters=100, warmup_iters=20)
 
             (dispatch_out, dispatch_weights, layout_desc), flash_comm_dispatch_perf = perf_func(
                 partial(_run_dispatch, input, weight, exp_indices, copy_dispatch_out), iters=100, warmup_iters=20)
@@ -610,13 +672,21 @@ if __name__ == "__main__":
                 f"input = {input.shape}, weight = {None if weight is None else weight.shape}, ref_dispatch_out = {ref_dispatch_out.shape}, dispatch_out = {dispatch_out.shape}, combine_out = {combine_out.shape}, combine_out_weight is not None = {combine_out_weight is not None}"
             )
         print(
-            f"RANK {RANK}: flash_comm_dispatch_perf = {flash_comm_dispatch_perf}ms, flash_comm_combine_perf = {flash_comm_combine_perf}ms"
+            f"RANK {RANK}: flash_comm_layout_perf = {flash_comm_layout_perf}ms, flash_comm_dispatch_perf = {flash_comm_dispatch_perf}ms, flash_comm_combine_perf = {flash_comm_combine_perf}ms"
         )
         num_recv_token = ref_dispatch_out.shape[0]
-        dispatch_out = dispatch_out[:num_recv_token]
-        if dispatch_weights is not None:
-            dispatch_weights = dispatch_weights[:num_recv_token]
+        if args.expert_alignment > 1:
+            dispatch_out = densify_aligned_output(dispatch_out, ref_local_expert_counts, args.expert_alignment)
+            if dispatch_weights is not None:
+                dispatch_weights = densify_aligned_output(dispatch_weights, ref_local_expert_counts,
+                                                          args.expert_alignment)
+        else:
+            dispatch_out = dispatch_out[:num_recv_token]
+            if dispatch_weights is not None:
+                dispatch_weights = dispatch_weights[:num_recv_token]
         torch.testing.assert_close(dispatch_out, ref_dispatch_out, rtol=0, atol=0)
+        if layout_desc.recv_expert_counts is not None:
+            _check(layout_desc.recv_expert_counts.cpu(), ref_local_expert_counts.to(torch.int32), "recv_expert_counts")
         torch.testing.assert_close(combine_out, ref_combine_out, rtol=0, atol=0)
         assert (ref_dispatch_weight is None) == (dispatch_weights is None), \
             f"Weight None-ness mismatch: ref={ref_dispatch_weight is None}, flash={dispatch_weights is None}"

@@ -38,6 +38,15 @@ namespace intranode {
 
 namespace kernels {
 
+// Promote index * stride to int64_t before pointer arithmetic to prevent
+// int32 overflow when token counts are large (e.g. index=300K, stride=7168
+// would overflow int32).
+template <typename T>
+__device__ __forceinline__ T *offset_ptr(T *base, int32_t index,
+                                         int32_t stride) {
+  return base + static_cast<int64_t>(index) * stride;
+}
+
 namespace smem {
 constexpr int32_t kTMAAlignment = 128;
 // Original dispatch smem (stage-per-token, no token-chunk meta prefetch).
@@ -130,6 +139,83 @@ struct CombineIntraNodeSmem<token_t, weight_t, kHiddenSize, kNumLoadStages, 0,
   token_t *x_ptrs[flash_comm::kMaxWorldSize];
   weight_t *weight_ptrs[flash_comm::kMaxWorldSize];
   WarpGroupSmem warp_group_smem[kNumWGPerBlock];
+};
+
+// smem helpers: compute the maximum number of pipeline stages that fit
+// within kMaxSmemSize for each kernel's shared memory layout.
+// compile-time binary search on sizeof(SmemStruct<..., N>).
+
+template <typename token_t, typename weight_t, typename offset_t,
+          int32_t kHiddenSize, int32_t kMaxSmemSize, int32_t Lo = 1,
+          int32_t Hi = 64>
+struct MaxDispatchStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(DispatchIntraNodeSmem<token_t, weight_t, offset_t, kHiddenSize,
+                                   Mid>) <= kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits ? MaxDispatchStages<token_t, weight_t, offset_t, kHiddenSize,
+                                      kMaxSmemSize, Mid, Hi>::value
+                  : MaxDispatchStages<token_t, weight_t, offset_t, kHiddenSize,
+                                      kMaxSmemSize, Lo, Mid - 1>::value);
+};
+
+template <typename token_t, typename weight_t, typename offset_t,
+          int32_t kHiddenSize, int32_t kMaxSmemSize, int32_t kTopk,
+          int32_t kChunkSize, int32_t Lo = 1, int32_t Hi = 64>
+struct MaxDispatchChunkStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(DispatchIntraNodeChunkSmem<token_t, weight_t, offset_t,
+                                        kHiddenSize, Mid, kTopk, kChunkSize>) <=
+      kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits ? MaxDispatchChunkStages<token_t, weight_t, offset_t,
+                                           kHiddenSize, kMaxSmemSize, kTopk,
+                                           kChunkSize, Mid, Hi>::value
+                  : MaxDispatchChunkStages<token_t, weight_t, offset_t,
+                                           kHiddenSize, kMaxSmemSize, kTopk,
+                                           kChunkSize, Lo, Mid - 1>::value);
+};
+
+template <typename token_t, int32_t kHiddenSize, int32_t kMaxSmemSize,
+          int32_t Lo = 1, int32_t Hi = 64>
+struct MaxPostprocessStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(DispatchPostprocessSmem<token_t, kHiddenSize, Mid>) <=
+      kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits ? MaxPostprocessStages<token_t, kHiddenSize, kMaxSmemSize,
+                                         Mid, Hi>::value
+                  : MaxPostprocessStages<token_t, kHiddenSize, kMaxSmemSize, Lo,
+                                         Mid - 1>::value);
+};
+
+template <typename token_t, typename weight_t, int32_t kHiddenSize,
+          int32_t kMaxSmemSize, int32_t kNumStoreStages, int32_t kNumWGPerBlock,
+          int32_t Lo = 1, int32_t Hi = 64>
+struct MaxCombineLoadStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(CombineIntraNodeSmem<token_t, weight_t, kHiddenSize, Mid,
+                                  kNumStoreStages, kNumWGPerBlock>) <=
+      kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits ? MaxCombineLoadStages<token_t, weight_t, kHiddenSize,
+                                         kMaxSmemSize, kNumStoreStages,
+                                         kNumWGPerBlock, Mid, Hi>::value
+                  : MaxCombineLoadStages<token_t, weight_t, kHiddenSize,
+                                         kMaxSmemSize, kNumStoreStages,
+                                         kNumWGPerBlock, Lo, Mid - 1>::value);
 };
 
 } // namespace smem
@@ -426,14 +512,19 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
     int32_t *token_topk_send_mask,      // [num_token, topk]
     int32_t *recv_token_count_cpu,      // [num_ranks] (optional, pinned memory)
     int32_t *recv_token_count,          // [num_ranks] (optional, device memory)
+    int32_t *recv_aligned_token_count_cpu, // [num_ranks] (optional, pinned)
+    int32_t *recv_aligned_token_count,     // [num_ranks] (optional, device)
+    int32_t *recv_expert_counts, // [experts_per_rank] (optional, device, local
+                                 // rank only)
     int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
-    int32_t num_ranks) {
+    int32_t num_ranks, int32_t expert_alignment) {
   const int thread_id = threadIdx.x;
   const int block_id = blockIdx.x;
   const int num_block = gridDim.x;
   constexpr int32_t kBlockSize = kNumWarps * WARP_SIZE;
   const int32_t num_experts_per_rank = num_experts / num_ranks;
   __shared__ __align__(1024) int32_t scan_warp_prefix_sum[kNumWarps];
+  __shared__ int32_t alignment_values[kBlockSize];
 
   // push-mode all gather: each block writes local_splits to a remote rank's
   // symmetric buffer. The writes go across NVLink to peer GPUs, so a
@@ -470,10 +561,60 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
                                     dst_rank * num_experts_per_rank +
                                     local_expert_idx]
             : 0;
+
     int32_t prefix_sum = block_scan_inclusive(value, scan_warp_prefix_sum);
+    int32_t aligned_prefix_sum = prefix_sum;
+
+    bool need_per_expert =
+        (expert_alignment > 1) || (recv_expert_counts != nullptr);
+    if (need_per_expert) {
+      alignment_values[thread_id] = prefix_sum;
+      __syncthreads();
+
+      int32_t expert_total = 0;
+      int32_t my_padding = 0;
+      if (thread_id < num_experts_per_rank) {
+        int32_t le = thread_id;
+        int32_t cum_end = alignment_values[(le + 1) * num_ranks - 1];
+        int32_t cum_start = (le > 0) ? alignment_values[le * num_ranks - 1] : 0;
+        expert_total = cum_end - cum_start;
+        if (expert_alignment > 1) {
+          int32_t aligned_total = (expert_total + expert_alignment - 1) /
+                                  expert_alignment * expert_alignment;
+          my_padding = aligned_total - expert_total;
+        }
+      }
+
+      if (dst_rank == rank && recv_expert_counts != nullptr &&
+          thread_id < num_experts_per_rank) {
+        recv_expert_counts[thread_id] = expert_total;
+      }
+
+      if (expert_alignment > 1) {
+        __syncthreads();
+
+        // Parallel inclusive prefix sum of per-expert padding.
+        int32_t padding_val =
+            (thread_id < num_experts_per_rank) ? my_padding : 0;
+        int32_t cum_padding =
+            block_scan_inclusive(padding_val, scan_warp_prefix_sum);
+
+        if (thread_id < num_experts_per_rank) {
+          alignment_values[thread_id] = cum_padding;
+        }
+        __syncthreads();
+
+        if (thread_id < num_experts) {
+          int32_t le = thread_id / num_ranks;
+          aligned_prefix_sum =
+              prefix_sum + ((le > 0) ? alignment_values[le - 1] : 0);
+        }
+      }
+    }
+
     if (thread_id < num_experts) {
       recv_base_offset[dst_rank * num_experts + local_expert_idx * num_ranks +
-                       src_rank] = prefix_sum - value;
+                       src_rank] = aligned_prefix_sum - value;
     }
 
     if (thread_id == num_experts - 1) {
@@ -482,6 +623,16 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
       }
       if (recv_token_count_cpu != nullptr) {
         recv_token_count_cpu[dst_rank] = prefix_sum;
+      }
+      if (expert_alignment > 1) {
+        int32_t aligned_count =
+            prefix_sum + alignment_values[num_experts_per_rank - 1];
+        if (recv_aligned_token_count != nullptr) {
+          recv_aligned_token_count[dst_rank] = aligned_count;
+        }
+        if (recv_aligned_token_count_cpu != nullptr) {
+          recv_aligned_token_count_cpu[dst_rank] = aligned_count;
+        }
       }
       __threadfence_system();
     }
@@ -498,7 +649,6 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
     int32_t target_local_expert_idx = expert_idx % num_experts_per_rank;
     int32_t num_pre_expert = i % topk;
     int32_t need_send = target_rank < num_ranks ? 1 : 0;
-    __syncwarp();
     if (need_send) {
       for (int32_t j = 0; j < num_pre_expert; ++j) {
         int32_t cur_expert_idx = topk_indices[i / topk * topk + j];
@@ -509,7 +659,6 @@ void __global__ __launch_bounds__(1024, 1) kernel_compute_dispatch_layout(
         }
       }
     }
-    __syncwarp();
     int32_t scatter_idx = -1;
     if (target_rank < num_ranks) {
       scatter_idx =
@@ -599,8 +748,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode(
   if (is_producer_warp) {
     for (int token_offset = block_id; token_offset < num_token;
          token_offset += num_block) {
-      void *src_gmem_ptr =
-          reinterpret_cast<token_t *>(x) + token_offset * hidden_size;
+      token_t *src_gmem_ptr =
+          offset_ptr(reinterpret_cast<token_t *>(x), token_offset, hidden_size);
       uint64_t *cur_mbar_empty_ptr =
           mbar_empty_ptr + producer_pipe_state.index();
       uint64_t *cur_mbar_full_ptr = mbar_full_ptr + producer_pipe_state.index();
@@ -642,9 +791,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode(
       if (target_rank < num_ranks && is_need_send) {
         int32_t store_idx = token_dst_scatter_indices[token_offset * kTopk +
                                                       response_expert_idx];
-        void *dst_gmem_ptr =
-            reinterpret_cast<token_t *>(smem_recv_x_ptrs[target_rank]) +
-            store_idx * hidden_size;
+        token_t *dst_gmem_ptr =
+            offset_ptr(smem_recv_x_ptrs[target_rank], store_idx, hidden_size);
 
         void *src_smem_ptr = smem.tma_buffer[consumer_pipe_state.index()];
         if (is_leader_lane) {
@@ -653,17 +801,18 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode(
         }
 
         if (lane_id < kTopk) {
-          weight_t *dst_weight_ptr = reinterpret_cast<weight_t *>(
-                                         smem_recv_weights_ptrs[target_rank]) +
-                                     store_idx * kTopk + lane_id;
+          weight_t *dst_weight_ptr =
+              offset_ptr(smem_recv_weights_ptrs[target_rank], store_idx,
+                         kTopk) +
+              lane_id;
           weight_t cur_weight = reinterpret_cast<weight_t *>(
               topk_weights)[token_offset * kTopk + lane_id];
           *dst_weight_ptr = cur_weight;
         } else if (lane_id < 2 * kTopk) {
           offset_t *dst_index_ptr =
-              reinterpret_cast<offset_t *>(
-                  smem_recv_topk_scatter_indices_ptrs[target_rank]) +
-              store_idx * kTopk + lane_id - kTopk;
+              offset_ptr(smem_recv_topk_scatter_indices_ptrs[target_rank],
+                         store_idx, kTopk) +
+              lane_id - kTopk;
           offset_t cur_index = reinterpret_cast<offset_t *>(
               token_dst_scatter_indices)[token_offset * kTopk + lane_id -
                                          kTopk];
@@ -774,8 +923,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_v1(
   if (is_producer_warp) {
     for (int token_offset = block_id; token_offset < num_token;
          token_offset += num_block) {
-      void *src_gmem_ptr =
-          reinterpret_cast<token_t *>(x) + token_offset * hidden_size;
+      token_t *src_gmem_ptr =
+          offset_ptr(reinterpret_cast<token_t *>(x), token_offset, hidden_size);
       uint64_t *cur_mbar_empty_ptr =
           mbar_empty_ptr + producer_pipe_state.index();
       uint64_t *cur_mbar_full_ptr = mbar_full_ptr + producer_pipe_state.index();
@@ -859,9 +1008,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_v1(
             __shfl_sync(0xffffffff, my_target_rank, send_lane);
         int32_t store_idx = __shfl_sync(0xffffffff, my_store_idx, send_lane);
 
-        void *dst_gmem_ptr =
-            reinterpret_cast<token_t *>(smem_recv_x_ptrs[target_rank]) +
-            store_idx * hidden_size;
+        token_t *dst_gmem_ptr =
+            offset_ptr(smem_recv_x_ptrs[target_rank], store_idx, hidden_size);
         if (is_leader_lane) {
           tma_copy_1d_s2g(src_smem_ptr, dst_gmem_ptr, num_bytes_per_token);
         }
@@ -870,17 +1018,17 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_v1(
         if (lane_id < kTopk) {
           if constexpr (kHasWeight) {
             weight_t *dst_weight_ptr =
-                reinterpret_cast<weight_t *>(
-                    smem_recv_weights_ptrs[target_rank]) +
-                store_idx * kTopk + lane_id;
+                offset_ptr(smem_recv_weights_ptrs[target_rank], store_idx,
+                           kTopk) +
+                lane_id;
             *dst_weight_ptr = my_weight;
           }
           offset_t cur_index = my_store_idx;
           cur_index = (my_target_rank == target_rank) ? cur_index : -1;
           offset_t *dst_index_ptr =
-              reinterpret_cast<offset_t *>(
-                  smem_recv_topk_scatter_indices_ptrs[target_rank]) +
-              store_idx * kTopk + lane_id;
+              offset_ptr(smem_recv_topk_scatter_indices_ptrs[target_rank],
+                         store_idx, kTopk) +
+              lane_id;
           *dst_index_ptr = cur_index;
         }
         __syncwarp();
@@ -990,8 +1138,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_chunk(
         chunk_len = kNumDispatchChunkSize;
       for (int i = 0; i < chunk_len; ++i) {
         const int token_offset = chunk_base + i;
-        void *src_gmem_ptr =
-            reinterpret_cast<token_t *>(x) + token_offset * hidden_size;
+        token_t *src_gmem_ptr = offset_ptr(reinterpret_cast<token_t *>(x),
+                                           token_offset, hidden_size);
         uint64_t *cur_mbar_empty_ptr =
             mbar_empty_ptr + producer_pipe_state.index();
         uint64_t *cur_mbar_full_ptr =
@@ -1075,9 +1223,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_chunk(
         if (target_rank < num_ranks and is_need_send) {
           const int32_t store_idx =
               smem.meta_token_dst_scatter_indices[buf][i][response_expert_idx];
-          void *dst_gmem_ptr =
-              reinterpret_cast<token_t *>(smem_recv_x_ptrs[target_rank]) +
-              store_idx * hidden_size;
+          token_t *dst_gmem_ptr =
+              offset_ptr(smem_recv_x_ptrs[target_rank], store_idx, hidden_size);
 
           void *src_smem_ptr = smem.tma_buffer[consumer_pipe_state.index()];
           if (is_leader_lane) {
@@ -1088,19 +1235,19 @@ void __global__ __launch_bounds__(1024, 1) kernel_dispatch_intranode_chunk(
           if (lane_id < kTopk) {
             if constexpr (kHasWeight) {
               weight_t *dst_weight_ptr =
-                  reinterpret_cast<weight_t *>(
-                      smem_recv_weights_ptrs[target_rank]) +
-                  store_idx * kTopk + lane_id;
+                  offset_ptr(smem_recv_weights_ptrs[target_rank], store_idx,
+                             kTopk) +
+                  lane_id;
               weight_t cur_weight = smem.meta_topk_weights[buf][i][lane_id];
               *dst_weight_ptr = cur_weight;
             }
           } else if (lane_id < 2 * kTopk) {
-            // TODO:some token may be not belong to target rank, so we need to
+            // some token may be not belong to target rank, so we need to
             // set the index to a invalid value.
             offset_t *dst_index_ptr =
-                reinterpret_cast<offset_t *>(
-                    smem_recv_topk_scatter_indices_ptrs[target_rank]) +
-                store_idx * kTopk + lane_id - kTopk;
+                offset_ptr(smem_recv_topk_scatter_indices_ptrs[target_rank],
+                           store_idx, kTopk) +
+                lane_id - kTopk;
 
             offset_t cur_index =
                 smem.meta_token_dst_scatter_indices[buf][i][lane_id - kTopk];
@@ -1185,8 +1332,8 @@ __global__ void kernel_dispatch_postprocess_tma(
         int32_t dst_idx =
             recv_topk_scatter_indices_comm_buffer[token_offset * topk + j];
         if (dst_idx != -1 && dst_idx != token_offset) {
-          token_t *src_ptr =
-              reinterpret_cast<token_t *>(recv_x) + token_offset * hidden_size;
+          token_t *src_ptr = offset_ptr(reinterpret_cast<token_t *>(recv_x),
+                                        token_offset, hidden_size);
           token_t *dst_smem_ptr = smem.tma_buffer[producer_pipe_state.index()];
           // producer acquire
           uint64_t *cur_mbar_empty_ptr =
@@ -1216,8 +1363,8 @@ __global__ void kernel_dispatch_postprocess_tma(
         if (dst_idx != -1 && dst_idx != token_offset) {
           token_t *src_smem_ptr =
               smem.tma_buffer[consumer_read_pipe_state.index()];
-          token_t *dst_ptr =
-              reinterpret_cast<token_t *>(recv_x) + dst_idx * hidden_size;
+          token_t *dst_ptr = offset_ptr(reinterpret_cast<token_t *>(recv_x),
+                                        dst_idx, hidden_size);
           // consumer wait
           uint64_t *cur_mbar_full_ptr =
               mbar_full_ptr + consumer_read_pipe_state.index();
@@ -1313,7 +1460,8 @@ __global__ void kernel_combine_preprocess_inplace(
         if (dst_idx != -1) {
           weight_t val = reinterpret_cast<weight_t *>(weight)[dst_idx];
           reinterpret_cast<weight_t *>(
-              recv_topk_weight)[dst_idx * topk + lane_id] = val;
+              recv_topk_weight)[static_cast<int64_t>(dst_idx) * topk +
+                                lane_id] = val;
         }
       }
     }
@@ -1324,7 +1472,7 @@ __global__ void kernel_combine_preprocess_inplace(
         int32_t dst_idx = recv_topk_scatter_indices[i * topk + j];
         if (dst_idx != -1) {
           token_t *src_ptr =
-              reinterpret_cast<token_t *>(x) + dst_idx * kHiddenSize;
+              offset_ptr(reinterpret_cast<token_t *>(x), dst_idx, kHiddenSize);
 
           PRAGMA_UNROLL
           for (int32_t idx = 0; idx < kInt4PerThread; ++idx) {
@@ -1347,7 +1495,8 @@ __global__ void kernel_combine_preprocess_inplace(
         }
       }
 
-      token_t *dst_ptr = reinterpret_cast<token_t *>(x) + i * kHiddenSize;
+      token_t *dst_ptr =
+          offset_ptr(reinterpret_cast<token_t *>(x), i, kHiddenSize);
       PRAGMA_UNROLL
       for (int32_t idx = 0; idx < kInt4PerThread; ++idx) {
         if (idx * kNumThreadsPerBlock + thread_id < kHiddenSizeInt4) {
@@ -1457,9 +1606,9 @@ void __global__ __launch_bounds__(1024, 1) kernel_combine_intranode(
               mbar_full_ptr + producer_pipe_state.index();
           // producer acquire
           wait_barrier(cur_mbar_empty_ptr, producer_pipe_state.phase());
-          void *src_gmem_ptr =
-              reinterpret_cast<token_t *>(symm_buffer_ptrs[expert_rank]) +
-              token_dst_scatter_indices[token_offset * kTopk + j] * kHiddenSize;
+          void *src_gmem_ptr = offset_ptr(
+              symm_buffer_ptrs[expert_rank],
+              token_dst_scatter_indices[token_offset * kTopk + j], kHiddenSize);
           void *smem_ptr = wg_smem.tma_load_buffer[producer_pipe_state.index()];
           if (is_leader_lane) {
             mbar_arrive_and_set_barrier_transaction_bytes(cur_mbar_full_ptr,
@@ -1517,8 +1666,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_combine_intranode(
 
     // consumer store to gmem
     if (!is_tma_load_warp) {
-      token_t *dst_gmem_ptr =
-          reinterpret_cast<token_t *>(recv_x) + token_offset * kHiddenSize;
+      token_t *dst_gmem_ptr = offset_ptr(reinterpret_cast<token_t *>(recv_x),
+                                         token_offset, kHiddenSize);
 
       int4 *dst_gmem_ptr_int4 = reinterpret_cast<int4 *>(dst_gmem_ptr);
       PRAGMA_UNROLL
@@ -1658,9 +1807,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_combine_intranode_v1(
 
         wait_barrier(empty, producer_pipe_state.phase());
 
-        void *src_gmem_ptr = (void *)(reinterpret_cast<token_t *>(
-                                          symm_buffer_ptrs[expert_rank]) +
-                                      scatter_idx * kHiddenSize);
+        void *src_gmem_ptr =
+            offset_ptr(symm_buffer_ptrs[expert_rank], scatter_idx, kHiddenSize);
         void *dst_smem_ptr =
             (void *)wg_smem.tma_load_buffer[producer_pipe_state.index()];
 
@@ -1745,8 +1893,8 @@ void __global__ __launch_bounds__(1024, 1) kernel_combine_intranode_v1(
       }
 
       // consumer store to gmem
-      token_t *dst_gmem_ptr =
-          reinterpret_cast<token_t *>(recv_x) + token_offset * kHiddenSize;
+      token_t *dst_gmem_ptr = offset_ptr(reinterpret_cast<token_t *>(recv_x),
+                                         token_offset, kHiddenSize);
 
       // ensure the store staging buffer we're about to overwrite is no longer
       // being read by a prior TMA store.
@@ -1840,9 +1988,8 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
   // The weight warp never enters the TMA-load / consumer paths, so the
   // particular wg_smem / mbar pointers it gets are never dereferenced.
   const int32_t warp_group_id = warp_id / kWarpsPerWG;
-  const int32_t safe_wg_id = (warp_group_id < kNumWGPerBlock)
-                                  ? warp_group_id
-                                  : (kNumWGPerBlock - 1);
+  const int32_t safe_wg_id =
+      (warp_group_id < kNumWGPerBlock) ? warp_group_id : (kNumWGPerBlock - 1);
   const int32_t global_warp_group_id =
       block_id * kNumWGPerBlock + warp_group_id;
   const int32_t total_warp_groups = num_block * kNumWGPerBlock;
@@ -1912,9 +2059,9 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
         bool is_valid_lane = (expert_rank < num_ranks) && (scatter_idx != -1);
         weight_t valid_weight = 0;
         if (is_valid_lane) {
-          valid_weight = reinterpret_cast<weight_t *>(
-              smem_symm_weight_ptrs[expert_rank])[scatter_idx * kTopk +
-                                                  topk_idx];
+          valid_weight =
+              reinterpret_cast<weight_t *>(smem_symm_weight_ptrs[expert_rank])
+                  [static_cast<int64_t>(scatter_idx) * kTopk + topk_idx];
         }
         reinterpret_cast<weight_t *>(recv_weight)[i] = valid_weight;
       }
@@ -1969,9 +2116,8 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
 
         wait_barrier(empty, producer_pipe_state.phase());
 
-        void *src_gmem_ptr = (void *)(reinterpret_cast<token_t *>(
-                                          symm_buffer_ptrs[expert_rank]) +
-                                      scatter_idx * kHiddenSize);
+        void *src_gmem_ptr =
+            offset_ptr(symm_buffer_ptrs[expert_rank], scatter_idx, kHiddenSize);
         void *dst_smem_ptr =
             (void *)wg_smem.tma_load_buffer[producer_pipe_state.index()];
 
@@ -2058,8 +2204,8 @@ void __global__ __launch_bounds__(768, 1) kernel_combine_intranode_v2(
       }
 
       // consumer store to gmem
-      token_t *dst_gmem_ptr =
-          reinterpret_cast<token_t *>(recv_x) + token_offset * kHiddenSize;
+      token_t *dst_gmem_ptr = offset_ptr(reinterpret_cast<token_t *>(recv_x),
+                                         token_offset, kHiddenSize);
       int32_t warp_id_in_consumer_wg = consumer_tid_in_wg / WARP_SIZE;
 
       // Wait for prior TMA store using this buffer to complete
@@ -2164,8 +2310,10 @@ void compute_dispatch_layout_cuda(
     int32_t *local_splits, int32_t **full_splits_ptrs, int32_t **barrier_ptrs,
     int32_t *recv_base_offset, int32_t *token_dst_scatter_indices,
     int32_t *token_topk_send_mask, int32_t *recv_token_count_cpu,
-    int32_t *recv_token_count, int32_t num_token, int32_t topk,
-    int32_t num_experts, int32_t rank, int32_t num_ranks, int32_t num_sm,
+    int32_t *recv_token_count, int32_t *recv_aligned_token_count_cpu,
+    int32_t *recv_aligned_token_count, int32_t *recv_expert_counts,
+    int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
+    int32_t num_ranks, int32_t num_sm, int32_t expert_alignment,
     cudaStream_t stream) {
   constexpr int32_t kNumWarps = 32;
   constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
@@ -2190,11 +2338,15 @@ void compute_dispatch_layout_cuda(
                          &token_topk_send_mask,
                          &recv_token_count_cpu,
                          &recv_token_count,
+                         &recv_aligned_token_count_cpu,
+                         &recv_aligned_token_count,
+                         &recv_expert_counts,
                          &num_token,
                          &topk,
                          &num_experts,
                          &rank,
-                         &num_ranks};
+                         &num_ranks,
+                         &expert_alignment};
   flash_comm::launch_kernel_ex(
       (void *)kernels::kernel_compute_dispatch_layout<kNumWarps>, grid_dim,
       block_dim, kernel_args, smem_size, stream,
@@ -2211,19 +2363,40 @@ void dispatch_intranode_cuda(
     flash_comm::FlashCommDType dtype, flash_comm::FlashCommDType weight_dtype,
     flash_comm::FlashCommDType offset_dtype, int32_t topk,
     cudaStream_t stream) {
-  // check alignment
-  constexpr int32_t kNumStages = 12;
   constexpr int32_t kNumConsumerGroups = 3;
-  constexpr int32_t kMaxSmemSize = 226 * 1024;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
+  constexpr int32_t kPreferredStages = 12;
 
   DISPATCH_TOKEN_DTYPE(dtype, token_t, {
     DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
       DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
         DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
           DISPATCH_TOPK(topk, kTopk, {
+            constexpr int32_t kMaxFitStages = kernels::smem::MaxDispatchStages<
+                token_t, weight_t, offset_t, kHiddenSize, kMaxSmemSize>::value;
+            constexpr int32_t kCapped = kMaxFitStages < kPreferredStages
+                                            ? kMaxFitStages
+                                            : kPreferredStages;
+            constexpr int32_t kNumStages =
+                (kCapped / kNumConsumerGroups) * kNumConsumerGroups;
+            static_assert(
+                kNumStages >= kNumConsumerGroups,
+                "dispatch_intranode: kMaxSmemBytes is too small for this "
+                "kHiddenSize (or cap/alignment removed all stages): need "
+                "kNumStages >= kNumConsumerGroups after stage selection "
+                "and rounding down to a multiple of kNumConsumerGroups.");
+            static_assert(kNumStages % kNumConsumerGroups == 0,
+                          "dispatch_intranode: kNumStages must be divisible by "
+                          "kNumConsumerGroups (kernel pipeline partition).");
+            static_assert(
+                (kHiddenSize * static_cast<int32_t>(sizeof(token_t))) %
+                        kernels::smem::kTMAAlignment ==
+                    0,
+                "dispatch_intranode: one token row (kHiddenSize * "
+                "sizeof(token_t)) "
+                "must be kTMAAlignment (128) bytes for TMA.");
+
             bool has_weight = (topk_weights != nullptr);
-            // v1 kernel: fewer warps (1 + kNumConsumerGroups), in-flight TMA
-            // store groups
             constexpr int32_t kNumWarps = 1 + kNumConsumerGroups;
             constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
             dim3 block_dim(kNumThreads);
@@ -2231,7 +2404,8 @@ void dispatch_intranode_cuda(
             using smem_t = kernels::smem::DispatchIntraNodeSmem<
                 token_t, weight_t, offset_t, kHiddenSize, kNumStages>;
             constexpr int32_t smem_size = sizeof(smem_t);
-            FLASH_CHECK(smem_size <= kMaxSmemSize);
+            static_assert(smem_size <= kMaxSmemSize,
+                          "smem_size exceeds kMaxSmemSize");
             DISPATCH_BOOL(has_weight, kHasWeight, {
               CUDA_CHECK(cudaFuncSetAttribute(
                   kernels::kernel_dispatch_intranode_v1<
@@ -2253,30 +2427,6 @@ void dispatch_intranode_cuda(
                   reinterpret_cast<offset_t **>(
                       recv_topk_scatter_indices_ptrs));
             });
-
-            // constexpr int32_t kNumWarpPerConsumerGroup = kTopk;
-            // constexpr int32_t kNumWarps = kNumConsumerGroups *
-            // kNumWarpPerConsumerGroup + 1; constexpr int32_t kNumThreads =
-            // kNumWarps * WARP_SIZE; dim3 block_dim(kNumThreads); dim3
-            // grid_dim(num_sm); using smem_t =
-            // kernels::smem::DispatchIntraNodeSmem<token_t, weight_t, offset_t,
-            // kHiddenSize, kNumStages>; constexpr int32_t smem_size =
-            // sizeof(smem_t); FLASH_CHECK(smem_size <= kMaxSmemSize);
-            // CUDA_CHECK(cudaFuncSetAttribute(
-            //     kernels::kernel_dispatch_intranode<token_t, weight_t,
-            //     offset_t, kHiddenSize, kTopk, kNumStages,
-            //     kNumConsumerGroups>,
-            //     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-            // kernels::kernel_dispatch_intranode<token_t, weight_t, offset_t,
-            // kHiddenSize, kTopk, kNumStages, kNumConsumerGroups>
-            //     <<<grid_dim, block_dim, smem_size, stream>>>(
-            //         x, reinterpret_cast<int32_t *>(topk_send_mask),
-            //         topk_weights, reinterpret_cast<offset_t *>(topk_indices),
-            //         reinterpret_cast<offset_t
-            //         *>(token_dst_scatter_indices), num_token, hidden_size,
-            //         num_experts_per_rank, rank, num_ranks, recv_x_ptrs,
-            //         recv_weights_ptrs, reinterpret_cast<offset_t
-            //         **>(recv_topk_scatter_indices_ptrs));
           });
         });
       });
@@ -2294,11 +2444,8 @@ void dispatch_intranode_chunk_cuda(
     flash_comm::FlashCommDType dtype, flash_comm::FlashCommDType weight_dtype,
     flash_comm::FlashCommDType offset_dtype, int32_t topk,
     cudaStream_t stream) {
-  // Chunk variant uses extra smem for meta ping-pong buffers, so we run fewer
-  // stages to stay within 226KB.
-  constexpr int32_t kNumStages = 13;
   constexpr int32_t kNumConsumerGroups = 1;
-  constexpr int32_t kMaxSmemSize = 226 * 1024;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
 
   DISPATCH_TOKEN_DTYPE(dtype, token_t, {
     DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
@@ -2318,11 +2465,37 @@ void dispatch_intranode_chunk_cuda(
               dim3 block_dim(kNumThreads);
               dim3 grid_dim(num_sm);
               constexpr int32_t kNumDispatchChunkSize = 64;
+              constexpr int32_t kPreferredChunkStages = 13;
+              constexpr int32_t kMaxFitStages =
+                  kernels::smem::MaxDispatchChunkStages<
+                      token_t, weight_t, offset_t, kHiddenSize, kMaxSmemSize,
+                      kTopk, kNumDispatchChunkSize>::value;
+              constexpr int32_t kCapped = kMaxFitStages < kPreferredChunkStages
+                                              ? kMaxFitStages
+                                              : kPreferredChunkStages;
+              constexpr int32_t kNumStages =
+                  (kCapped / kNumConsumerGroups) * kNumConsumerGroups;
+              static_assert(
+                  kNumStages >= 1,
+                  "dispatch_intranode_chunk: kMaxSmemBytes too small for this "
+                  "kHiddenSize/topk/chunk layout — no pipeline stage fits.");
+              static_assert(
+                  kNumStages % kNumConsumerGroups == 0,
+                  "dispatch_intranode_chunk: kNumStages must be divisible by "
+                  "kNumConsumerGroups (kernel pipeline partition).");
+              static_assert(
+                  (kHiddenSize * static_cast<int32_t>(sizeof(token_t))) %
+                          kernels::smem::kTMAAlignment ==
+                      0,
+                  "dispatch_intranode_chunk: one token row must be "
+                  "kTMAAlignment bytes for TMA.");
+
               using smem_t = kernels::smem::DispatchIntraNodeChunkSmem<
                   token_t, weight_t, offset_t, kHiddenSize, kNumStages, kTopk,
                   kNumDispatchChunkSize>;
               constexpr int32_t smem_size = sizeof(smem_t);
-              FLASH_CHECK(smem_size <= kMaxSmemSize);
+              static_assert(smem_size <= kMaxSmemSize,
+                            "smem_size exceeds kMaxSmemSize");
               DISPATCH_BOOL(has_weight, kHasWeight, {
                 CUDA_CHECK(cudaFuncSetAttribute(
                     kernels::kernel_dispatch_intranode_chunk<
@@ -2380,7 +2553,7 @@ void dispatch_postprocess_cuda(
   dim3 block_dim(kNumThreads);
   dim3 grid_dim(num_blocks);
 
-  constexpr int32_t kNumStages = 5;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
   constexpr int32_t kWritePipeCount = 2;
 
   bool has_weight =
@@ -2389,10 +2562,31 @@ void dispatch_postprocess_cuda(
     DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
       DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
         DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
+          constexpr int32_t kPreferredPostStages = 5;
+          constexpr int32_t kMaxFitPostStages =
+              kernels::smem::MaxPostprocessStages<token_t, kHiddenSize,
+                                                  kMaxSmemSize>::value;
+          constexpr int32_t kNumStages =
+              kMaxFitPostStages < kPreferredPostStages ? kMaxFitPostStages
+                                                       : kPreferredPostStages;
+          static_assert(kNumStages >= kWritePipeCount + 1,
+                        "dispatch_postprocess: kMaxSmemBytes too small for "
+                        "this kHiddenSize "
+                        "(or preferred cap too low): kernel needs at least "
+                        "kWritePipeCount + 1 token stages in shared memory.");
+          static_assert(
+              (kHiddenSize * static_cast<int32_t>(sizeof(token_t))) %
+                      kernels::smem::kTMAAlignment ==
+                  0,
+              "dispatch_postprocess: one token row must be kTMAAlignment bytes "
+              "for TMA.");
+
           using smem_t =
               kernels::smem::DispatchPostprocessSmem<token_t, kHiddenSize,
                                                      kNumStages>;
           constexpr int32_t smem_size = sizeof(smem_t);
+          static_assert(smem_size <= kMaxSmemSize,
+                        "smem_size exceeds kMaxSmemSize");
           DISPATCH_BOOL(has_weight, kHasWeight, {
             CUDA_CHECK(cudaFuncSetAttribute(
                 kernels::kernel_dispatch_postprocess_tma<
@@ -2429,14 +2623,13 @@ void combine_intranode_cuda(
     int32_t num_sm, flash_comm::FlashCommDType dtype,
     flash_comm::FlashCommDType weight_dtype,
     flash_comm::FlashCommDType offset_dtype, cudaStream_t stream) {
-  constexpr int32_t kNumLoadStages = 6;
   constexpr int32_t kNumStoreStages = 2;
   constexpr int32_t kElemsPerThread = 64;
 
   constexpr int32_t kWarpsPerWG = 9;
   constexpr int32_t kNumWGPerBlock = 2;
 
-  constexpr int32_t kMaxSmemSize = 226 * 1024;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
   FLASH_CHECK((weight_ptrs != nullptr) == (recv_weight != nullptr))
       << "weight_ptrs and recv_weight must be both nullptr or both not nullptr";
   bool has_weight = weight_ptrs != nullptr;
@@ -2446,14 +2639,45 @@ void combine_intranode_cuda(
         DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
           DISPATCH_TOPK(topk, kTopk, {
             DISPATCH_BOOL(has_weight, kHasWeight, {
+              constexpr int32_t kPreferredLoadStages = 6;
+              constexpr int32_t kMaxFitLoadStages =
+                  kernels::smem::MaxCombineLoadStages<
+                      token_t, weight_t, kHiddenSize, kMaxSmemSize,
+                      kNumStoreStages, kNumWGPerBlock>::value;
+              constexpr int32_t kNumLoadStages =
+                  kMaxFitLoadStages < kPreferredLoadStages
+                      ? kMaxFitLoadStages
+                      : kPreferredLoadStages;
+              static_assert(kNumLoadStages >= 2,
+                            "combine_intranode: kMaxSmemBytes too small for "
+                            "this kHiddenSize "
+                            "(or preferred cap too low): need at least 2 TMA "
+                            "load stages.");
+              static_assert(
+                  (kHiddenSize * static_cast<int32_t>(sizeof(token_t))) %
+                          kernels::smem::kTMAAlignment ==
+                      0,
+                  "combine_intranode: one token row must be kTMAAlignment "
+                  "bytes "
+                  "for TMA.");
               constexpr int32_t kNumWarps =
                   kNumWGPerBlock * kWarpsPerWG + int(kHasWeight);
+              static_assert(
+                  !kHasWeight || (kNumWarps - 1) % kWarpsPerWG == 0,
+                  "combine_intranode: with weights, (kNumWarps - 1) must be "
+                  "divisible by kWarpsPerWG.");
+              static_assert(
+                  kHasWeight || kNumWarps % kWarpsPerWG == 0,
+                  "combine_intranode: without weights, kNumWarps must be "
+                  "divisible by kWarpsPerWG.");
+
               constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
               using smem_t = kernels::smem::CombineIntraNodeSmem<
                   token_t, weight_t, kHiddenSize, kNumLoadStages,
                   kNumStoreStages, kNumWGPerBlock>;
               constexpr int32_t smem_size = sizeof(smem_t);
-              FLASH_CHECK(smem_size <= kMaxSmemSize);
+              static_assert(smem_size <= kMaxSmemSize,
+                            "smem_size exceeds kMaxSmemSize");
               // CUDA_CHECK(cudaFuncSetAttribute(kernels::kernel_combine_intranode_v1<token_t,
               // offset_t, kTopk, kHiddenSize, kNumLoadStages, kNumStoreStages,
               //                                                                   kNumWarps, kWarpsPerWG,

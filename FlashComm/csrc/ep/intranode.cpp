@@ -133,14 +133,15 @@ compute_stable_local_token_within_expert_offset_and_expert_counts(
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor>
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 compute_dispatch_layout(
     torch::Tensor topk_indices, torch::Tensor token_within_expert_offset,
     torch::Tensor local_splits, torch::Tensor full_splits_ptrs,
     torch::Tensor barrier_ptrs, int32_t num_experts, int32_t rank,
     int32_t num_ranks, int32_t num_sm,
     c10::optional<torch::Tensor> optional_recv_token_count_cpu,
-    c10::optional<torch::Tensor> optional_recv_token_count) {
+    c10::optional<torch::Tensor> optional_recv_token_count,
+    int32_t expert_alignment) {
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   check_topk_indices(topk_indices);
   check_topk_indices(token_within_expert_offset);
@@ -179,7 +180,6 @@ compute_dispatch_layout(
   if (optional_recv_token_count_cpu.has_value()) {
     check_pinned_cpu_i32_vector(optional_recv_token_count_cpu.value(),
                                 num_ranks, "recv_token_count_cpu");
-    // Make the initial value explicit (-1) so unwritten entries are detectable.
     optional_recv_token_count_cpu.value().fill_(-1);
     recv_token_count_cpu = optional_recv_token_count_cpu.value();
     check_tensor_shape(recv_token_count_cpu, "recv_token_count_cpu",
@@ -204,6 +204,35 @@ compute_dispatch_layout(
     recv_token_count = torch::empty({num_ranks}, device_opts);
   }
 
+  // Aligned token counts: when expert_alignment > 1, the aligned total
+  // (including padding) is needed for buffer allocation and
+  // dispatch_postprocess/ combine_preprocess iteration, while recv_token_count
+  // reports the original count.
+  torch::Tensor recv_aligned_token_count_cpu, recv_aligned_token_count;
+  int32_t *recv_aligned_token_count_cpu_ptr = nullptr;
+  int32_t *recv_aligned_token_count_ptr = nullptr;
+  if (expert_alignment > 1) {
+    auto host_opts = torch::TensorOptions()
+                         .dtype(torch::kInt32)
+                         .device(torch::kCPU)
+                         .pinned_memory(true);
+    recv_aligned_token_count_cpu = torch::full({num_ranks}, -1, host_opts);
+    auto device_opts = torch::TensorOptions()
+                           .dtype(torch::kInt32)
+                           .device(topk_indices.device());
+    recv_aligned_token_count = torch::empty({num_ranks}, device_opts);
+    recv_aligned_token_count_cpu_ptr =
+        recv_aligned_token_count_cpu.data_ptr<int32_t>();
+    recv_aligned_token_count_ptr = recv_aligned_token_count.data_ptr<int32_t>();
+  }
+
+  // Per-expert actual token counts for group GEMM
+  auto device_opts_i32 =
+      torch::TensorOptions().dtype(torch::kInt32).device(topk_indices.device());
+  torch::Tensor recv_expert_counts =
+      torch::empty({experts_per_rank}, device_opts_i32);
+  int32_t *recv_expert_counts_ptr = recv_expert_counts.data_ptr<int32_t>();
+
   check_uva_enabled_for_current_device();
 
   int32_t *recv_token_count_cpu_ptr = recv_token_count_cpu.data_ptr<int32_t>();
@@ -218,11 +247,14 @@ compute_dispatch_layout(
       recv_base_offset.data_ptr<int32_t>(),
       token_dst_scatter_indices.data_ptr<int32_t>(),
       token_topk_send_mask.data_ptr<int32_t>(), recv_token_count_cpu_ptr,
-      recv_token_count_ptr, num_token, topk, num_experts, rank, num_ranks,
-      num_sm, stream);
+      recv_token_count_ptr, recv_aligned_token_count_cpu_ptr,
+      recv_aligned_token_count_ptr, recv_expert_counts_ptr, num_token, topk,
+      num_experts, rank, num_ranks, num_sm, expert_alignment, stream);
 
-  return {recv_base_offset, token_dst_scatter_indices, token_topk_send_mask,
-          recv_token_count_cpu, recv_token_count};
+  return {recv_base_offset,         token_dst_scatter_indices,
+          token_topk_send_mask,     recv_token_count_cpu,
+          recv_token_count,         recv_aligned_token_count_cpu,
+          recv_aligned_token_count, recv_expert_counts};
 }
 
 void dispatch_intranode(
@@ -286,18 +318,8 @@ void dispatch_intranode(
         << "Only Float32 weight type is currently supported";
   }
 
-  // check alignment
-  int smem_size = 226 * 1024;
-  constexpr int32_t kNumStages = 13;
-  constexpr int32_t kNumThreads = 800;
-  constexpr int32_t kNumConsumerGroups = 3;
-  FLASH_CHECK(kNumConsumerGroups < kNumStages);
-  FLASH_CHECK(hidden_size * token_size * kNumStages <= smem_size);
   FLASH_CHECK(topk * 2 <= WARP_SIZE);
   FLASH_CHECK(num_ranks * 3 * 8 <= 1024);
-  FLASH_CHECK(kNumThreads >= (kNumConsumerGroups * topk + 1) * 32)
-      << "kNumThreads must be greater than or equal to (topk + 1) * 32, "
-      << kNumThreads << " < " << (topk + 1) * 32;
 
   dispatch_intranode_cuda(
       x.data_ptr(), topk_send_mask.data_ptr(), topk_weights_ptr,
@@ -442,13 +464,6 @@ void dispatch_postprocess(
   // set max dynamic shared memory if necessary (not needed for this kernel)
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  constexpr int32_t kNumStages = 5;
-  size_t smem_size = (2 * kNumStages * sizeof(uint64_t) + 1023) / 1024 * 1024 +
-                     hidden_size * token_size * kNumStages;
-  FLASH_CHECK(smem_size <= 226 * 1024)
-      << "smem_size must be less than or equal to 226 * 1024, " << smem_size
-      << " > " << 226 * 1024;
-
   FLASH_CHECK(dtype == FlashCommDType::BFloat16)
       << "Only BFloat16 token type is currently supported";
   FLASH_CHECK(offset_dtype == FlashCommDType::Int32)
@@ -494,29 +509,9 @@ void combine_intranode(
   int32_t hidden_size = recv_x.size(1);
   int32_t topk = topk_indices.size(1);
 
-  constexpr int32_t kNumStages = 4;
-  constexpr int32_t kNumWarps = 30;
-  constexpr int32_t kElemsPerThread = 32;
-
-  constexpr int32_t kWarpsPerWG = 10;
-  FLASH_CHECK(kNumWarps % kWarpsPerWG == 0);
-  constexpr int32_t kNumWGPerBlock = kNumWarps / kWarpsPerWG;
-  constexpr int32_t symm_buf_ptr_size = 2048;
-  int32_t num_bytes_per_token = hidden_size * token_size;
-  FLASH_CHECK(kElemsPerThread * (kWarpsPerWG - 1) <= hidden_size)
-      << "kElemsPerThread * (kWarpsPerWG - 1) must be less than or equal to "
-         "hidden_size, "
-      << kElemsPerThread * (kWarpsPerWG - 1) << " > " << hidden_size;
-  int32_t smem_size = kNumWGPerBlock * kNumStages * num_bytes_per_token +
-                      kNumWGPerBlock * kNumStages * 2 * sizeof(uint64_t) +
-                      symm_buf_ptr_size;
-  FLASH_CHECK(smem_size <= 226 * 1024)
-      << "smem_size must be less than or equal to 226 * 1024, " << smem_size
-      << " > " << 226 * 1024;
   FLASH_CHECK(hidden_size % (128 / token_size) == 0)
       << "hidden_size must be divisible by 128 / token_size, " << hidden_size
       << " % " << (128 / token_size) << " != " << 0;
-  smem_size = 226 * 1024;
 
   void *weight_ptrs = nullptr;
   void *recv_weight = nullptr;
@@ -671,6 +666,7 @@ void bind_intranode_ops(py::module &m) {
         py::arg("num_ranks"), py::arg("num_sm"),
         py::arg("recv_token_count_cpu") = py::none(),
         py::arg("recv_token_count") = py::none(),
+        py::arg("expert_alignment") = 1,
         "Compute dispatch layout:\n"
         "- all-gather local_splits into full_splits (via symmetric buffers)\n"
         "- compute recv_base_offset[dst_rank, local_expert, src_rank]\n"
@@ -687,7 +683,13 @@ void bind_intranode_ops(py::module &m) {
         "tensor of shape [num_ranks].\n"
         "Returns: (recv_base_offset, token_dst_scatter_indices, "
         "token_topk_send_mask, recv_token_count_cpu, "
-        "recv_token_count).");
+        "recv_token_count, recv_aligned_token_count_cpu, "
+        "recv_aligned_token_count, recv_expert_counts).\n"
+        "recv_expert_counts is shape [experts_per_rank] with per-expert "
+        "actual token counts for the local rank.\n"
+        "When expert_alignment > 1, recv_token_count holds the original "
+        "(unpadded) count, while recv_aligned_token_count holds the padded "
+        "count for buffer allocation.");
   m.def("dispatch_intranode", &flash_comm::ep::intranode::dispatch_intranode,
         py::arg("x"), py::arg("topk_send_mask"),
         py::arg("optional_topk_weights"), py::arg("topk_indices"),

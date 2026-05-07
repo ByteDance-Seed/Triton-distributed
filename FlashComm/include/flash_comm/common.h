@@ -36,6 +36,14 @@ enum class FlashCommDType { Float32, Float16, BFloat16, Int8, Int32, Int64 };
 
 constexpr int32_t kMaxWorldSize = 72;
 
+// Max dynamic shared memory per block (bytes), derived from
+// TORCH_CUDA_ARCH_LIST at build time via -DFLASH_COMM_MAX_SMEM_BYTES in
+// setup.py.
+#ifndef FLASH_COMM_MAX_SMEM_BYTES
+#define FLASH_COMM_MAX_SMEM_BYTES (227 * 1024)
+#endif
+constexpr int32_t kMaxSmemBytes = FLASH_COMM_MAX_SMEM_BYTES;
+
 namespace internal {
 
 inline bool is_power_of_two(int32_t n) { return n > 0 && (n & (n - 1)) == 0; }
@@ -159,11 +167,14 @@ private:
   OP(1024, __VA_ARGS__)                                                        \
   OP(1536, __VA_ARGS__)                                                        \
   OP(2048, __VA_ARGS__)                                                        \
+  OP(2304, __VA_ARGS__)                                                        \
   OP(3328, __VA_ARGS__)                                                        \
   OP(3584, __VA_ARGS__)                                                        \
+  OP(4096, __VA_ARGS__)                                                        \
   OP(5120, __VA_ARGS__)                                                        \
   OP(6144, __VA_ARGS__)                                                        \
-  OP(7168, __VA_ARGS__)
+  OP(7168, __VA_ARGS__)                                                        \
+  OP(8192, __VA_ARGS__)
 
 #define SUPPORTED_TYPES(OP, ...)                                               \
   OP(flash_comm::FlashCommDType::Float32, float, __VA_ARGS__)                  \

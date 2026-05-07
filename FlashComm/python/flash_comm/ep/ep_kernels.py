@@ -26,7 +26,6 @@
 import torch
 import dataclasses
 from typing import Optional
-import ctypes
 import flash_comm._C.ep_intranode as _ep
 
 from .ep_context import EPContext
@@ -40,6 +39,7 @@ class EPCommLayoutDesc:
 
     # dispatch layout
     recv_base_offset: Optional[torch.Tensor] = None  # [world_size, experts_per_rank, world_size]
+
     # token_dst_scatter_indices / recv_topk_scatter_indices both store "positions in the dispatch output buffer".
     #
     # - token_dst_scatter_indices: sender-token space mapping.
@@ -63,8 +63,12 @@ class EPCommLayoutDesc:
     token_topk_send_mask: Optional[
         torch.Tensor] = None  # intranode: [num_token, topk]; internode: [nnodes, max_tokens, topk]
     topk_indices: Optional[torch.Tensor] = None  # intranode: [num_token, topk]; internode: [nnodes, max_tokens, topk]
-    recv_token_count_cpu: Optional[torch.Tensor] = None  # [world_size] pinned CPU memory
-    recv_token_count: Optional[torch.Tensor] = None  # [world_size] device memory
+    recv_token_count_cpu: Optional[torch.Tensor] = None  # [world_size] pinned CPU memory (unaligned)
+    recv_token_count: Optional[torch.Tensor] = None  # [world_size] device memory (unaligned)
+    recv_aligned_token_count_cpu: Optional[torch.Tensor] = None  # [world_size] pinned CPU (aligned, for buffer alloc)
+    recv_aligned_token_count: Optional[torch.Tensor] = None  # [world_size] device (aligned, for postprocess/combine)
+    recv_expert_counts: Optional[torch.Tensor] = None  # [experts_per_rank] per-expert actual token counts
+    expert_alignment: int = 1
     recv_topk_scatter_indices: Optional[
         torch.Tensor] = None  # intranode: [num_recv_token, topk], internode: [nnodes, max_tokens, topk]
 
@@ -75,12 +79,19 @@ class EPCommLayoutDesc:
     def need_recompute_token_within_expert_offset_and_expert_counts(self):
         return self.token_within_expert_offset is None or self.expert_counts is None
 
-    def need_recompute_dispatch_layout(self):
-        return (self.recv_base_offset is None or self.token_dst_scatter_indices is None
-                or self.token_topk_send_mask is None or self.recv_token_count_cpu is None
-                or self.recv_token_count is None)
+    def need_recompute_dispatch_layout(self, expert_alignment: int = 1):
+        if (self.recv_base_offset is None or self.token_dst_scatter_indices is None or self.token_topk_send_mask is None
+                or self.recv_token_count_cpu is None or self.recv_token_count is None
+                or self.recv_expert_counts is None):
+            return True
+        if self.expert_alignment != expert_alignment:
+            return True
+        if expert_alignment > 1:
+            if self.recv_aligned_token_count_cpu is None or self.recv_aligned_token_count is None:
+                return True
+        return False
 
-    def check_layout_desc(self, num_tokens: int, topk: int, num_experts: int):
+    def check_layout_desc(self, num_tokens: int, topk: int, num_experts: int, world_size: int = 1):
         has_token_offset = self.token_within_expert_offset is not None
         has_expert_counts = self.expert_counts is not None
         if has_token_offset:
@@ -96,6 +107,12 @@ class EPCommLayoutDesc:
         if has_expert_counts != has_token_offset:
             raise ValueError("token_within_expert_offset and expert_counts must both be None or both be non-None")
 
+        if self.recv_expert_counts is not None:
+            experts_per_rank = num_experts // world_size
+            if self.recv_expert_counts.shape != (experts_per_rank, ):
+                raise ValueError(f"recv_expert_counts must have shape [{experts_per_rank}], "
+                                 f"got shape {self.recv_expert_counts.shape}")
+
 
 class EPKernels:
     """
@@ -104,7 +121,7 @@ class EPKernels:
 
     def __init__(self, max_m: int, hidden: int, topk: int, num_experts: int, local_world_size: int,
                  ep_group: torch.distributed.ProcessGroup, num_sm: int = 16, capacity: float = 1.2,
-                 num_worst_tokens: int = -1):
+                 num_worst_tokens: int = -1, expert_alignment: int = 1, check_num_worst_tokens: bool = False):
         self.ep_context = EPContext.create(max_m=max_m, hidden=hidden, topk=topk, num_experts=num_experts,
                                            group=ep_group, local_world_size=local_world_size, capacity_coeff=capacity,
                                            num_worst_tokens=num_worst_tokens)
@@ -117,16 +134,20 @@ class EPKernels:
         self.world_size = ep_group.size()
         self.local_world_size = local_world_size
         self.num_worst_tokens = num_worst_tokens
+        assert expert_alignment >= 1, f"expert_alignment must be >= 1, got {expert_alignment}"
+        self.expert_alignment = expert_alignment
+        self.check_num_worst_tokens = check_num_worst_tokens
         torch.distributed.barrier(group=ep_group)
 
-    def _realloc_dispatch_output_buf(self, recv_token_count_cpu: torch.Tensor):
+    def _realloc_dispatch_output_buf(self, recv_token_count_cpu: torch.Tensor, recv_token_count: torch.Tensor):
         assert recv_token_count_cpu.is_cpu
         assert recv_token_count_cpu.dtype == torch.int32
         max_output_token_num = 0
-        base_ptr = recv_token_count_cpu.data_ptr()
-        elem_size = recv_token_count_cpu.element_size()
 
         if self.num_worst_tokens > 0 and self.num_worst_tokens <= self.ep_context.dispatch_output_buf.shape[0]:
+            if self.check_num_worst_tokens:
+                torch._assert_async(recv_token_count[self.rank] <= self.num_worst_tokens,
+                                    f"num_worst_tokens = {self.num_worst_tokens} is not valid")
             return self.num_worst_tokens, self.num_worst_tokens
 
         # for target_rank in range(self.ep_context.config.world_size):
@@ -152,7 +173,6 @@ class EPKernels:
             self.ep_group_barrier()
             torch.cuda.synchronize()
 
-        cur_output_token_num = ctypes.c_int32.from_address(base_ptr + self.rank * elem_size).value
         return cur_output_token_num, max_output_token_num
 
     def dispatch_intranode(self, input: torch.Tensor, topk_indices: torch.Tensor, topk_weights: Optional[torch.Tensor],
@@ -163,19 +183,41 @@ class EPKernels:
             layout_desc.token_within_expert_offset, layout_desc.expert_counts = \
                 self.compute_stable_local_token_within_expert_offset_and_expert_counts(topk_indices, self.num_sm)
 
-        if layout_desc.need_recompute_dispatch_layout():
+        if layout_desc.need_recompute_dispatch_layout(self.expert_alignment):
             (
-                layout_desc.recv_base_offset, layout_desc.token_dst_scatter_indices, layout_desc.token_topk_send_mask,
-                layout_desc.recv_token_count_cpu, layout_desc.recv_token_count
+                layout_desc.recv_base_offset,
+                layout_desc.token_dst_scatter_indices,
+                layout_desc.token_topk_send_mask,
+                layout_desc.recv_token_count_cpu,
+                layout_desc.recv_token_count,
+                layout_desc.recv_aligned_token_count_cpu,
+                layout_desc.recv_aligned_token_count,
+                layout_desc.recv_expert_counts,
             ) = _ep.compute_dispatch_layout(
-                topk_indices, layout_desc.token_within_expert_offset, layout_desc.expert_counts,
-                self.ep_context.full_splits_buf_ptrs, self.ep_context.nvl_barrier_buf_ptrs,
-                self.ep_context.config.num_experts, self.ep_context.config.rank, self.ep_context.config.world_size,
-                self.num_sm, self.ep_context.
-                recv_token_count_cpu,  # inplace update, if not provided, will allocate and return a new tensor, otherwise use the provided tensor
+                topk_indices,
+                layout_desc.token_within_expert_offset,
+                layout_desc.expert_counts,
+                self.ep_context.full_splits_buf_ptrs,
+                self.ep_context.nvl_barrier_buf_ptrs,
+                self.ep_context.config.num_experts,
+                self.ep_context.config.rank,
+                self.ep_context.config.world_size,
+                self.num_sm,
+                self.ep_context.recv_token_count_cpu,
+                expert_alignment=self.expert_alignment,
             )
+            layout_desc.expert_alignment = self.expert_alignment
+
         self.ep_group_barrier()
-        dispatch_recv_token_count, _ = self._realloc_dispatch_output_buf(layout_desc.recv_token_count_cpu)
+        if layout_desc.expert_alignment > 1:
+            assert layout_desc.recv_aligned_token_count_cpu is not None, \
+                "recv_aligned_token_count_cpu must be set when expert_alignment > 1"
+            buf_count_cpu = layout_desc.recv_aligned_token_count_cpu
+            buf_count_gpu = layout_desc.recv_aligned_token_count
+        else:
+            buf_count_cpu = layout_desc.recv_token_count_cpu
+            buf_count_gpu = layout_desc.recv_token_count
+        dispatch_recv_token_count, _ = self._realloc_dispatch_output_buf(buf_count_cpu, buf_count_gpu)
 
         num_experts_per_rank = self.ep_context.config.num_experts // self.ep_context.config.world_size
         # dispatch
@@ -225,12 +267,17 @@ class EPKernels:
             dispatch_weights = torch.empty((buffer_size, ), dtype=dispatch_topk_weights.dtype,
                                            device=dispatch_topk_weights.device)
         self._buffer_in_range(layout_desc.recv_topk_scatter_indices, self.ep_context.dispatch_topk_scatter_indices_buf)
-        # Note: dispatch_postprocess kernel resets dispatch_topk_scatter_indices_buf(layout_desc.recv_topk_scatter_indices) (set to -1).
+        if layout_desc.expert_alignment > 1:
+            assert layout_desc.recv_aligned_token_count is not None, \
+                "recv_aligned_token_count must be set when expert_alignment > 1"
+            postprocess_token_count = layout_desc.recv_aligned_token_count
+        else:
+            postprocess_token_count = layout_desc.recv_token_count
         _ep.dispatch_postprocess(
             dispatch_out,
             layout_desc.recv_topk_scatter_indices,  # comm buffer
             dispatch_topk_weights,
-            layout_desc.recv_token_count,
+            postprocess_token_count,
             dispatch_weights,
             recv_topk_scatter_indices,  # torch tensor
             hidden,
@@ -272,10 +319,18 @@ class EPKernels:
         return combine_input_buf
 
     def _buffer_in_range(self, tensor: torch.Tensor, buf: torch.Tensor) -> bool:
+        if tensor.numel() == 0:
+            return True
+
         assert tensor.dtype == buf.dtype
+        assert tensor.device == buf.device
         assert tensor.is_contiguous()
-        return (tensor.data_ptr() >= buf.data_ptr()
-                and tensor.data_ptr() < buf.data_ptr() + buf.numel() * buf.element_size())
+
+        tensor_start = tensor.data_ptr()
+        tensor_end = tensor_start + tensor.numel() * tensor.element_size()
+        buf_start = buf.data_ptr()
+        buf_end = buf_start + buf.numel() * buf.element_size()
+        return tensor_start >= buf_start and tensor_end <= buf_end
 
     def _validate_combine_input_buffer(self, tensor: torch.Tensor) -> bool:
         return self._buffer_in_range(tensor, self.ep_context.combine_input_buf)
@@ -292,7 +347,7 @@ class EPKernels:
         assert layout_desc.recv_topk_scatter_indices is not None
         assert input.shape[0] <= self.ep_context.combine_input_buf.shape[0]
         if zero_copy:
-            self._validate_combine_input_buffer(input)
+            assert self._validate_combine_input_buffer(input)
             combine_input_buf = input
         else:
             combine_input_buf = self.ep_context.combine_input_buf[:input.shape[0]]
@@ -305,11 +360,15 @@ class EPKernels:
             combine_input_weight_buf = self.ep_context.combine_topk_weights_buf[:input.shape[0]]
         else:
             combine_input_weight_buf = None
-        # 1. combine_preprocess_inplace updates combine_input_buf in-place.
-        # 2. copy weight to combine_input_weight_buf according to token original topk_idx [num_recv_token,] -> [num_recv_token, topk]
+        if layout_desc.expert_alignment > 1:
+            assert layout_desc.recv_aligned_token_count is not None, \
+                "recv_aligned_token_count must be set when expert_alignment > 1"
+            combine_token_count = layout_desc.recv_aligned_token_count
+        else:
+            combine_token_count = layout_desc.recv_token_count
         _ep.combine_preprocess_inplace(
             combine_input_buf,
-            layout_desc.recv_token_count,
+            combine_token_count,
             layout_desc.recv_topk_scatter_indices,
             self.rank,
             self.world_size,
@@ -322,10 +381,10 @@ class EPKernels:
     def combine_intranode(self, input_preprocessed: torch.Tensor, layout_desc: EPCommLayoutDesc,
                           weight_preprocessed: Optional[torch.Tensor] = None):
         layout_desc.check_combine_required_inputs()
-        self._validate_combine_input_buffer(input_preprocessed)
+        assert self._validate_combine_input_buffer(input_preprocessed)
         has_weight = weight_preprocessed is not None
         if has_weight:
-            self._validate_combine_weight_buffer(weight_preprocessed)
+            assert self._validate_combine_weight_buffer(weight_preprocessed)
 
         # pull mode, wait ep ranks to finish preprocess
         self.ep_group_barrier()
@@ -372,7 +431,8 @@ class EPKernels:
             layout_desc = EPCommLayoutDesc()
         else:
             layout_desc.check_layout_desc(num_tokens=topk_indices.shape[0], topk=topk_indices.shape[1],
-                                          num_experts=self.ep_context.config.num_experts)
+                                          num_experts=self.ep_context.config.num_experts,
+                                          world_size=self.ep_context.config.world_size)
 
         if self.ep_context.config.nnodes == 1:
             return self.dispatch_intranode(input, topk_indices, topk_weights, layout_desc)

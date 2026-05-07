@@ -26,6 +26,7 @@
 import torch
 import torch.distributed as dist
 import flash_comm._C.buffer as _buffer
+import os
 
 # Expose Enums
 BlockBackend = _buffer.BlockBackend
@@ -58,6 +59,9 @@ class SymmetricBuffer:
 
         # Determine Backend configuration
         backend_enum = BlockBackend.CUDA_IPC
+
+        if os.environ.get("FLASH_COMM_BUFFER_BACKEND", None) is not None:
+            backend = os.environ.get("FLASH_COMM_BUFFER_BACKEND")
 
         # Validate inputs
         if backend not in ["auto", "vmm", "cuda_ipc"]:
