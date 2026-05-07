@@ -1117,6 +1117,7 @@ def get_packages():
             "triton_dist/language/extra/cuda",
             "triton_dist/language/extra/hip",
             "triton_dist/language/extra/ascend",
+            "triton_dist/language/extra/maca",
             "triton_dist/mega_triton_kernel",
             "triton_dist/function",
             "triton_dist/function/nvidia",
