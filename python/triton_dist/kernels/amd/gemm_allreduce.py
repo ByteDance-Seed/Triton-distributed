@@ -189,16 +189,19 @@ def consumer_all_reduce_kernel(symm_buf_ptr, tile_signal_ptr, M, N, stride_cm, s
         offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-
-        final_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for i in range(world_size):
+    
+        remote_c_ptr = dl.symm_at(symm_buf_ptr, rank)
+        token = dl.wait(tile_signal_ptr + signal_base + rank, 1, "sys", "acquire", waitValue=1)
+        remote_c_ptr = dl.consume_token(remote_c_ptr, token)
+        remote_c_ptrs = remote_c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
+        final_acc = tl.load(remote_c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+        for i in range(1, world_size):
             target_rank = (i + rank) % world_size
             remote_c_ptr = dl.symm_at(symm_buf_ptr, target_rank)
             token = dl.wait(tile_signal_ptr + signal_base + target_rank, 1, "sys", "acquire", waitValue=1)
             remote_c_ptr = dl.consume_token(remote_c_ptr, token)
             remote_c_ptrs = remote_c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn
-            remote_data = tl.load(remote_c_ptrs, mask=c_mask, other=0.0)
-            final_acc += remote_data
+            final_acc += tl.load(remote_c_ptrs, mask=c_mask, other=0.0)
 
         c = final_acc.to(symm_buf_ptr.dtype.element_ty)
         for remote_rank in range(world_size):
