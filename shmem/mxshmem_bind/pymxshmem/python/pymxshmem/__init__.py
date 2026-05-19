@@ -4,7 +4,7 @@ import torch
 import torch.distributed
 
 try:
-    from _pymxshmem import *  # noqa: F403
+    from ._pymxshmem import *  # noqa: F403
 except Exception as e:
     print(
         "please add mxshmem library path to LD_LIBRARY_PATH and try again",

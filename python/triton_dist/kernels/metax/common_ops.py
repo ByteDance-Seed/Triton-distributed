@@ -26,17 +26,17 @@ import torch
 import triton.language as tl
 from triton_dist.utils import (
     MACA_CHECK, )
-from maca import maca
+import triton.pymaca.maca as maca
 
 
 @tl.core.extern
-def thread_id(axis: tl.constexpr, _builder=None):
+def thread_id(axis: tl.constexpr, _semantic=None):
     return tl.inline_intrinsic_elementwise(
         intrinsic=f"llvm.mxc.thread.id.{axis.value}",
         args=[],
         dtype=tl.int32,
         is_pure=True,
-        _builder=_builder,
+        _semantic=_semantic,
     )
 
 

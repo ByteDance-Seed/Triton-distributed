@@ -1,8 +1,13 @@
-#include "maca.h"
-#include "mc_runtime.h"
+/*
+ * 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights
+ * Reserved.
+ */
+#include <cstddef>
 #include <cstdint>
 #include <tuple>
 #include <vector>
+#include "maca.h"
+#include "mc_runtime.h"
 
 std::tuple<mcError_t> mcMemcpyAsyncWrapper(int64_t dst, const int64_t src,
                                            size_t count, mcMemcpyKind kind,
@@ -73,6 +78,7 @@ std::tuple<mcError_t> mcExtBatchCopyFlagAndWaitWrapper(
     copyFlag.src = reinterpret_cast<void *>(src[i]);
     copyFlag.engine = engine[i];
     copyFlag.count = count[i];
+    // TODO: support waitNum > 1
     if (wait_flag.size() > 0) {
       copyFlag.waitNum = 1;
       waitFlag.flag = reinterpret_cast<uint64_t *>(wait_flag[i]);
@@ -81,6 +87,7 @@ std::tuple<mcError_t> mcExtBatchCopyFlagAndWaitWrapper(
     } else {
       copyFlag.waitNum = 0;
     }
+    // TODO: support writeNum > 1
     copyFlag.writeNum = 1;
     writeFlag.flag = reinterpret_cast<uint64_t *>(write_flag[i]);
     writeFlag.value = write_value[i];

@@ -141,7 +141,7 @@ elif is_hip():
                               "Please install mori_shmem or use rocshmem backend: "
                               "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
 elif is_maca():
-    from maca import macart
+    import triton.pymaca.maca as maca
 else:
     raise Exception("either CUDA or HIP platform is supported")
 
@@ -481,9 +481,9 @@ def HIP_CHECK(call_result):
 
 
 def MACA_CHECK(err):
-    if isinstance(err, macart.mcError_t):
-        if err != macart.mcError_t.mcSuccess:
-            raise RuntimeError(f"MACA Error: {err}: {macart.mcGetErrorString(err)}")
+    if isinstance(err, maca.mcError_t):
+        if err != maca.mcError_t.mcSuccess:
+            raise RuntimeError(f"MACA Error: {err}: {maca.mcGetErrorString(err)}")
     else:
         raise RuntimeError(f"Unknown error type: {err}")
 
@@ -653,15 +653,14 @@ def get_rocshmem_hash():
 
 
 def _get_mxshmem_libdevice():
-    mxshmem_device_bc_path_user_specify = os.getenv("TRITON_MXSHMEM_LIBDEVICE_PATH", None)
-    if mxshmem_device_bc_path_user_specify is not None:
-        mxshmem_lib_dir = Path(mxshmem_device_bc_path_user_specify)
-    else:
-        try:
-            import triton.backends.metax
-            mxshmem_lib_dir = Path(triton.backends.metax.__path__[0]) / "lib"
-        except Exception:
-            pass
+    lib_path_suffixes = ["lib", "build/src"]
+    mxshmem_lib_dir = Path(os.getenv("MACA_PATH", "/opt/maca")) / "lib"
+
+    if os.getenv("MXSHMEM_HOME") is not None:
+        for lib_path_suffix in lib_path_suffixes:
+            if os.path.exists(Path(os.getenv("MXSHMEM_HOME")) / lib_path_suffix / "libmxshmem_device.bc"):
+                mxshmem_lib_dir = Path(os.getenv("MXSHMEM_HOME")) / lib_path_suffix
+
     return mxshmem_lib_dir / "libmxshmem_device.bc"
 
 

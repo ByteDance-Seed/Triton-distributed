@@ -30,7 +30,6 @@ import sys
 
 pi_u64_t = tl.core.pointer_type(tl.core.dtype("uint64"))
 
-# class mxshmemi_cmp_type(Enum):
 MXSHMEM_CMP_EQ = 0
 MXSHMEM_CMP_NE = 1
 MXSHMEM_CMP_GT = 2
@@ -74,6 +73,20 @@ def n_pes(_semantic=None):
 
 
 @core.extern
+def fence(_semantic=None):
+    return extern_call(
+        "libmxshmem_device",
+        "",
+        [],
+        {
+            (): ("mxshmem_fence", ()),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
 def int_p(dest, value, pe, _semantic=None):
     # force have a return value, even not used.
     return extern_call(
@@ -108,22 +121,20 @@ def remote_ptr(local_ptr, pe, _semantic=None):
 
 
 @core.extern
-def putmem_signal_block(dest, source, nbytes, sig_addr, signal, sig_op, pe, _semantic=None):
+def _putmem_impl(dest, source, nbytes, pe, SCOPE_SUFFIX: core.constexpr, NBI: core.constexpr = core.constexpr(""),
+                 _semantic=None):
     return extern_call(
         "libmxshmem_device",
         "",
         [
-            tl.cast(dest, tl.pointer_type(tl.int8), _builder=_semantic.builder),
-            tl.cast(source, tl.pointer_type(tl.int8), _builder=_semantic.builder),
-            tl.cast(nbytes, tl.uint64, _builder=_semantic.builder),
-            sig_addr,  # no cast: pointer type should be aligned
-            tl.cast(signal, tl.uint64, _builder=_semantic.builder),
-            tl.cast(sig_op, tl.int32, _builder=_semantic.builder),
-            tl.cast(pe, tl.int32, _builder=_semantic.builder),
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(source, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(nbytes, tl.uint64, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
         ],
         {
-            (tl.pointer_type(tl.int8), tl.pointer_type(tl.int8), tl.uint64, pi_u64_t, tl.uint64, tl.int32, tl.int32): (
-                "mxshmemx_putmem_signal_block",
+            (tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, tl.int32): (
+                f"mxshmem{'x' if SCOPE_SUFFIX.value else ''}_putmem{NBI.value}{SCOPE_SUFFIX.value}",
                 (),
             ),
         },
@@ -133,15 +144,114 @@ def putmem_signal_block(dest, source, nbytes, sig_addr, signal, sig_op, pe, _sem
 
 
 @core.extern
+def putmem_block(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest, source, nbytes, pe, core.constexpr("_block"), core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def putmem_nbi_block(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest, source, nbytes, pe, core.constexpr("_block"), core.constexpr("_nbi"), _semantic=_semantic)
+
+
+@core.extern
+def putmem_warp(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest, source, nbytes, pe, core.constexpr("_warp"), core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def putmem_nbi_warp(dest, source, nbytes, pe, _semantic=None):
+    return _putmem_impl(dest, source, nbytes, pe, core.constexpr("_warp"), core.constexpr("_nbi"), _semantic=_semantic)
+
+
+@core.extern
+def _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, SCOPE_SUFFIX: core.constexpr,
+                        NBI: core.constexpr = core.constexpr(""), _semantic=None):
+    return extern_call(
+        "libmxshmem_device",
+        "",
+        [
+            tl.cast(dest, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(source, tl.pointer_type(tl.void), _semantic=_semantic),
+            tl.cast(nbytes, tl.uint64, _semantic=_semantic),
+            sig_addr,
+            tl.cast(signal, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_op, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
+        ],
+        {
+            (tl.pointer_type(tl.void), tl.pointer_type(tl.void), tl.uint64, pi_u64_t, tl.uint64, tl.int32, tl.int32): (
+                f"mxshmem{'x' if SCOPE_SUFFIX.value else ''}_putmem_signal{NBI.value}{SCOPE_SUFFIX.value}",
+                (),
+            ),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def putmem_signal_block(dest, source, nbytes, sig_addr, signal, sig_op, pe, _semantic=None):
+    return _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, core.constexpr("_block"),
+                               core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def putmem_signal_nbi_block(dest, source, nbytes, sig_addr, signal, sig_op, pe, _semantic=None):
+    return _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, core.constexpr("_block"),
+                               core.constexpr("_nbi"), _semantic=_semantic)
+
+
+@core.extern
+def putmem_signal_warp(dest, source, nbytes, sig_addr, signal, sig_op, pe, _semantic=None):
+    return _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, core.constexpr("_warp"),
+                               core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def putmem_signal_nbi_warp(dest, source, nbytes, sig_addr, signal, sig_op, pe, _semantic=None):
+    return _putmem_signal_impl(dest, source, nbytes, sig_addr, signal, sig_op, pe, core.constexpr("_warp"),
+                               core.constexpr("_nbi"), _semantic=_semantic)
+
+
+@core.extern
+def _barrier_all_impl(SCOPE_SUFFIX: core.constexpr, _semantic=None):
+    return extern_call(
+        "libmxshmem_device",
+        "",
+        [],
+        {
+            (): (f"mxshmem{'x' if SCOPE_SUFFIX.value else ''}_barrier_all{SCOPE_SUFFIX.value}", ()),
+        },
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def barrier_all(_semantic=None):
+    return _barrier_all_impl(core.constexpr(""), _semantic=_semantic)
+
+
+@core.extern
+def barrier_all_block(_semantic=None):
+    return _barrier_all_impl(core.constexpr("_block"), _semantic=_semantic)
+
+
+@core.extern
+def barrier_all_warp(_semantic=None):
+    return _barrier_all_impl(core.constexpr("_warp"), _semantic=_semantic)
+
+
+@core.extern
 def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
     return extern_call(
         "libmxshmem_device",
         "",
         [
             sig_addr,  # no cast: pointer type should be aligned
-            tl.cast(signal, tl.uint64, _builder=_semantic.builder),
-            tl.cast(sig_op, tl.int32, _builder=_semantic.builder),
-            tl.cast(pe, tl.int32, _builder=_semantic.builder),
+            tl.cast(signal, tl.uint64, _semantic=_semantic),
+            tl.cast(sig_op, tl.int32, _semantic=_semantic),
+            tl.cast(pe, tl.int32, _semantic=_semantic),
         ],
         {
             (pi_u64_t, tl.uint64, tl.int32, tl.int32): (
@@ -161,8 +271,8 @@ def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
         "",
         [
             sig_addr,
-            tl.cast(cmp_, tl.int32, _builder=_semantic.builder),
-            tl.cast(cmp_val, tl.uint64, _builder=_semantic.builder),
+            tl.cast(cmp_, tl.int32, _semantic=_semantic),
+            tl.cast(cmp_val, tl.uint64, _semantic=_semantic),
         ],  # no cast
         {
             (pi_u64_t, tl.int32, tl.uint64): (

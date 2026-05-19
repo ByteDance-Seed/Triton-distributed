@@ -1,7 +1,7 @@
 #include <cuda.h>
 
 __global__ void flush_l2c_dev() {
-  // TODO
+  // TODO(MACA):
 }
 
 extern "C" void flush_l2c(cudaStream_t stream) {

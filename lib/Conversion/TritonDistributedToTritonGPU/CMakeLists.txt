@@ -11,7 +11,9 @@ if(TRITON_USE_MACA)
         MLIRPass
         MLIRTransforms
         TritonIR
+        ProtonIR
         DistributedIR
+        SIMTIR
         TritonGPUIR
         TritonGPUTransforms
     )

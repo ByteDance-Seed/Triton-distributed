@@ -30,10 +30,10 @@ import triton_dist.language as dl
 # TODO:(MACA UPGRADE): support from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.maca import libmxshmem_device as libshmem_device
 from triton_dist.language.extra.language_extra import tid, __syncthreads
-import pymxshmem
+import triton.pymxshmem as pymxshmem
 import time
 from typing import Optional, List
-from maca import macart
+import triton.pymaca.maca as maca
 from dataclasses import dataclass
 from triton_dist.utils import MACA_CHECK
 from triton_dist.kernels.metax.utils import get_numa_world_size, has_fullmesh_mxlink_ngpus
@@ -83,19 +83,19 @@ def cp_engine_producer_all_gather_full_mesh_push(
                 req_idx = chunk_idx * (num_ranks - 1) + rank_idx
                 dst_arr[req_idx] = dst.data_ptr()
                 src_arr[req_idx] = src.data_ptr()
-                engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngineDefault
+                engine[req_idx] = maca.mcParallelCopyEngine.ParallelCopyEngineDefault
                 count[req_idx] = M_per_chunk * K * ele_byte
                 write_flag[req_idx] = barrier_buffers[src_rank][rank * num_chunks_per_rank + chunk_idx].data_ptr()
                 write_value[req_idx] = signal_t
 
-        (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
-                                                   src_arr,  # src addr
-                                                   engine,  # cp engine
-                                                   count,  # data size
-                                                   write_flag,  # barrier addr
-                                                   write_value,  # barrier value
-                                                   [], [], ag_stream.cuda_stream  # stream
-                                                   )
+        (err, ) = maca.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                 src_arr,  # src addr
+                                                 engine,  # cp engine
+                                                 count,  # data size
+                                                 write_flag,  # barrier addr
+                                                 write_value,  # barrier value
+                                                 [], [], ag_stream.cuda_stream  # stream
+                                                 )
         MACA_CHECK(err)
 
 
@@ -141,27 +141,27 @@ def cp_engine_producer_all_gather_numa_node_push(
                 req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                 inter_dst_arr[req_idx] = dst.data_ptr()
                 inter_src_arr[req_idx] = src.data_ptr()
-                inter_engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
+                inter_engine[req_idx] = maca.mcParallelCopyEngine.ParallelCopyEngine0
                 inter_count[req_idx] = M_per_chunk * K * ele_byte
                 inter_write_flag[req_idx] = barrier_buffers[p2p_send_rank][rank * num_chunks_per_rank +
                                                                            chunk_idx].data_ptr()
                 inter_write_value[req_idx] = signal_t
-        (err, ) = macart.mcExtBatchCopyFlagAndWait(inter_dst_arr,  # dst addr
-                                                   inter_src_arr,  # src addr
-                                                   inter_engine,  # cp engine
-                                                   inter_count,  # data size
-                                                   inter_write_flag,  # barrier addr
-                                                   inter_write_value,  # barrier value
-                                                   [], [], internode_ag_stream.cuda_stream  # stream
-                                                   )
+        (err, ) = maca.mcExtBatchCopyFlagAndWait(inter_dst_arr,  # dst addr
+                                                 inter_src_arr,  # src addr
+                                                 inter_engine,  # cp engine
+                                                 inter_count,  # data size
+                                                 inter_write_flag,  # barrier addr
+                                                 inter_write_value,  # barrier value
+                                                 [], [], internode_ag_stream.cuda_stream  # stream
+                                                 )
         MACA_CHECK(err)
 
     with torch.cuda.stream(intranode_ag_stream):
         # intra numa node, local numa node data:
         rank_orders = [(local_rank - i + numa_world_size) % numa_world_size for i in range(1, numa_world_size)]
         engines = [
-            macart.mcParallelCopyEngine.ParallelCopyEngine1, macart.mcParallelCopyEngine.ParallelCopyEngine2,
-            macart.mcParallelCopyEngine.ParallelCopyEngine3, macart.mcParallelCopyEngine.ParallelCopyEngine4
+            maca.mcParallelCopyEngine.ParallelCopyEngine1, maca.mcParallelCopyEngine.ParallelCopyEngine2,
+            maca.mcParallelCopyEngine.ParallelCopyEngine3, maca.mcParallelCopyEngine.ParallelCopyEngine4
         ]
         engines_size = len(engines)
 
@@ -191,14 +191,14 @@ def cp_engine_producer_all_gather_numa_node_push(
                 intra_write_flag[req_idx] = barrier_buffers[src_rank][rank * num_chunks_per_rank + chunk_idx].data_ptr()
                 intra_write_value[req_idx] = signal_t
 
-        (err, ) = macart.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
-                                                   intra_src_arr,  # src addr
-                                                   intra_engine,  # cp engine
-                                                   intra_count,  # data size
-                                                   intra_write_flag,  # barrier addr
-                                                   intra_write_value,  # barrier value
-                                                   [], [], intranode_ag_stream.cuda_stream  # stream
-                                                   )
+        (err, ) = maca.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
+                                                 intra_src_arr,  # src addr
+                                                 intra_engine,  # cp engine
+                                                 intra_count,  # data size
+                                                 intra_write_flag,  # barrier addr
+                                                 intra_write_value,  # barrier value
+                                                 [], [], intranode_ag_stream.cuda_stream  # stream
+                                                 )
         MACA_CHECK(err)
 
         p2p_recv_rank = local_rank + (numa_id + 1 + n_numa_nodes) % n_numa_nodes * numa_world_size
@@ -222,22 +222,22 @@ def cp_engine_producer_all_gather_numa_node_push(
                                                                  chunk_idx].data_ptr()
                 intra_wait_value[req_idx] = signal_t
 
-        (err, ) = macart.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
-                                                   intra_src_arr,  # src addr
-                                                   intra_engine,  # cp engine
-                                                   intra_count,  # data size
-                                                   intra_write_flag,  # barrier addr
-                                                   intra_write_value,  # barrier value
-                                                   intra_wait_flag,  # wait addr
-                                                   intra_wait_value,  # wait value
-                                                   intranode_ag_stream.cuda_stream  # stream
-                                                   )
+        (err, ) = maca.mcExtBatchCopyFlagAndWait(intra_dst_arr,  # dst addr
+                                                 intra_src_arr,  # src addr
+                                                 intra_engine,  # cp engine
+                                                 intra_count,  # data size
+                                                 intra_write_flag,  # barrier addr
+                                                 intra_write_value,  # barrier value
+                                                 intra_wait_flag,  # wait addr
+                                                 intra_wait_value,  # wait value
+                                                 intranode_ag_stream.cuda_stream  # stream
+                                                 )
         MACA_CHECK(err)
 
     intranode_ag_stream.wait_stream(internode_ag_stream)
 
 
-@triton_dist.jit
+@triton_dist.jit(do_not_specialize=["rank"])
 def mxshmem_device_producer_all_gather_2d_put_block_kernel(
     ag_buffer_ptr,
     signal_buffer_ptr,
@@ -299,7 +299,7 @@ def mxshmem_device_producer_all_gather_2d_put_block_kernel(
         )
 
 
-@triton_dist.jit
+@triton_dist.jit(do_not_specialize=["rank"])
 def mxshmem_device_producer_p2p_put_block_kernel(
     ag_buffer_ptr,
     signal_buffer_ptr,
@@ -388,13 +388,13 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                         req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                         dst_arr[req_idx] = dst
                         src_arr[req_idx] = src
-                        engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
+                        engine[req_idx] = maca.mcParallelCopyEngine.ParallelCopyEngine0
                         count[req_idx] = M_per_chunk * N * local_tensor.element_size()
                         write_flag[req_idx] = signal_buffer[p2p_send_rank].data_ptr() + (
                             rank * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                         write_value[req_idx] = signal_t
 
-                (err, ) = macart.mcExtBatchCopyFlagAndWait(
+                (err, ) = maca.mcExtBatchCopyFlagAndWait(
                     dst_arr,  # dst addr
                     src_arr,  # src addr
                     engine,  # cp engine
@@ -450,7 +450,7 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                                 req_idx = chunk_idx * (n_numa_nodes - 1) + (i - 1)
                                 dst_arr[req_idx] = dst
                                 src_arr[req_idx] = src
-                                engine[req_idx] = macart.mcParallelCopyEngine.ParallelCopyEngine0
+                                engine[req_idx] = maca.mcParallelCopyEngine.ParallelCopyEngine0
                                 count[req_idx] = M_per_chunk * N * local_tensor.element_size()
                                 wait_flag[req_idx] = signal_buffer[local_rank].data_ptr() + (
                                     rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
@@ -459,7 +459,7 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                                     rank_idx * num_chunks_per_rank + chunk_idx) * signal_buffer[0].element_size()
                                 write_value[req_idx] = signal_t
 
-                        (err, ) = macart.mcExtBatchCopyFlagAndWait(
+                        (err, ) = maca.mcExtBatchCopyFlagAndWait(
                             dst_arr,  # dst addr
                             src_arr,  # src addr
                             engine,  # cp engine
@@ -474,11 +474,11 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                         MACA_CHECK(err)
         if n_numa_nodes > 1:
             engine_list = [
-                macart.mcParallelCopyEngine.ParallelCopyEngine1, macart.mcParallelCopyEngine.ParallelCopyEngine2,
-                macart.mcParallelCopyEngine.ParallelCopyEngine3, macart.mcParallelCopyEngine.ParallelCopyEngine4
+                maca.mcParallelCopyEngine.ParallelCopyEngine1, maca.mcParallelCopyEngine.ParallelCopyEngine2,
+                maca.mcParallelCopyEngine.ParallelCopyEngine3, maca.mcParallelCopyEngine.ParallelCopyEngine4
             ]
         else:
-            engine_list = [macart.mcParallelCopyEngine.ParallelCopyEngineDefault]
+            engine_list = [maca.mcParallelCopyEngine.ParallelCopyEngineDefault]
         with torch.cuda.stream(intranode_ag_stream):
             idx = 0
             arr_size = num_chunks_per_rank * (numa_world_size - 1)
@@ -508,14 +508,14 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                     idx += 1
 
             if idx > 0:
-                (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
-                                                           src_arr,  # src addr
-                                                           engine,  # cp engine
-                                                           count,  # data size
-                                                           write_flag,  # barrier addr
-                                                           write_value,  # barrier value
-                                                           [], [], intranode_ag_stream.cuda_stream  # stream
-                                                           )
+                (err, ) = maca.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                         src_arr,  # src addr
+                                                         engine,  # cp engine
+                                                         count,  # data size
+                                                         write_flag,  # barrier addr
+                                                         write_value,  # barrier value
+                                                         [], [], intranode_ag_stream.cuda_stream  # stream
+                                                         )
                 MACA_CHECK(err)
 
             arr_size = num_chunks_per_rank * (numa_world_size - 1) * (n_nodes * n_numa_nodes - 1)
@@ -552,16 +552,16 @@ def inter_node_allgather(local_tensor: torch.Tensor, ag_buffer: list[torch.Tenso
                         wait_value[idx] = signal_t
                         idx += 1
             if idx > 0:
-                (err, ) = macart.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
-                                                           src_arr,  # src addr
-                                                           engine,  # cp engine
-                                                           count,  # data size
-                                                           write_flag,  # barrier addr
-                                                           write_value,  # barrier value
-                                                           wait_flag,  # barrier addr
-                                                           wait_value,  # barrier value
-                                                           intranode_ag_stream.cuda_stream  # stream
-                                                           )
+                (err, ) = maca.mcExtBatchCopyFlagAndWait(dst_arr,  # dst addr
+                                                         src_arr,  # src addr
+                                                         engine,  # cp engine
+                                                         count,  # data size
+                                                         write_flag,  # barrier addr
+                                                         write_value,  # barrier value
+                                                         wait_flag,  # barrier addr
+                                                         wait_value,  # barrier value
+                                                         intranode_ag_stream.cuda_stream  # stream
+                                                         )
                 MACA_CHECK(err)
 
         intranode_ag_stream.wait_stream(internode_ag_stream)

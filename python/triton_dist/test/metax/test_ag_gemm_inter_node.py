@@ -8,7 +8,7 @@ import argparse
 import os
 import datetime
 
-import pymxshmem
+import triton.pymxshmem as pymxshmem
 
 RANK = int(os.environ.get("RANK", 0))
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -66,6 +66,10 @@ def perf_test_gemm_only(M, config):
     B = torch.randn([N_per_rank, K], dtype=dtype, device="cuda")
     ag_buffer = torch.empty([M, K], dtype=dtype, device="cuda")
     torch.distributed.all_gather_into_tensor(ag_buffer, A, TP_GROUP)
+
+    create_ag_gemm_inter_node_context(A, B, RANK, WORLD_SIZE, max_M=M, BLOCK_M=config["BM"], BLOCK_N=config["BN"],
+                                      BLOCK_K=config["BK"], stages=config["stage"], ag_stream=torch.cuda.Stream(),
+                                      gemm_stream=torch.cuda.Stream(), autotune=args.autotune)
 
     def triton_func():
         return gemm(ag_buffer, B)

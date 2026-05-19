@@ -93,7 +93,7 @@ else()
 endif()
 
 if(TRITON_USE_MACA)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_MACA")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_MACA -DUSE_MACA_DISTRIBUTED")
 endif()
 
 # #########
@@ -101,6 +101,10 @@ endif()
 # #########
 if(NOT MLIR_DIR)
   set(MLIR_DIR ${LLVM_LIBRARY_DIR}/cmake/mlir)
+endif()
+
+if(TRITON_USE_MACA AND NOT LLD_DIR)
+  set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
 endif()
 
 # MLIR
@@ -193,11 +197,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonDistributed ${PYTHON_DIST_SRC_PATH}/triton_distributed.cc
                                       ${PYTHON_DIST_SRC_PATH}/passes.cc
                                       ${PYTHON_DIST_SRC_PATH}/ir.cc)
-  if(TRITON_USE_MACA)
-    target_link_libraries(TritonDistributed PRIVATE DistributedIR Python3::Module pybind11::headers)
-  else()
-    target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
-  endif()
+
+  target_link_libraries(TritonDistributed PRIVATE DistributedIR SIMTIR ProtonIR Python3::Module pybind11::headers)
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE)
@@ -237,8 +238,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(csrc)
   endif()
   # build proton dialect
-  if(NOT TRITON_USE_MACA)
-    list(APPEND TRITON_PLUGIN_NAMES "proton")
+  list(APPEND TRITON_PLUGIN_NAMES "proton")
+  if(TRITON_USE_MACA)
+    add_subdirectory(3rdparty/triton/third_party/proton/Dialect)
+  else()
     add_subdirectory(3rdparty/triton/third_party/proton/dialect)
   endif()
   # We always build distributed dialect
@@ -327,9 +330,12 @@ if(TRITON_BUILD_PYTHON_MODULE)
   if(TRITON_USE_MACA)
     add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                     ${PYTHON_SRC_PATH}/ir.cc
+                    ${PYTHON_SRC_PATH}/gluon_ir.cc
+                    ${PYTHON_SRC_PATH}/linear_layout.cc
                     ${PYTHON_SRC_PATH}/passes.cc
                     ${PYTHON_SRC_PATH}/interpreter.cc
-                    ${PYTHON_SRC_PATH}/llvm.cc)
+                    ${PYTHON_SRC_PATH}/llvm.cc
+                    ${PYTHON_SRC_PATH}/specialize.cc)
   else()
     add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                     ${PYTHON_SRC_PATH}/ir.cc

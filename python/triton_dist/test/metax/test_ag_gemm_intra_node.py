@@ -1,4 +1,5 @@
 import torch
+import triton_dist
 from triton_dist.autotuner import contextual_autotune
 from triton_dist.kernels.metax import ag_gemm_intra_node, create_ag_gemm_intra_node_context, gemm
 
@@ -8,7 +9,7 @@ import sys
 import datetime
 import numpy as np
 
-import pymxshmem
+import triton.pymxshmem as pymxshmem
 
 from triton_dist.utils import dist_print
 from triton_dist.profiler_utils import perf_func
@@ -219,6 +220,7 @@ register_test("perf_no_tma")(lambda args: test_perf_ag_gemm_tma_intra_node(args,
 def test_perf_ag_gemm_golden(args, use_triton=False):
     device = "cuda"
     dtype = torch.float16
+    # rank = args.rank
     num_ranks = args.num_ranks
     if args.shape_id:
         shape_config = configs[args.shape_id]
@@ -248,10 +250,10 @@ def test_perf_ag_gemm_golden(args, use_triton=False):
                 A,
                 group=args.default_group,
             )
-            return gemm(ag_A, B)
+            return gemm()
 
         def gemm():
-            return gemm(ag_A, B)
+            return triton_dist.kernels.metax.gemm(ag_A, B)
     else:
 
         def func():
