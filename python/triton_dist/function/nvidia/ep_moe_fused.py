@@ -204,7 +204,7 @@ class TritonDistFusedEpMoeFunction(torch.autograd.Function):
         triton_dist_ep_ctx = ctx.triton_dist_ep_ctx
         ep_a2a_layout_desc = triton_dist_ep_ctx.ep_a2a_layout_desc
 
-        assert triton_dist_ep_ctx.ep_group.size() == 8  # only for intra-node
+        assert triton_dist_ep_ctx.ep_group.size() <= 8  # only for intra-node
         optim_config = get_moe_optim_config(use_mega=True, is_forward=False)
         profile_config = get_triton_dist_moe_profile_enabled()
 
