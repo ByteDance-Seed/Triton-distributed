@@ -120,6 +120,7 @@ def get_tflops_approx(device: torch.dtype, num_ctas: int, num_warps: int, dtype:
 
 
 def get_full_tflops_approx(dtype: torch.dtype, device: Optional[torch.device] = None):
+    device = torch.cuda.current_device() if device is None else device
     prop = torch.cuda.get_device_properties(device)
     return get_tflops_approx(device, prop.multi_processor_count, 4, dtype)
 
@@ -135,7 +136,9 @@ def get_tensorcore_dtype_support(device_id=0):
         (8, 9): [torch.float16, torch.bfloat16, torch.float32, torch.int8, torch.float8_e4m3fn,
                  torch.float8_e5m2],  # Ada L40S/RTX 40xx
         # Hopper
-        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8]
+        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
+        # Blackwell
+        (10, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
     }
     return DTYPE_MAP.get(cap, [torch.float16, torch.float32])
 
@@ -177,6 +180,8 @@ def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
         return 989 * (2 / dtype.itemsize)
     if device_name == "NVIDIA H20":
         return 148 * (2 / dtype.itemsize)
+    if device_name == "NVIDIA B200":
+        return 2250 * (2 / dtype.itemsize)
 
     logging.warning(
         f"device {device_name} not listed here. calculate tflops by estimation, or you can report it to developers.")
@@ -206,6 +211,7 @@ def get_dram_gbps_by_device_name(device_name: str):
         "NVIDIA H100 SXM": 3958,
         "NVIDIA H100 NVL": 3341,
         "NVIDIA H800": 3350,
+        "NVIDIA B200": 8000,
     }
     return _DRAM_GBPS[device_name]
 
@@ -227,8 +233,8 @@ def estimate_gemm_sol_time_ms(M: int, N: int, K: int, dtype=torch.bfloat16):
 if __name__ == "__main__":
     print(f"DRAM: {get_dram_gbps():0.2f} GB/s")
     print(f"DRAM by approx: {triton.testing.get_dram_gbps():0.2f} GB/s")
-    print(f"DRAM by device name: {get_dram_gbps_by_device_name(torch.cuda.get_device_name(0)):0.2f} GB/s")
-    print(f"TFLOPS: {get_tensorcore_tflops(torch.float16):0.2f} TFLOPS")
+    # print(f"DRAM by device name: {get_dram_gbps_by_device_name(torch.cuda.get_device_name(0)):0.2f} GB/s")
+    # print(f"TFLOPS: {get_tensorcore_tflops(torch.float16):0.2f} TFLOPS")
     num_sms = torch.cuda.get_device_properties(0).multi_processor_count
     print(f"TFLOPS by approx: {get_tensorcore_tflops_by_calc(0, num_sms, 4, torch.float16):0.2f} TFLOPS")
     print(f"TFLOPS by device name: {get_tensorcore_tflops_by_device_name(torch.float16):0.2f} TFLOPS")
