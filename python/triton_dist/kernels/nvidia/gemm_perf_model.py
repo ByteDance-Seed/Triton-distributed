@@ -233,8 +233,8 @@ def estimate_gemm_sol_time_ms(M: int, N: int, K: int, dtype=torch.bfloat16):
 if __name__ == "__main__":
     print(f"DRAM: {get_dram_gbps():0.2f} GB/s")
     print(f"DRAM by approx: {triton.testing.get_dram_gbps():0.2f} GB/s")
-    # print(f"DRAM by device name: {get_dram_gbps_by_device_name(torch.cuda.get_device_name(0)):0.2f} GB/s")
-    # print(f"TFLOPS: {get_tensorcore_tflops(torch.float16):0.2f} TFLOPS")
+    print(f"DRAM by device name: {get_dram_gbps_by_device_name(torch.cuda.get_device_name(0)):0.2f} GB/s")
+    print(f"TFLOPS: {get_tensorcore_tflops(torch.float16):0.2f} TFLOPS")
     num_sms = torch.cuda.get_device_properties(0).multi_processor_count
     print(f"TFLOPS by approx: {get_tensorcore_tflops_by_calc(0, num_sms, 4, torch.float16):0.2f} TFLOPS")
     print(f"TFLOPS by device name: {get_tensorcore_tflops_by_device_name(torch.float16):0.2f} TFLOPS")
