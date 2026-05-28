@@ -141,6 +141,14 @@ See examples in the `tutorials` directory at the project root.
 ## To use Triton-distributed with the AMD backend:
 Starting from the rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1 Docker container
 #### AMD Build Steps
+0. Detect your GPU architecture and export it. 
+```sh
+# e.g. gfx950 for MI350, gfx942 for MI300
+python3 -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(':')[0])"
+export BITCODE_LIB_ARCH=gfx950   # ← replace with the value printed above
+```
+If this environment variable is not set, the default value is "gfx942"
+
 1. Clone the repo
 ```sh
 git clone https://github.com/ByteDance-Seed/Triton-distributed.git
@@ -162,12 +170,15 @@ export TRITON_BUILD_PROTON=0
 rm -f /usr/local/bin/cmake
 apt-get update -y
 apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake miopen-hip autoconf libtool flex ninja-build clang lld
-python3 -m pip install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
+python3 -m pip install -i https://test.pypi.org/simple 'hip-python>=7.1' # (or whatever Rocm version you have)
 pip3 install pybind11
 bash ./shmem/rocshmem_bind/build.sh
 ```
 4. Build Triton-distributed
 ```sh
+# Uninstall the original Triton
+pip3 uninstall -y triton
+
 pip3 install -e python --verbose --no-build-isolation --use-pep517
 ```
 ### Test AMD Installation
