@@ -168,6 +168,7 @@ private:
   OP(1536, __VA_ARGS__)                                                        \
   OP(2048, __VA_ARGS__)                                                        \
   OP(2304, __VA_ARGS__)                                                        \
+  OP(2816, __VA_ARGS__)                                                        \
   OP(3328, __VA_ARGS__)                                                        \
   OP(3584, __VA_ARGS__)                                                        \
   OP(3840, __VA_ARGS__)                                                        \
