@@ -3,6 +3,10 @@
 # set cuda env for scm
 export PATH=/usr/local/cuda/bin:$PATH
 
+apt-get install -y --no-install-recommends \
+        zip=3.0-13 \
+        unzip=6.0-28
+
 # Make -lcuda resolvable (stub libcuda.so) for both x86_64 and aarch64.
 ARCH="$(uname -m)"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
