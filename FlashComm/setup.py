@@ -33,6 +33,36 @@ import setuptools
 from setuptools import setup
 
 
+def _split_cuda_arch_list(cuda_arch):
+    return [token for token in cuda_arch.replace(',', ';').replace(' ', ';').split(';') if token]
+
+
+def _cuda_arch_major(token):
+    arch = token.strip().lower().replace('+ptx', '')
+    for prefix in ('compute_', 'sm_', 'sm'):
+        if arch.startswith(prefix):
+            arch = arch[len(prefix):]
+            break
+    arch = arch.rstrip('a')
+    if arch.isdigit():
+        value = int(arch)
+        return value // 10 if value >= 10 else value
+    return int(float(arch))
+
+
+def _normalize_cuda_arch_list(cuda_arch):
+    arch_tokens = _split_cuda_arch_list(cuda_arch)
+    arch_majors = []
+    for token in arch_tokens:
+        try:
+            arch_majors.append(_cuda_arch_major(token))
+        except ValueError:
+            pass
+    if 10 in arch_majors and 9 not in arch_majors:
+        arch_tokens.append('9.0')
+    return ';'.join(arch_tokens)
+
+
 def get_extension():
     try:
         from torch.utils.cpp_extension import CUDAExtension
@@ -45,20 +75,20 @@ def get_extension():
         cuda_arch = custom_arch
     else:
         cuda_arch = os.getenv('TORCH_CUDA_ARCH_LIST', '9.0')
+    cuda_arch = _normalize_cuda_arch_list(cuda_arch)
     os.environ['TORCH_CUDA_ARCH_LIST'] = cuda_arch
     print(f"Using CUDA architecture: {cuda_arch}")
 
     # Derive max dynamic shared memory per block (bytes) from target arch.
-    # Reference: NVIDIA Programming Guide per-arch shared memory limits.
-    #   SM 8.x (Ampere):   164 KB per SM → max per block = 163 KB
-    #   SM 9.0 (Hopper):   228 KB per SM → max per block = 227 KB
-    #   SM 10.0 (Blackwell): 228 KB per SM → max per block = 227 KB
-    _smem_per_block_kb = {8: 163, 9: 227, 10: 227}
-    arch_tokens = [a.strip() for a in cuda_arch.replace('+PTX', '').replace('a', '').split(';') if a.strip()]
-    max_major = max(int(float(a)) for a in arch_tokens) if arch_tokens else 9
-    max_smem_kb = _smem_per_block_kb.get(max_major, 227)
+    arch_majors = [_cuda_arch_major(token) for token in _split_cuda_arch_list(cuda_arch)]
+    arch_majors = [major for major in arch_majors if major is not None]
+    if arch_majors and min(arch_majors) < 9:
+        raise RuntimeError("FlashComm requires CUDA arch 9.0 or newer")
+    max_major = max(arch_majors) if arch_majors else 9
+    max_smem_kb = {9: 227, 10: 227}.get(max_major, 227)
     max_smem_bytes = max_smem_kb * 1024
-    print(f"Max dynamic shared memory per block: {max_smem_kb} KB ({max_smem_bytes} bytes) for SM major={max_major}")
+    print(f"Max dynamic shared memory per block: {max_smem_kb} KB "
+          f"({max_smem_bytes} bytes) for SM major={max_major}")
 
     sources = [
         os.path.join("csrc", "ep", "kernels", "intranode_cuda.cu"),

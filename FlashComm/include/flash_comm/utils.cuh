@@ -22,8 +22,10 @@
  */
 
 #pragma once
-#define ARCH_SM90_ENABLED
-#define ARCH_ELECT_ONE_SM90_ENABLED
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+#error "FlashComm CUDA kernels require SM90 or newer."
+#endif
 
 __forceinline__ __device__ uint32_t
 cast_smem_ptr_to_uint(void const *const ptr) {
@@ -32,37 +34,32 @@ cast_smem_ptr_to_uint(void const *const ptr) {
 
 // Initialize barrier present in shared memory
 __forceinline__ __device__ void initialize_barrier(
-    uint64_t *smem_barrier_ptr, // 64 bits user-manged barrier in smem
+    uint64_t *smem_barrier_ptr, // 64 bits user-managed barrier in smem
     int thread_count =
         1) // Thread count expected to arrive/wait on this barrier
 {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(smem_int_ptr),
                "r"(thread_count));
-#endif
 }
 
-// Set the number of bytes transfered per transaction and perform an arrive
+// Set the number of bytes transferred per transaction and perform an arrive
 // operation as well
 __forceinline__ __device__ void mbar_arrive_and_set_barrier_transaction_bytes(
-    uint64_t *smem_barrier_ptr, // 64 bits user-manged barrier in smem
-    uint32_t bytes) // Number of bytes transfered by per TMA transaction
+    uint64_t *smem_barrier_ptr, // 64 bits user-managed barrier in smem
+    uint32_t bytes) // Number of bytes transferred by per TMA transaction
 {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
                    smem_int_ptr),
                "r"(bytes));
-#endif
 }
 
 // Barrier wait
 __forceinline__ __device__ void
-wait_barrier(uint64_t *smem_barrier_ptr, // 64 bits user-manged barrier in smem
+wait_barrier(uint64_t *smem_barrier_ptr, // 64 bits user-managed barrier in smem
              int phase_bit) // Current phase bit the barrier waiting to flip
 {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
   asm volatile("{\n"
                ".reg .pred                P1;\n"
@@ -73,21 +70,17 @@ wait_barrier(uint64_t *smem_barrier_ptr, // 64 bits user-manged barrier in smem
                "DONE:\n"
                "}\n" ::"r"(smem_int_ptr),
                "r"(phase_bit));
-
-#endif
 }
 
 // Barrier arrive
 __forceinline__ __device__ void arrive_barrier(
-    uint64_t *smem_barrier_ptr) // 64 bits user-manged barrier in smem
+    uint64_t *smem_barrier_ptr) // 64 bits user-managed barrier in smem
 {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
   asm volatile("{\n"
                ".reg .b64 state; \n"
                "mbarrier.arrive.shared::cta.b64   state, [%0];\n"
                "}\n" ::"r"(smem_int_ptr));
-#endif
 }
 
 __forceinline__ __device__ void
@@ -103,7 +96,7 @@ __forceinline__ __device__ void fence_async_shared() {
 }
 
 __forceinline__ __device__ uint32_t elect_one_sync() {
-#if defined(ARCH_ELECT_ONE_SM90_ENABLED)
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   uint32_t pred = 0;
   uint32_t laneid = 0;
   asm volatile("{\n"
@@ -127,6 +120,7 @@ constexpr int WARP_SIZE = 32;
 
 #define PRAGMA_UNROLL _Pragma("unroll")
 
+namespace flash_comm {
 namespace detail {
 
 template <int kUnrollFactor, typename VecT> struct UnrolledLoad {
@@ -150,6 +144,7 @@ template <int kUnrollFactor, typename VecT> struct UnrolledStore {
 };
 
 } // namespace detail
+} // namespace flash_comm
 
 template <int kUnrollFactor = 4, typename VecT = int4>
 __device__ __forceinline__ void warp_copy_unrolled(const VecT *__restrict__ src,
@@ -164,8 +159,10 @@ __device__ __forceinline__ void warp_copy_unrolled(const VecT *__restrict__ src,
   const int unroll_stride = WARP_SIZE * kUnrollFactor;
   for (; idx + (kUnrollFactor - 1) * WARP_SIZE < num_vecs;
        idx += unroll_stride) {
-    detail::UnrolledLoad<kUnrollFactor, VecT>::apply(src, regs, idx);
-    detail::UnrolledStore<kUnrollFactor, VecT>::apply(dst, regs, idx);
+    flash_comm::detail::UnrolledLoad<kUnrollFactor, VecT>::apply(src, regs,
+                                                                 idx);
+    flash_comm::detail::UnrolledStore<kUnrollFactor, VecT>::apply(dst, regs,
+                                                                  idx);
   }
 
   // remainder loop

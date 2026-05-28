@@ -307,8 +307,6 @@ void dispatch_intranode(
                        {num_token, topk});
   }
   auto offset_dtype = get_flash_comm_dtype(topk_indices.scalar_type());
-  int token_size = x.element_size();
-
   FLASH_CHECK(dtype == FlashCommDType::BFloat16)
       << "Only BFloat16 token type is currently supported";
   FLASH_CHECK(offset_dtype == FlashCommDType::Int32)
@@ -322,57 +320,6 @@ void dispatch_intranode(
   FLASH_CHECK(num_ranks * 3 * 8 <= 1024);
 
   dispatch_intranode_cuda(
-      x.data_ptr(), topk_send_mask.data_ptr(), topk_weights_ptr,
-      topk_indices.data_ptr(), token_dst_scatter_indices.data_ptr(),
-      recv_x_ptrs.data_ptr(),
-      reinterpret_cast<void **>(recv_weights_ptrs.data_ptr()),
-      reinterpret_cast<void **>(recv_topk_scatter_indices_ptrs.data_ptr()),
-      num_token, hidden_size, num_experts_per_rank, rank, num_ranks, num_sm,
-      dtype, weight_dtype, offset_dtype, topk, stream);
-}
-
-void dispatch_intranode_chunk(
-    torch::Tensor x,              // [num_token, hidden_size]
-    torch::Tensor topk_send_mask, // [num_token, topk]
-    c10::optional<torch::Tensor> optional_topk_weights, // [num_token, topk]
-    torch::Tensor topk_indices,                         // [num_token, topk]
-    torch::Tensor token_dst_scatter_indices,            // [num_token, topk]
-    // outputs
-    torch::Tensor recv_x_ptrs, // [num_ranks]
-    torch::Tensor
-        recv_weights_ptrs, // [num_ranks], recv_weights [num_recv_token, topk]
-    torch::Tensor recv_topk_scatter_indices_ptrs, // [num_ranks],
-                                                  // recv_topk_scatter_indices
-                                                  // [num_recv_token, topk]
-    int32_t rank, int32_t num_ranks, int32_t num_experts_per_rank,
-    int32_t num_sm) {
-  int32_t num_token = x.size(0);
-  int32_t hidden_size = x.size(1);
-  int32_t topk = topk_indices.size(1);
-  if (optional_topk_weights.has_value() &&
-      optional_topk_weights.value().defined()) {
-    FLASH_CHECK(x.size(0) == optional_topk_weights.value().size(0));
-  }
-  FLASH_CHECK(x.size(0) == topk_indices.size(0));
-  FLASH_CHECK(x.size(0) == token_dst_scatter_indices.size(0));
-  FLASH_CHECK(x.size(0) == topk_send_mask.size(0));
-  FLASH_CHECK(topk == topk_send_mask.size(1));
-
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  auto dtype = get_flash_comm_dtype(x.scalar_type());
-  auto weight_dtype = FlashCommDType::Float32;
-  void *topk_weights_ptr = nullptr;
-  if (optional_topk_weights.has_value() &&
-      optional_topk_weights.value().defined()) {
-    weight_dtype =
-        get_flash_comm_dtype(optional_topk_weights.value().scalar_type());
-    topk_weights_ptr = optional_topk_weights.value().data_ptr();
-    check_tensor_shape(optional_topk_weights.value(), "topk_weights",
-                       {num_token, topk});
-  }
-  auto offset_dtype = get_flash_comm_dtype(topk_indices.scalar_type());
-
-  dispatch_intranode_chunk_cuda(
       x.data_ptr(), topk_send_mask.data_ptr(), topk_weights_ptr,
       topk_indices.data_ptr(), token_dst_scatter_indices.data_ptr(),
       recv_x_ptrs.data_ptr(),
@@ -408,7 +355,6 @@ void dispatch_postprocess(
   auto weight_dtype = FlashCommDType::Float32;
   auto offset_dtype =
       get_flash_comm_dtype(recv_topk_scatter_indices.scalar_type());
-  int token_size = recv_x.element_size();
   bool has_weight = (optional_recv_topk_weights.has_value() &&
                      optional_recv_topk_weights.value().defined());
   bool has_dispatch_weights = (optional_dispatch_weights.has_value() &&
@@ -697,14 +643,6 @@ void bind_intranode_ops(py::module &m) {
         py::arg("recv_weights_ptrs"), py::arg("recv_topk_scatter_indices_ptrs"),
         py::arg("rank"), py::arg("num_ranks"), py::arg("num_experts_per_rank"),
         py::arg("num_sm"), "intranode dispatch for ep");
-  m.def("dispatch_intranode_chunk",
-        &flash_comm::ep::intranode::dispatch_intranode_chunk, py::arg("x"),
-        py::arg("topk_send_mask"), py::arg("optional_topk_weights"),
-        py::arg("topk_indices"), py::arg("token_dst_scatter_indices"),
-        py::arg("recv_x_ptrs"), py::arg("recv_weights_ptrs"),
-        py::arg("recv_topk_scatter_indices_ptrs"), py::arg("rank"),
-        py::arg("num_ranks"), py::arg("num_experts_per_rank"),
-        py::arg("num_sm"), "intranode dispatch (chunk variant) for ep");
   m.def("dispatch_postprocess",
         &flash_comm::ep::intranode::dispatch_postprocess, py::arg("recv_x"),
         py::arg("recv_topk_scatter_indices_comm_buffer"),

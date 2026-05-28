@@ -176,11 +176,6 @@ private:
   OP(7168, __VA_ARGS__)                                                        \
   OP(8192, __VA_ARGS__)
 
-#define SUPPORTED_TYPES(OP, ...)                                               \
-  OP(flash_comm::FlashCommDType::Float32, float, __VA_ARGS__)                  \
-  OP(flash_comm::FlashCommDType::Float16, __half, __VA_ARGS__)                 \
-  OP(flash_comm::FlashCommDType::BFloat16, nv_bfloat16, __VA_ARGS__)
-
 // Token types: only BFloat16 for now
 #define SUPPORTED_TOKEN_TYPES(OP, ...)                                         \
   OP(flash_comm::FlashCommDType::BFloat16, nv_bfloat16, __VA_ARGS__)
@@ -202,9 +197,6 @@ private:
 
 #define DISPATCH_TOPK(VAL, TYPE_NAME, ...)                                     \
   DISPATCH_INT_BY_LIST(SUPPORTED_TOPK, VAL, TYPE_NAME, __VA_ARGS__)
-
-#define DISPATCH_DTYPE(VAL, TYPE_NAME, ...)                                    \
-  DISPATCH_TYPE_BY_LIST(SUPPORTED_TYPES, VAL, TYPE_NAME, __VA_ARGS__)
 
 #define DISPATCH_TOKEN_DTYPE(VAL, TYPE_NAME, ...)                              \
   DISPATCH_TYPE_BY_LIST(SUPPORTED_TOKEN_TYPES, VAL, TYPE_NAME, __VA_ARGS__)

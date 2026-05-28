@@ -28,7 +28,6 @@ __forceinline__ __device__ void tma_copy_1d_g2s(void const *gmem_ptr,
                                                 uint64_t *mbar_ptr,
                                                 void *smem_ptr,
                                                 int32_t load_bytes) {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_mbar = cast_smem_ptr_to_uint(mbar_ptr);
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
@@ -37,32 +36,25 @@ __forceinline__ __device__ void tma_copy_1d_g2s(void const *gmem_ptr,
                : "r"(smem_int_ptr), "l"(gmem_ptr), "r"(load_bytes),
                  "r"(smem_int_mbar)
                : "memory");
-#endif
 }
 
 __forceinline__ __device__ void
 tma_copy_1d_s2g(void const *smem_ptr, void *gmem_ptr, int32_t store_bytes) {
-#if defined(ARCH_SM90_ENABLED)
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;\n"
                :
                : "l"(gmem_ptr), "r"(smem_int_ptr), "r"(store_bytes)
                : "memory");
-#endif
-};
+}
 
 // Wait until at most Count committed TMA_STOREs are pending and all prior
 // commits are complete
 template <int Count> __forceinline__ __device__ void tma_store_wait() {
-#if defined(ARCH_SM90_ENABLED)
   asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
-#endif
 }
 
 __forceinline__ __device__ void tma_store_arrive() {
-#if defined(ARCH_SM90_ENABLED)
   asm volatile("cp.async.bulk.commit_group;");
-#endif
 }
 
 template <uint32_t Stages_> struct PipelineState {

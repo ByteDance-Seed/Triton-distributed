@@ -60,15 +60,6 @@ void dispatch_intranode_cuda(
     FlashCommDType weight_dtype, FlashCommDType offset_dtype, int32_t topk,
     cudaStream_t stream);
 
-void dispatch_intranode_chunk_cuda(
-    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
-    void *token_dst_scatter_indices, void *recv_x_ptrs,
-    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
-    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
-    int32_t rank, int32_t num_ranks, int32_t num_sm, FlashCommDType dtype,
-    FlashCommDType weight_dtype, FlashCommDType offset_dtype, int32_t topk,
-    cudaStream_t stream);
-
 void dispatch_postprocess_cuda(
     void *recv_x, void *recv_topk_scatter_indices_comm_buffer,
     void *recv_topk_weights, int32_t *recv_token_count, void *dispatch_weights,

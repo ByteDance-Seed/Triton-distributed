@@ -92,26 +92,32 @@ class EPCommLayoutDesc:
         return False
 
     def check_layout_desc(self, num_tokens: int, topk: int, num_experts: int, world_size: int = 1):
+
+        def check_shape(tensor: Optional[torch.Tensor], name: str, expected_shape):
+            if tensor is not None and tuple(tensor.shape) != tuple(expected_shape):
+                raise ValueError(f"{name} must have shape {list(expected_shape)}, got shape {tuple(tensor.shape)}")
+
         has_token_offset = self.token_within_expert_offset is not None
         has_expert_counts = self.expert_counts is not None
-        if has_token_offset:
-            if self.token_within_expert_offset.shape[0] != num_tokens:
-                raise ValueError("token_within_expert_offset must have shape [num_tokens, num_experts], got shape " +
-                                 str(self.token_within_expert_offset.shape))
-
-        if has_expert_counts:
-            if self.expert_counts.shape[0] != num_experts + 1:
-                raise ValueError("expert_counts must have shape [num_experts + 1], got shape " +
-                                 str(self.expert_counts.shape))
-
         if has_expert_counts != has_token_offset:
             raise ValueError("token_within_expert_offset and expert_counts must both be None or both be non-None")
 
-        if self.recv_expert_counts is not None:
-            experts_per_rank = num_experts // world_size
-            if self.recv_expert_counts.shape != (experts_per_rank, ):
-                raise ValueError(f"recv_expert_counts must have shape [{experts_per_rank}], "
-                                 f"got shape {self.recv_expert_counts.shape}")
+        # experts_per_rank = num_experts // world_size
+        # check_shape(self.token_within_expert_offset, "token_within_expert_offset", (num_tokens, topk))
+        # check_shape(self.expert_counts, "expert_counts", (num_experts + 1,))
+        # check_shape(self.recv_base_offset, "recv_base_offset", (world_size, experts_per_rank, world_size))
+        # check_shape(self.token_dst_scatter_indices, "token_dst_scatter_indices", (num_tokens, topk))
+        # check_shape(self.token_topk_send_mask, "token_topk_send_mask", (num_tokens, topk))
+        # check_shape(self.topk_indices, "topk_indices", (num_tokens, topk))
+        # check_shape(self.recv_token_count_cpu, "recv_token_count_cpu", (world_size,))
+        # check_shape(self.recv_token_count, "recv_token_count", (world_size,))
+        # check_shape(self.recv_aligned_token_count_cpu, "recv_aligned_token_count_cpu", (world_size,))
+        # check_shape(self.recv_aligned_token_count, "recv_aligned_token_count", (world_size,))
+        # check_shape(self.recv_expert_counts, "recv_expert_counts", (experts_per_rank,))
+        if self.recv_topk_scatter_indices is not None:
+            if self.recv_topk_scatter_indices.dim() != 2 or self.recv_topk_scatter_indices.shape[1] != topk:
+                raise ValueError("recv_topk_scatter_indices must have shape [num_recv_tokens, topk], "
+                                 f"got shape {tuple(self.recv_topk_scatter_indices.shape)}")
 
 
 class EPKernels:

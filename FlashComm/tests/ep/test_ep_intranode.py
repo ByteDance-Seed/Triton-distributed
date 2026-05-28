@@ -97,6 +97,131 @@ def perf_func(func, iters, warmup_iters):
     return output, duration_ms / iters
 
 
+def gbps(num_bytes: int, duration_ms: float) -> float:
+    if duration_ms <= 0:
+        return 0.0
+    return num_bytes / duration_ms / 1e6
+
+
+def format_ms(duration_ms: float) -> str:
+    return f"{duration_ms:.4f} ms"
+
+
+def format_gb(num_bytes: int) -> str:
+    return f"{num_bytes / 1e9:.4f} GB"
+
+
+def format_gbps(num_bytes: int, duration_ms: float) -> str:
+    return f"{gbps(num_bytes, duration_ms):.4f} GB/s"
+
+
+def calc_nvl_payload_stats(dispatch_send_mask: torch.Tensor, combine_send_mask: torch.Tensor, exp_indices: torch.Tensor,
+                           input: torch.Tensor, dispatch_weight: torch.Tensor, combine_weight: torch.Tensor,
+                           num_experts_per_rank: int, rank: int, world_size: int):
+    target_ranks = exp_indices // num_experts_per_rank
+    valid_remote = (target_ranks < world_size) & (target_ranks != rank)
+
+    dispatch_remote_mask = dispatch_send_mask.to(torch.bool) & valid_remote
+    combine_remote_mask = combine_send_mask.to(torch.bool) & valid_remote
+    dispatch_remote_sends = int(dispatch_remote_mask.sum().item())
+    combine_remote_sends = int(combine_remote_mask.sum().item())
+    combine_remote_weight_entries = int(valid_remote.sum().item()) if combine_weight is not None else 0
+
+    token_bytes = input.shape[1] * input.element_size()
+    offset_bytes = exp_indices.element_size()
+    topk = exp_indices.shape[1]
+
+    dispatch_bytes_per_send = token_bytes + topk * offset_bytes
+    if dispatch_weight is not None:
+        dispatch_bytes_per_send += topk * dispatch_weight.element_size()
+    dispatch_bytes = dispatch_remote_sends * dispatch_bytes_per_send
+
+    combine_bytes = combine_remote_sends * token_bytes
+    if combine_weight is not None:
+        combine_bytes += combine_remote_weight_entries * combine_weight.element_size()
+
+    return {
+        "dispatch_remote_sends": dispatch_remote_sends,
+        "combine_remote_sends": combine_remote_sends,
+        "combine_remote_weight_entries": combine_remote_weight_entries,
+        "dispatch_bytes": dispatch_bytes,
+        "combine_bytes": combine_bytes,
+        "total_bytes": dispatch_bytes + combine_bytes,
+    }
+
+
+def calc_dispatch_postprocess_hbm_bytes(recv_topk_scatter_indices: torch.Tensor, dispatch_out: torch.Tensor,
+                                        dispatch_weights: torch.Tensor):
+    scatter = recv_topk_scatter_indices
+    valid = scatter != -1
+    row_ids = torch.arange(scatter.shape[0], device=scatter.device, dtype=scatter.dtype).view(-1, 1)
+    relocated = valid & (scatter != row_ids)
+
+    num_entries = scatter.numel()
+    valid_entries = int(valid.sum().item())
+    relocated_entries = int(relocated.sum().item())
+    offset_bytes = scatter.element_size()
+    token_bytes = dispatch_out.shape[1] * dispatch_out.element_size()
+
+    # For each scatter entry the postprocess kernel reads the comm-buffer index
+    # in both producer and consumer paths, then resets the comm buffer and writes
+    # the public scatter tensor. Relocated token rows are copied in-place.
+    hbm_bytes = num_entries * offset_bytes * 4 + relocated_entries * token_bytes * 2
+    if dispatch_weights is not None:
+        weight_bytes = dispatch_weights.element_size()
+        hbm_bytes += num_entries * weight_bytes + valid_entries * weight_bytes
+    return hbm_bytes
+
+
+def calc_combine_preprocess_hbm_bytes(recv_topk_scatter_indices: torch.Tensor, combine_input: torch.Tensor,
+                                      combine_weight: torch.Tensor):
+    scatter = recv_topk_scatter_indices
+    valid = scatter != -1
+    valid_per_row = valid.sum(dim=1)
+
+    num_entries = scatter.numel()
+    valid_entries = int(valid.sum().item())
+    reduced_rows = int((valid_per_row > 1).sum().item())
+    offset_bytes = scatter.element_size()
+    token_bytes = combine_input.shape[1] * combine_input.element_size()
+
+    # The preprocess kernel reads scatter indices to form masks and again while
+    # reducing valid topk rows. Rows with more than one valid topk read each
+    # contributing token row and write one reduced row back.
+    hbm_bytes = num_entries * offset_bytes * 2 + valid_entries * token_bytes + reduced_rows * token_bytes
+    if combine_weight is not None:
+        weight_bytes = combine_weight.element_size()
+        hbm_bytes += valid_entries * weight_bytes * 2
+    return hbm_bytes
+
+
+def load_profile_kernel_averages(trace_path: str):
+    import gzip
+    import json
+
+    kernel_keys = {
+        "dispatch_nvl": "kernel_dispatch_intranode",
+        "dispatch_postprocess": "kernel_dispatch_postprocess",
+        "combine_preprocess": "kernel_combine_preprocess",
+        "combine_nvl": "kernel_combine_intranode",
+    }
+    totals = {key: 0.0 for key in kernel_keys}
+    counts = {key: 0 for key in kernel_keys}
+    with gzip.open(trace_path, "rt") as f:
+        events = json.load(f).get("traceEvents", [])
+    for event in events:
+        name = event.get("name", "")
+        duration_us = event.get("dur")
+        if duration_us is None:
+            continue
+        for key, needle in kernel_keys.items():
+            if needle in name:
+                totals[key] += duration_us / 1000.0
+                counts[key] += 1
+                break
+    return {key: (totals[key] / counts[key] if counts[key] else 0.0) for key in kernel_keys}
+
+
 torch.set_printoptions(precision=4)
 
 
@@ -642,6 +767,8 @@ if __name__ == "__main__":
 
             (dispatch_out, dispatch_weights, layout_desc), flash_comm_dispatch_perf = perf_func(
                 partial(_run_dispatch, input, weight, exp_indices, copy_dispatch_out), iters=100, warmup_iters=20)
+            if args.profile:
+                dispatch_send_mask = layout_desc.token_topk_send_mask.clone()
             # dispatch_out_buf may reuse as the combine input buffer, the value will be overwritten by the combine function, so we need to clone it
             if not copy_dispatch_out:
                 dispatch_out = dispatch_out.clone()
@@ -659,21 +786,74 @@ if __name__ == "__main__":
             (combine_out, combine_out_weight), flash_comm_combine_perf = perf_func(
                 partial(_run_combine, combine_input, layout_desc, weight=combine_weight), iters=100, warmup_iters=20)
 
+            if args.profile:
+                combine_send_mask = layout_desc.token_topk_send_mask.clone()
+                _, flash_comm_combine_copy_perf = perf_func(partial(_prepare_combine_input, combine_input), iters=100,
+                                                            warmup_iters=20)
+
+                if args.enable_local_combine:
+                    zero_copy_combine_input = _prepare_combine_input(combine_input)
+                    zero_copy_combine_input, zero_copy_combine_weight = ep_kernels.combine_preprocess(
+                        zero_copy_combine_input, layout_desc, weight=combine_weight, zero_copy=True)
+                    _, flash_comm_zero_copy_combine_perf = perf_func(
+                        partial(ep_kernels.combine, zero_copy_combine_input, layout_desc, zero_copy_combine_weight),
+                        iters=100, warmup_iters=20)
+                else:
+                    flash_comm_zero_copy_combine_perf = flash_comm_combine_perf - flash_comm_combine_copy_perf
+
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
+        profile_kernel_averages = {}
         if args.profile:
             run_id = os.environ["TORCHELASTIC_RUN_ID"]
             prof_dir = f"prof/{run_id}"
             os.makedirs(prof_dir, exist_ok=True)
-            ctx.export_chrome_trace(f"{prof_dir}/trace_rank{EP_GROUP.rank()}.json.gz")
+            trace_path = f"{prof_dir}/trace_rank{EP_GROUP.rank()}.json.gz"
+            ctx.export_chrome_trace(trace_path)
+            profile_kernel_averages = load_profile_kernel_averages(trace_path)
         if RANK == 0:
             print(
                 f"input = {input.shape}, weight = {None if weight is None else weight.shape}, ref_dispatch_out = {ref_dispatch_out.shape}, dispatch_out = {dispatch_out.shape}, combine_out = {combine_out.shape}, combine_out_weight is not None = {combine_out_weight is not None}"
             )
-        print(
-            f"RANK {RANK}: flash_comm_layout_perf = {flash_comm_layout_perf}ms, flash_comm_dispatch_perf = {flash_comm_dispatch_perf}ms, flash_comm_combine_perf = {flash_comm_combine_perf}ms"
-        )
+        print(f"RANK {RANK}: flash_comm_layout_perf = {format_ms(flash_comm_layout_perf)}, "
+              f"flash_comm_dispatch_perf = {format_ms(flash_comm_dispatch_perf)}, "
+              f"flash_comm_combine_perf = {format_ms(flash_comm_combine_perf)}")
+        if args.profile:
+            nvl_stats = calc_nvl_payload_stats(dispatch_send_mask, combine_send_mask, exp_indices, input, weight,
+                                               combine_weight, experts_per_rank, RANK, WORLD_SIZE)
+            flash_comm_dispatch_nvl_perf = profile_kernel_averages.get("dispatch_nvl", 0.0)
+            flash_comm_combine_nvl_perf = profile_kernel_averages.get("combine_nvl", 0.0)
+            dispatch_postprocess_perf = profile_kernel_averages.get("dispatch_postprocess", 0.0)
+            combine_preprocess_perf = (profile_kernel_averages.get("combine_preprocess", 0.0)
+                                       if args.enable_local_combine else 0.0)
+            dispatch_postprocess_hbm_bytes = calc_dispatch_postprocess_hbm_bytes(layout_desc.recv_topk_scatter_indices,
+                                                                                 dispatch_out, dispatch_weights)
+            combine_preprocess_hbm_bytes = (calc_combine_preprocess_hbm_bytes(layout_desc.recv_topk_scatter_indices,
+                                                                              combine_input, combine_weight)
+                                            if args.enable_local_combine else 0)
+            nvl_comm_perf = flash_comm_dispatch_nvl_perf + flash_comm_combine_nvl_perf
+            print(
+                f"RANK {RANK}: dispatch_nvl_payload = {format_gb(nvl_stats['dispatch_bytes'])}, "
+                f"dispatch_remote_sends = {nvl_stats['dispatch_remote_sends']}, "
+                f"dispatch_nvl_kernel_time = {format_ms(flash_comm_dispatch_nvl_perf)}, "
+                f"dispatch_nvl_bw = {format_gbps(nvl_stats['dispatch_bytes'], flash_comm_dispatch_nvl_perf)}, "
+                f"dispatch_postprocess_time = {format_ms(dispatch_postprocess_perf)}, "
+                f"dispatch_postprocess_hbm_payload = {format_gb(dispatch_postprocess_hbm_bytes)}, "
+                f"dispatch_postprocess_hbm_bw = {format_gbps(dispatch_postprocess_hbm_bytes, dispatch_postprocess_perf)}"
+            )
+            print(f"RANK {RANK}: combine_nvl_payload = {format_gb(nvl_stats['combine_bytes'])}, "
+                  f"combine_remote_sends = {nvl_stats['combine_remote_sends']}, "
+                  f"combine_remote_weight_entries = {nvl_stats['combine_remote_weight_entries']}, "
+                  f"combine_nvl_kernel_time = {format_ms(flash_comm_combine_nvl_perf)}, "
+                  f"combine_nvl_bw = {format_gbps(nvl_stats['combine_bytes'], flash_comm_combine_nvl_perf)}, "
+                  f"combine_preprocess_time = {format_ms(combine_preprocess_perf)}, "
+                  f"combine_preprocess_hbm_payload = {format_gb(combine_preprocess_hbm_bytes)}, "
+                  f"combine_preprocess_hbm_bw = {format_gbps(combine_preprocess_hbm_bytes, combine_preprocess_perf)}")
+            print(f"RANK {RANK}: total_nvl_payload = {format_gb(nvl_stats['total_bytes'])}, "
+                  f"total_nvl_comm_time = {format_ms(nvl_comm_perf)}, "
+                  f"total_nvl_comm_bw = {format_gbps(nvl_stats['total_bytes'], nvl_comm_perf)}, "
+                  f"combine_input_copy_time = {format_ms(flash_comm_combine_copy_perf)}, ")
         num_recv_token = ref_dispatch_out.shape[0]
         if args.expert_alignment > 1:
             dispatch_out = densify_aligned_output(dispatch_out, ref_local_expert_counts, args.expert_alignment)
