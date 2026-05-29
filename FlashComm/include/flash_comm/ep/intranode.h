@@ -47,9 +47,9 @@ void compute_dispatch_layout_cuda(
     int32_t *token_topk_send_mask, int32_t *recv_token_count_cpu,
     int32_t *recv_token_count, int32_t *recv_aligned_token_count_cpu,
     int32_t *recv_aligned_token_count, int32_t *recv_expert_counts,
-    int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
-    int32_t num_ranks, int32_t num_sm, int32_t expert_alignment,
-    cudaStream_t stream);
+    int64_t **token_src_rank_topk_and_indices_ptrs, int32_t num_token,
+    int32_t topk, int32_t num_experts, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, int32_t expert_alignment, cudaStream_t stream);
 
 void dispatch_intranode_cuda(
     void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,

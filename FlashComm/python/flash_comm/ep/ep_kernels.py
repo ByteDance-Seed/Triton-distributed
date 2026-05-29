@@ -71,6 +71,9 @@ class EPCommLayoutDesc:
     expert_alignment: int = 1
     recv_topk_scatter_indices: Optional[
         torch.Tensor] = None  # intranode: [num_recv_token, topk], internode: [nnodes, max_tokens, topk]
+    # Optional receiver-view metadata filled by compute_dispatch_layout for
+    # CuTeDSL pull dispatch / push combine overlap paths.
+    token_src_rank_topk_and_indices: Optional[torch.Tensor] = None  # [num_recv_token] int64
 
     def check_combine_required_inputs(self):
         if self.token_topk_send_mask is None or self.token_dst_scatter_indices is None:
@@ -190,6 +193,10 @@ class EPKernels:
                 self.compute_stable_local_token_within_expert_offset_and_expert_counts(topk_indices, self.num_sm)
 
         if layout_desc.need_recompute_dispatch_layout(self.expert_alignment):
+            # Receiver-view metadata (``token_src_rank_topk_and_indices``)
+            # is an EP-overlap-only artifact and lives in
+            # ``EPOverlapContext``; the CUDA dispatch path never reads it,
+            # so we always pass ``None`` here.
             (
                 layout_desc.recv_base_offset,
                 layout_desc.token_dst_scatter_indices,
@@ -210,6 +217,7 @@ class EPKernels:
                 self.ep_context.config.world_size,
                 self.num_sm,
                 self.ep_context.recv_token_count_cpu,
+                token_src_rank_topk_and_indices_ptrs=None,
                 expert_alignment=self.expert_alignment,
             )
             layout_desc.expert_alignment = self.expert_alignment

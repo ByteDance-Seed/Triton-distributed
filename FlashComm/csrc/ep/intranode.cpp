@@ -141,6 +141,7 @@ compute_dispatch_layout(
     int32_t num_ranks, int32_t num_sm,
     c10::optional<torch::Tensor> optional_recv_token_count_cpu,
     c10::optional<torch::Tensor> optional_recv_token_count,
+    c10::optional<torch::Tensor> optional_token_src_rank_topk_and_indices_ptrs,
     int32_t expert_alignment) {
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   check_topk_indices(topk_indices);
@@ -238,6 +239,15 @@ compute_dispatch_layout(
   int32_t *recv_token_count_cpu_ptr = recv_token_count_cpu.data_ptr<int32_t>();
   int32_t *recv_token_count_ptr = recv_token_count.data_ptr<int32_t>();
 
+  int64_t **token_src_rank_topk_and_indices_ptrs_data = nullptr;
+  if (optional_token_src_rank_topk_and_indices_ptrs.has_value() &&
+      optional_token_src_rank_topk_and_indices_ptrs.value().defined()) {
+    const auto &t = optional_token_src_rank_topk_and_indices_ptrs.value();
+    check_ptrs_tensor_i64(t, num_ranks, "token_src_rank_topk_and_indices_ptrs");
+    token_src_rank_topk_and_indices_ptrs_data =
+        reinterpret_cast<int64_t **>(t.data_ptr<int64_t>());
+  }
+
   compute_dispatch_layout_cuda(
       topk_indices.data_ptr<int32_t>(),
       token_within_expert_offset.data_ptr<int32_t>(),
@@ -248,8 +258,9 @@ compute_dispatch_layout(
       token_dst_scatter_indices.data_ptr<int32_t>(),
       token_topk_send_mask.data_ptr<int32_t>(), recv_token_count_cpu_ptr,
       recv_token_count_ptr, recv_aligned_token_count_cpu_ptr,
-      recv_aligned_token_count_ptr, recv_expert_counts_ptr, num_token, topk,
-      num_experts, rank, num_ranks, num_sm, expert_alignment, stream);
+      recv_aligned_token_count_ptr, recv_expert_counts_ptr,
+      token_src_rank_topk_and_indices_ptrs_data, num_token, topk, num_experts,
+      rank, num_ranks, num_sm, expert_alignment, stream);
 
   return {recv_base_offset,         token_dst_scatter_indices,
           token_topk_send_mask,     recv_token_count_cpu,
@@ -612,6 +623,7 @@ void bind_intranode_ops(py::module &m) {
         py::arg("num_ranks"), py::arg("num_sm"),
         py::arg("recv_token_count_cpu") = py::none(),
         py::arg("recv_token_count") = py::none(),
+        py::arg("token_src_rank_topk_and_indices_ptrs") = py::none(),
         py::arg("expert_alignment") = 1,
         "Compute dispatch layout:\n"
         "- all-gather local_splits into full_splits (via symmetric buffers)\n"

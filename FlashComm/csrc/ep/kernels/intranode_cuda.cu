@@ -414,6 +414,7 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
         int32_t *recv_aligned_token_count,     // [num_ranks] (optional, device)
         int32_t *recv_expert_counts, // [experts_per_rank] (optional, device,
                                      // local rank only)
+        int64_t **token_src_rank_topk_and_indices_ptrs, // [num_ranks] (optional)
         int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
         int32_t num_ranks, int32_t expert_alignment) {
   const int thread_id = threadIdx.x;
@@ -566,6 +567,23 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
     }
     token_dst_scatter_indices[i] = scatter_idx;
     token_topk_send_mask[i] = need_send;
+
+    // Optional receiver-view source metadata used by CuTeDSL pull dispatch and
+    // push combine paths. Every valid (token, topk) pair owns a receive slot.
+    if (token_src_rank_topk_and_indices_ptrs != nullptr &&
+        target_rank < num_ranks) {
+      int64_t token_idx_val = static_cast<int64_t>(i / topk);
+      int64_t topk_idx_val = static_cast<int64_t>(i % topk);
+      int64_t value = (static_cast<int64_t>(rank) << 48) |
+                      (topk_idx_val << 32) | (token_idx_val & 0xFFFFFFFFLL);
+      int64_t *remote_buf = token_src_rank_topk_and_indices_ptrs[target_rank];
+      remote_buf[scatter_idx] = value;
+    }
+  }
+
+  if (token_src_rank_topk_and_indices_ptrs != nullptr) {
+    __threadfence_system();
+    cooperative_groups::this_grid().sync();
   }
 }
 
@@ -1375,9 +1393,9 @@ void compute_dispatch_layout_cuda(
     int32_t *token_topk_send_mask, int32_t *recv_token_count_cpu,
     int32_t *recv_token_count, int32_t *recv_aligned_token_count_cpu,
     int32_t *recv_aligned_token_count, int32_t *recv_expert_counts,
-    int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
-    int32_t num_ranks, int32_t num_sm, int32_t expert_alignment,
-    cudaStream_t stream) {
+    int64_t **token_src_rank_topk_and_indices_ptrs, int32_t num_token,
+    int32_t topk, int32_t num_experts, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, int32_t expert_alignment, cudaStream_t stream) {
   constexpr int32_t kNumWarps = 32;
   constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
   dim3 block_dim(kNumThreads);
@@ -1404,6 +1422,7 @@ void compute_dispatch_layout_cuda(
                          &recv_aligned_token_count_cpu,
                          &recv_aligned_token_count,
                          &recv_expert_counts,
+                         &token_src_rank_topk_and_indices_ptrs,
                          &num_token,
                          &topk,
                          &num_experts,

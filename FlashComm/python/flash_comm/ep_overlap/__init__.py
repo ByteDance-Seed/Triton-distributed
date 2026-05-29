@@ -23,10 +23,13 @@
 #
 ################################################################################
 
-import torch  # noqa: F401
-from . import buffer
-from . import ep
-from . import ep_overlap
-from . import utils
+from flash_comm.utils import CuTeDSLKernelCache
 
-__all__ = ["buffer", "ep", "ep_overlap", "utils"]
+from .context import EPOverlapContext
+from .ep_overlap_kernels import EPOverlapKernels
+
+__all__ = [
+    "CuTeDSLKernelCache",
+    "EPOverlapContext",
+    "EPOverlapKernels",
+]

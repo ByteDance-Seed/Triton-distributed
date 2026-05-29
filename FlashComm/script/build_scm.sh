@@ -34,3 +34,20 @@ python3 setup.py bdist_wheel
 
 mkdir -p ../output/python
 unzip dist/*.whl -d ../output/python
+
+if [ -n "${FLASH_COMM_CUTEDSL_AOT_MANIFEST:-}" ]; then
+  : "${FLASH_COMM_CUTEDSL_AOT_DIR:=$PROJECT_ROOT/dist/cutedsl_aot}"
+  : "${FLASH_COMM_CUTEDSL_AOT_NPROC:=1}"
+  : "${FLASH_COMM_CUTEDSL_AOT_TIMEOUT:=1800s}"
+
+  mkdir -p "$FLASH_COMM_CUTEDSL_AOT_DIR"
+  PYTHONPATH="$PROJECT_ROOT/python:${PYTHONPATH:-}" \
+    timeout "$FLASH_COMM_CUTEDSL_AOT_TIMEOUT" \
+    torchrun --standalone --nproc_per_node "$FLASH_COMM_CUTEDSL_AOT_NPROC" \
+    -m flash_comm.tools.cutedsl_aot prebuild-ep-overlap \
+    --manifest "$FLASH_COMM_CUTEDSL_AOT_MANIFEST" \
+    --aot-dir "$FLASH_COMM_CUTEDSL_AOT_DIR"
+
+  mkdir -p ../output/cutedsl_aot
+  cp -a "$FLASH_COMM_CUTEDSL_AOT_DIR"/. ../output/cutedsl_aot/
+fi

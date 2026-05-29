@@ -23,10 +23,22 @@
 #
 ################################################################################
 
-import torch  # noqa: F401
-from . import buffer
-from . import ep
-from . import ep_overlap
-from . import utils
+import cutlass.cute as cute
 
-__all__ = ["buffer", "ep", "ep_overlap", "utils"]
+__all__ = [
+    "decode_token_src_rank_topk_and_indices",
+]
+
+
+@cute.jit
+def decode_token_src_rank_topk_and_indices(encoded):
+    """Decode ``(rank << 48) | (topk << 32) | token_idx`` metadata
+    """
+    buf = cute.make_rmem_tensor((4, ), cute.Int16)
+    buf_i64 = cute.recast_tensor(buf, cute.Int64)
+    buf_i32 = cute.recast_tensor(buf, cute.Int32)
+    buf_i64[0] = encoded
+    token_idx = buf_i32[0]
+    topk_idx = cute.Int32(buf[2])
+    rank = cute.Int32(buf[3])
+    return token_idx, rank, topk_idx
