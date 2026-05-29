@@ -1233,13 +1233,31 @@ PYTHON_CLASSIFIERS = [
 ]
 CLASSIFIERS = BASE_CLASSIFIERS + PYTHON_CLASSIFIERS
 
-# nvshmem4py-cu12 does not write install_requires. list them here
+
+def _get_cuda_major_version():
+    """Detect CUDA major version from nvcc or environment."""
+    cuda_version = os.environ.get("CUDA_VERSION", "")
+    if cuda_version:
+        return int(cuda_version.split(".")[0])
+    try:
+        output = subprocess.check_output(["nvcc", "--version"], text=True)
+        match = re.search(r"release (\d+)\.", output)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+    return 12  # default to CUDA 12
+
+
+_cuda_major = _get_cuda_major_version() if _is_cuda_platform() else 12
+_cu_suffix = f"cu{_cuda_major}"
+
 DEPS_NVIDIA = [
     "cuda.core==0.2.0",
-    "cuda-python>=12.0",
-    "nvidia-nvshmem-cu12>=3.3.9",
+    f"cuda-python>={_cuda_major}.0",
+    f"nvidia-nvshmem-{_cu_suffix}>=3.3.9",
     "Cython>=0.29.24",
-    "nvshmem4py-cu12>=0.1.2",
+    f"nvshmem4py-{_cu_suffix}==0.1.2",
 ] if _is_cuda_platform() else []
 DEPS_HIP = ["hip-python"] if _is_hip_platform() else []
 DEPS = DEPS_NVIDIA + DEPS_HIP

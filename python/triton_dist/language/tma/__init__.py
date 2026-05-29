@@ -22,16 +22,47 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from .sp_flash_decode_layer import SpGQAFlashDecodeAttention
-from .low_latency_allgather_layer import AllGatherLayer
-from .ep_a2a_layer import EPAll2AllLayer
-from .gemm_allreduce_layer import GemmARLayer
-from .ep_ll_a2a_layer import EPLowLatencyAllToAllLayer
-from .ulysses_sp_a2a_layer import UlyssesSPAllToAllLayer
-from .post_attn_a2a_layer import PostAttnA2AOp
-from .pre_attn_a2a_layer import PreAttnA2AOp, PreAttnQKVPackA2AOp
+"""Device-side TMA abstractions for Triton-distributed.
+
+Submodules
+----------
+  ``tensormap`` -- device-side tensormap creation constants and helpers.
+  ``pipeline``  -- PipelineState, TmaPipeline aggregate types.
+
+One-stop import::
+
+    from triton_dist.language.tma import (
+        PipelineState, TmaPipeline, create_tmap_2d, ELEM_BF16, SWIZZLE_NONE,
+    )
+"""
+from .tensormap import (
+    ELEM_BF16,
+    ELEM_F32,
+    FILL_NONE,
+    INTERLEAVE_NONE,
+    SWIZZLE_128B,
+    SWIZZLE_NONE,
+    create_tmap_2d,
+    tmap_update_address,
+)
+from .pipeline import (
+    PipelineState,
+    TmaPipeline,
+    store_and_wait,
+)
 
 __all__ = [
-    "SpGQAFlashDecodeAttention", "AllGatherLayer", "EPAll2AllLayer", "GemmARLayer", "EPLowLatencyAllToAllLayer",
-    "UlyssesSPAllToAllLayer", "PostAttnA2AOp", "PreAttnA2AOp", "PreAttnQKVPackA2AOp"
+    # tensormap
+    "ELEM_BF16",
+    "ELEM_F32",
+    "SWIZZLE_128B",
+    "SWIZZLE_NONE",
+    "INTERLEAVE_NONE",
+    "FILL_NONE",
+    "create_tmap_2d",
+    "tmap_update_address",
+    # pipeline
+    "PipelineState",
+    "TmaPipeline",
+    "store_and_wait",
 ]

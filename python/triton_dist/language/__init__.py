@@ -27,6 +27,18 @@ from .distributed_ops import wait, consume_token, rank, num_ranks, symm_at, noti
 from .simt_ops import simt_exec_region, extract, insert, vector, make_vector, zeros_vector
 from .core import extern_call
 from .extra.language_extra import ld_vector, st_vector
+from .smem_ops import (
+    SMEM_GENERIC_POINTER_ADDR_SPACE,
+    SharedMemoryDesc,
+    allocate_smem,
+    smem_index,
+    smem_load,
+    smem_store,
+    smem_get_ptr,
+    get_smem_shared_address_u32,
+    smem_dealloc,
+)
+from . import tma
 
 __all__ = [
     # distributed ops
@@ -45,6 +57,18 @@ __all__ = [
     "zeros_vector",
     "ld_vector",
     "st_vector",
+    # shared memory ops
+    "SMEM_GENERIC_POINTER_ADDR_SPACE",
+    "SharedMemoryDesc",
+    "allocate_smem",
+    "smem_index",
+    "smem_load",
+    "smem_store",
+    "smem_get_ptr",
+    "get_smem_shared_address_u32",
+    "smem_dealloc",
+    # tma pipeline
+    "tma",
     # core
     "extern_call",
 ]

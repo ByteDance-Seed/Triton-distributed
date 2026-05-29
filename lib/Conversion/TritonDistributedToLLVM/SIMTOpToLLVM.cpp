@@ -129,6 +129,54 @@ protected:
   const TargetInfoBase &targetInfo;
 };
 
+struct MemDescToPtrOpPattern
+    : public ConvertOpToLLVMPattern<triton::simt::MemDescToPtrOp> {
+  explicit MemDescToPtrOpPattern(LLVMTypeConverter &typeConverter,
+                                 const TargetInfoBase &targetInfo,
+                                 PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::simt::MemDescToPtrOp>(typeConverter,
+                                                             benefit),
+        targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::simt::MemDescToPtrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto srcTy = op.getSrc().getType();
+    auto elemLlvmTy = typeConverter->convertType(srcTy.getElementType());
+
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
+                                                         elemLlvmTy, rewriter);
+
+    SmallVector<Value> indices(adaptor.getIndices().begin(),
+                               adaptor.getIndices().end());
+    Value addr;
+    if (indices.empty()) {
+      addr = smemObj.getBase();
+    } else {
+      addr = getSharedMemAddress(rewriter, smemObj, indices, srcTy, elemLlvmTy,
+                                 loc);
+    }
+
+    // `addr` is NVVM shared (AS 3). Frontend must use `pointer_type(...,
+    // address_space=0)` for `memdesc_to_ptr` so the converted result is LLVM
+    // generic (AS 0).
+    auto resultTy = typeConverter->convertType(op.getResult().getType());
+    auto genericPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    if (resultTy != genericPtrTy)
+      return op.emitOpError("memdesc_to_ptr result must be LLVM pointer in "
+                            "address space 0 "
+                            "(generic); got ")
+             << resultTy;
+    Value p = rewriter.create<LLVM::AddrSpaceCastOp>(loc, genericPtrTy, addr);
+    rewriter.replaceOp(op, p);
+    return success();
+  }
+
+protected:
+  const TargetInfoBase &targetInfo;
+};
+
 struct SIMTExecRegionPattern
     : public ConvertOpToLLVMPattern<triton::simt::SIMTExecRegionOp> {
   explicit SIMTExecRegionPattern(LLVMTypeConverter &typeConverter,
@@ -175,8 +223,9 @@ void mlir::triton::populateSIMTOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfoBase &targetInfo,
     RewritePatternSet &patterns, PatternBenefit benefit) {
 #ifndef USE_MACA
-  patterns.add<LoadSharedOpPattern, StoreSharedOpPattern>(typeConverter,
-                                                          targetInfo, benefit);
+  patterns
+      .add<LoadSharedOpPattern, StoreSharedOpPattern, MemDescToPtrOpPattern>(
+          typeConverter, targetInfo, benefit);
   patterns.add<SIMTExecRegionPattern>(typeConverter, targetInfo, benefit);
 #endif
 }
