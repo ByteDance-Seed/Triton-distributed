@@ -23,15 +23,16 @@
 #
 ################################################################################
 import os
+import ctypes
 import triton
 import triton.language as tl
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
-from triton_dist.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, membar, laneid, ld_acquire,
-                                                            __shfl_sync_i32)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, membar, ld_acquire)
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid, barrier_all_intra_node_atomic_cas_block
-from triton_dist.kernels.nvidia.gemm_rs_threadblock_swizzle import warp_prefix_sum_kernel
 import torch
+from typing import Union
+from math import ceil
 import dataclasses
 import triton_dist
 from triton_dist.utils import nvshmem_create_tensor, nvshmem_free_tensor_sync, nvshmem_barrier_all_on_stream, launch_cooperative_grid_options
@@ -44,12 +45,10 @@ SIGNAL_DTYPE = torch.int64
 
 @triton.jit
 def transpose_kernel(ptr_x, ptr_y, M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
-    pid = tl.program_id(0)
-    num_pid = tl.num_programs(0)
     n_block_m = tl.cdiv(M, BLOCK_M)
     n_block_n = tl.cdiv(N, BLOCK_N)
 
-    for bid in range(pid, n_block_m * n_block_n, num_pid):
+    for bid in range(n_block_m * n_block_n):
         pid_m = bid // n_block_n
         pid_n = bid % n_block_n
         rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -67,243 +66,7 @@ def transpose_kernel(ptr_x, ptr_y, M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.cons
         tl.store(ptr_y + offs_y, val_t, mask=mask_y)
 
 
-@triton_dist.jit
-def scatter_tile_intra_node(
-    splits_buf,
-    offset_buf,
-    out_split,
-    out_source_offset,
-    rank_in_row: tl.constexpr,
-    local_world_size: tl.constexpr,
-    num_expert_per_rank: tl.constexpr,
-    elem_size: tl.constexpr,
-    from_node: tl.constexpr,
-    num_warps: tl.constexpr,
-):
-    WARP_SIZE: tl.constexpr = 32
-    thread_idx = tid(0)
-    warp_id = thread_idx // WARP_SIZE
-    rank = dl.rank()
-    world_size = dl.num_ranks()
-    local_rank = rank % local_world_size
-    node_id = rank // local_world_size
-    splits_per_node = local_world_size * num_expert_per_rank
-    from_rank = local_rank + from_node * local_world_size
-    if rank_in_row:
-        with dl.simt_exec_region() as (thread_idx, threads_per_block):
-            for idx in range(thread_idx, splits_per_node, threads_per_block):
-                split_val = ld(splits_buf + from_node * splits_per_node + idx)
-                offset_val = ld(offset_buf + from_node * splits_per_node + idx)
-                to_local_rank = idx // num_expert_per_rank
-                exp_id = idx % num_expert_per_rank
-                to_rank = to_local_rank + node_id * local_world_size
-                # send to `to_rank` and do transpose
-                write_pos = exp_id * world_size + from_rank
-                remote_out_splits = dl.symm_at(out_split, to_rank)
-                remote_out_offset = dl.symm_at(out_source_offset, to_rank)
-                st(remote_out_splits + write_pos, split_val)
-                st(remote_out_offset + write_pos, offset_val)
-    else:
-        # use putmem_warp to send data to `to_rank`
-        for to_local_rank in range(warp_id, local_world_size, num_warps):
-            to_rank = to_local_rank + node_id * local_world_size
-            libshmem_device.putmem_nbi_warp(
-                out_split + from_rank * num_expert_per_rank,
-                splits_buf + from_node * splits_per_node + to_local_rank * num_expert_per_rank,
-                num_expert_per_rank * elem_size, to_rank)
-            libshmem_device.putmem_nbi_warp(
-                out_source_offset + from_rank * num_expert_per_rank,
-                offset_buf + from_node * splits_per_node + to_local_rank * num_expert_per_rank,
-                num_expert_per_rank * elem_size, to_rank)
-
-
-@triton.jit
-def per_row_prefix_kernel(
-    split_ptr,
-    partial_sum_ptr,
-    res_ptr,
-    M,
-    N,
-    num_warps: tl.constexpr,
-):
-    WARP_SIZE: tl.constexpr = 32
-    thread_idx = tid(0)
-    lane_id = laneid()
-    warp_id = thread_idx // WARP_SIZE
-    prefix_target = tl.cast(0, split_ptr.dtype.element_ty)
-    num_tiles_per_row = tl.cdiv(N, WARP_SIZE)
-    total_tiles = M * num_tiles_per_row
-    iters = tl.cdiv(total_tiles, num_warps)
-
-    for i in range(iters):
-        warp_task_id = i * num_warps + warp_id
-        row_idx = warp_task_id // num_tiles_per_row
-        col_tile_idx = warp_task_id % num_tiles_per_row
-        tile_start_flat = row_idx * N + col_tile_idx * WARP_SIZE
-        valid_len = tl.minimum(WARP_SIZE, N - col_tile_idx * WARP_SIZE)
-        is_valid_tile = warp_task_id < total_tiles and valid_len > 0
-
-        if is_valid_tile:
-            val = ld(split_ptr + tile_start_flat + lane_id)
-            prefix_inclusive = warp_prefix_sum_kernel(val, lane_id, valid_len)
-            prefix_target = prefix_inclusive - val
-            if lane_id == valid_len - 1:
-                st(partial_sum_ptr + warp_task_id, prefix_inclusive)
-        __syncthreads()
-
-        num_tiles_this_iter = tl.minimum(num_warps, total_tiles - i * num_warps)
-        tile_prefix_row_wise = tl.cast(0, split_ptr.dtype.element_ty)
-        if warp_id == 0:
-            my_tile_sum = ld(partial_sum_ptr + i * num_warps + lane_id)
-            my_tile_row = (i * num_warps + lane_id) // num_tiles_per_row
-            for k in range(num_tiles_this_iter):
-                k_tile_row = (i * num_warps + k) // num_tiles_per_row
-                k_tile_sum = __shfl_sync_i32(0xFFFFFFFF, my_tile_sum, k)
-                if lane_id >= k and k_tile_row == my_tile_row:
-                    tile_prefix_row_wise += k_tile_sum
-            if i > 0 and (i * num_warps - 1) // num_tiles_per_row == my_tile_row:
-                tile_prefix_row_wise += ld(partial_sum_ptr + i * num_warps -
-                                           1)  # inter-block: add back the offset from last iter
-            st(partial_sum_ptr + i * num_warps + lane_id, tile_prefix_row_wise)
-        __syncthreads()
-
-        # add back the offset for each elem
-        if is_valid_tile and lane_id < valid_len:
-            if col_tile_idx > 0:
-                prefix_target += ld(partial_sum_ptr + warp_task_id - 1)
-            st(res_ptr + tile_start_flat + lane_id, prefix_target)
-
-
-@triton_dist.jit(do_not_specialize=[])
-def exchange_metadata_inter_node_kernel(
-    in_splits_offsets,
-    trans_in_splits_offsets,  # for transpose
-    recv_splits_offsets,
-    out_splits_offsets,
-    per_node_offsets,
-    node_barrier_signal,
-    intra_node_barrier_signal,
-    partial_sum_ptr,  # [num_tiles]
-    local_world_size: tl.constexpr,
-    num_expert_per_rank: tl.constexpr,
-    rank_in_row: tl.constexpr = True,
-    has_input_off: tl.constexpr = False,
-    extra_barrier: tl.constexpr = False,
-    num_warps: tl.constexpr = 32,
-):
-    rank = dl.rank()
-    local_rank = rank % local_world_size
-    world_size = dl.num_ranks()
-    nsplits = world_size * num_expert_per_rank
-    splits_per_node = local_world_size * num_expert_per_rank
-    nnodes = world_size // local_world_size
-    node_id = rank // local_world_size
-    thread_idx = tid(0)
-    elem_size = tl.constexpr(in_splits_offsets.dtype.element_ty.primitive_bitwidth) // 8
-
-    in_splits = in_splits_offsets
-    in_offsets = in_splits_offsets + nsplits
-    trans_in_splits = trans_in_splits_offsets
-    trans_in_offsets = trans_in_splits_offsets + nsplits
-    recv_splits = recv_splits_offsets
-    recv_offsets = recv_splits_offsets + nsplits
-    out_split = out_splits_offsets
-    out_source_offset = out_splits_offsets + nsplits
-
-    if not has_input_off:
-        single_block_prefix_sum_kernel_scan_scan(
-            in_splits,
-            partial_sum_ptr,
-            in_offsets,  # as the output
-            world_size if rank_in_row else num_expert_per_rank,
-            num_expert_per_rank if rank_in_row else world_size,
-            num_warps=num_warps,
-        )
-        __syncthreads()
-
-    if not rank_in_row:
-        transpose_kernel(
-            in_splits,
-            trans_in_splits,
-            num_expert_per_rank,
-            world_size,
-            BLOCK_M=16,
-            BLOCK_N=32,
-        )
-        transpose_kernel(
-            in_offsets,
-            trans_in_offsets,
-            num_expert_per_rank,
-            world_size,
-            BLOCK_M=16,
-            BLOCK_N=32,
-        )
-        __syncthreads()
-        rank_major_in_splits = trans_in_splits
-        rank_major_in_offsets = trans_in_offsets
-    else:
-        rank_major_in_splits = in_splits
-        rank_major_in_offsets = in_offsets
-
-    per_row_prefix_kernel(
-        rank_major_in_splits,
-        partial_sum_ptr,
-        per_node_offsets,  # as the output
-        nnodes,  # as the num of rows
-        splits_per_node,
-        num_warps=num_warps,
-    )
-    __syncthreads()
-    membar(scope="cta")
-
-    if extra_barrier:
-        libshmem_device.barrier_all_block()
-
-    for node_offset in range(1, nnodes):
-        target_node = (node_id + node_offset) % nnodes
-        target_rank = local_rank + target_node * local_world_size
-        libshmem_device.putmem_nbi_block(
-            recv_splits + node_id * splits_per_node,
-            rank_major_in_splits + target_node * splits_per_node,
-            splits_per_node * elem_size,
-            target_rank,
-        )
-        libshmem_device.fence()
-        libshmem_device.putmem_signal_nbi_block(
-            recv_offsets + node_id * splits_per_node,
-            per_node_offsets + target_node * splits_per_node,
-            splits_per_node * elem_size,
-            node_barrier_signal + node_id,
-            1,
-            libshmem_device.NVSHMEM_SIGNAL_SET,
-            target_rank,
-        )
-
-    for node_offset in range(0, nnodes):
-        from_node = (node_id - node_offset + nnodes) % nnodes
-        if node_offset > 0:
-            if thread_idx == 0:
-                libshmem_device.signal_wait_until(node_barrier_signal + from_node, libshmem_device.NVSHMEM_CMP_EQ, 1)
-            __syncthreads()
-        src_splits = rank_major_in_splits if node_offset == 0 else recv_splits
-        src_offsets = rank_major_in_offsets if node_offset == 0 else recv_offsets
-        scatter_tile_intra_node(
-            src_splits,
-            src_offsets,
-            out_split,
-            out_source_offset,
-            rank_in_row,
-            local_world_size,
-            num_expert_per_rank,
-            elem_size,
-            from_node,
-            num_warps,
-        )
-        __syncthreads()
-    barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, intra_node_barrier_signal)
-
-
-@triton_dist.jit(do_not_specialize=["num_expert_per_rank"])
+@triton_dist.jit(do_not_specialize=["num_expert_per_rank", "stage"])
 def all_to_all_v_2d_inter_node_kernel(
     profiler_buf,
     in_splits_offsets,  # (2, nsplits), symmetric
@@ -313,12 +76,15 @@ def all_to_all_v_2d_inter_node_kernel(
     per_node_offsets,  # (nsplits,), symmetric
     local_store_offset,  # (nsplits,), local
     partial_sum_ptr,  # (num_tiles,), local
+    send_recv_num_tokens,  # (2 * num_stages,), pinned memory
+    stage,
+    total_stages: tl.constexpr,
     signal_pad,  # (2 * nnodes + local_world_size,), symmetric
     grid_barrier_signal,  # (1,), symmetric / local
-    send_data,  # max_tokens_per_rank * token_len
+    input,  # max_tokens_per_rank * token_len
+    output,
     transfer_buffer,  # max_tokens_per_rank * token_len
-    recv_data,  # max_tokens_per_rank * token_len
-    K: tl.constexpr,  # max token num per split
+    max_num_token: tl.constexpr,  # receiver's view, max num of tokens may receive from all senders
     sig_pad_len: tl.constexpr,
     rank_in_row: tl.constexpr,
     token_len_elem: tl.constexpr,
@@ -329,6 +95,7 @@ def all_to_all_v_2d_inter_node_kernel(
     profiling: tl.constexpr = False,
     num_warps: tl.constexpr = 32,
     MAJOR_ALIGN: tl.constexpr = 1,
+    COPY_BLOCK_SIZE: tl.constexpr = 1,
 ):
     profiler = Profiler.create(
         profiler_buffer=profiler_buf,
@@ -339,10 +106,8 @@ def all_to_all_v_2d_inter_node_kernel(
     )
     thread_idx = tid(0)
     warp_id = thread_idx // 32
-    lane_id = laneid()
     pid = tl.program_id(0)
     num_pid = tl.num_programs(0)
-    global_warp_id = warp_id + pid * num_warps
     rank = dl.rank()
     world_size = dl.num_ranks()
     node_id = rank // local_world_size
@@ -350,130 +115,200 @@ def all_to_all_v_2d_inter_node_kernel(
     nnodes = world_size // local_world_size
     nsplits = world_size * num_expert_per_rank
     splits_per_node = num_expert_per_rank * local_world_size
-    max_tokens_per_node = splits_per_node * K
-    elem_size = tl.constexpr(send_data.dtype.element_ty.primitive_bitwidth) // 8
+    data_elem_size = tl.constexpr(input.dtype.element_ty.primitive_bitwidth) // 8
+    splits_elem_size = tl.constexpr(in_splits_offsets.dtype.element_ty.primitive_bitwidth) // 8
+    token_len_bytes_i64 = tl.cast(token_len_elem * data_elem_size, tl.int64)
+    token_len_elem_i64 = tl.cast(token_len_elem, tl.int64)
 
+    in_splits = in_splits_offsets
+    in_offsets = in_splits_offsets + nsplits  # local output offset
     out_splits = out_splits_offsets
     out_source_offset = out_splits_offsets + nsplits
-    node_exchange_signal = signal_pad
-    node_transfer_signal = signal_pad + nnodes
-    intra_exchange_barrier_signal = signal_pad + 2 * nnodes  # (local_world_size,)
+    trans_in_splits = trans_in_splits_offsets
+    per_node_offsets = trans_in_splits_offsets + nsplits
+    recv_splits = recv_splits_offsets  # received out_splits
+    recv_offsets = recv_splits_offsets + nsplits  # per-node offsets
+    exchange_meta_signal = signal_pad
+    per_node_data_signal = signal_pad + 1
+    intra_barrier_signal = signal_pad + 1 + nnodes
+    rank_major_in_splits = in_splits
 
-    profiler = profiler.record(is_start=True, task_type=0)  # exchange data
+    profiler = profiler.record(is_start=True, task_type=0)  # build meta
     if pid == 0:
         offs = tl.arange(0, sig_pad_len)
         tl.store(signal_pad + offs, 0)
+        last_stage = (stage + total_stages - 1) % total_stages
+        tl.store(send_recv_num_tokens + last_stage * 2 + tl.arange(0, 2), -1)
         libshmem_device.barrier_all_block()
-        exchange_metadata_inter_node_kernel(
-            in_splits_offsets,
-            trans_in_splits_offsets,
-            recv_splits_offsets,
-            out_splits_offsets,
-            per_node_offsets,
-            node_exchange_signal,
-            intra_exchange_barrier_signal,
-            partial_sum_ptr,
-            local_world_size,
-            num_expert_per_rank,
-            rank_in_row=rank_in_row,
-            has_input_off=has_input_off,
-            extra_barrier=False,
-            num_warps=num_warps,
-        )  # there is a intra-node barrier after exchange
-        single_block_prefix_sum_kernel_scan_scan(
-            out_splits,
-            partial_sum_ptr,
-            local_store_offset,  # as the output
-            num_expert_per_rank if rank_in_row else world_size,  # row and col are reversed
-            world_size if rank_in_row else num_expert_per_rank,
-            num_warps=num_warps,
-            MAJOR_ALIGN=MAJOR_ALIGN,
-        )
-    profiler = profiler.record(is_start=False, task_type=0)  # exchange data
+        if not rank_in_row:
+            transpose_kernel(
+                in_splits,
+                trans_in_splits,
+                num_expert_per_rank,
+                world_size,
+                BLOCK_M=16,
+                BLOCK_N=32,
+            )
+            rank_major_in_splits = trans_in_splits
+        __syncthreads()
+        for nid in range(nnodes):
+            single_block_prefix_sum_kernel_scan_scan(
+                rank_major_in_splits + nid * splits_per_node,
+                partial_sum_ptr,
+                per_node_offsets + nid * splits_per_node,  # as the output
+                local_world_size,
+                num_expert_per_rank,
+                num_warps=num_warps,
+            )
+            __syncthreads()
+        __syncthreads()
+        if not has_input_off:
+            single_block_prefix_sum_kernel_scan_scan(
+                in_splits,
+                partial_sum_ptr,
+                in_offsets,  # as the output
+                world_size if rank_in_row else num_expert_per_rank,
+                num_expert_per_rank if rank_in_row else world_size,
+                num_warps=num_warps,
+            )
+            __syncthreads()
+    profiler = profiler.record(is_start=False, task_type=0)  # build meta
 
     profiler = profiler.record(is_start=True, task_type=1)  # grid_barrier
     barrier_on_this_grid(grid_barrier_signal, launch_cooperative_grid)
     membar(scope="gl")
     profiler = profiler.record(is_start=False, task_type=1)  # grid_barrier
 
-    if rank_in_row:
-        rank_major_in_splits = in_splits_offsets
-        rank_major_in_offsets = in_splits_offsets + nsplits
-    else:
-        rank_major_in_splits = trans_in_splits_offsets
-        rank_major_in_offsets = trans_in_splits_offsets + nsplits
-
-    profiler = profiler.record(is_start=True, task_type=2)  # inter-node nbi push
-    for node_offset in range(1, nnodes):
-        target_node = (node_id + node_offset) % nnodes
-        target_rank = local_rank + target_node * local_world_size  # transfer at this rank
-        for warp_task_id in range(global_warp_id, splits_per_node, num_warps * num_pid):
-            tgt_local_rank = warp_task_id // num_expert_per_rank
-            tgt_global_rank = tgt_local_rank + target_node * local_world_size  # the final rank to send to
-            eid = warp_task_id % num_expert_per_rank
-            read_off = ld(rank_major_in_offsets + tgt_global_rank * num_expert_per_rank + eid)
-            splits = ld(rank_major_in_splits + tgt_global_rank * num_expert_per_rank + eid)
-            write_off = ld(per_node_offsets + tgt_global_rank * num_expert_per_rank + eid)
-            libshmem_device.putmem_nbi_warp(
-                transfer_buffer + (node_id * max_tokens_per_node + write_off) * token_len_elem,
-                send_data + read_off * token_len_elem,
-                splits * token_len_elem * elem_size,
-                target_rank,
-            )
-
-        membar(scope="gl")
-        __syncthreads()
-        libshmem_device.fence()
-
-        if thread_idx == 0:
-            libshmem_device.signal_op(
-                node_transfer_signal + node_id,
+    profiler = profiler.record(is_start=True, task_type=2)  # exchange
+    if pid == 0:
+        for tgt_rank in range(warp_id, world_size, num_warps):
+            libshmem_device.putmem_signal_nbi_warp(
+                recv_splits + rank * num_expert_per_rank,
+                rank_major_in_splits + tgt_rank * num_expert_per_rank,
+                num_expert_per_rank * splits_elem_size,
+                exchange_meta_signal,
                 1,
                 libshmem_device.NVSHMEM_SIGNAL_ADD,
-                target_rank,
+                tgt_rank,
             )
-    profiler = profiler.record(is_start=False, task_type=2)  # inter-node nbi push
+            libshmem_device.putmem_signal_nbi_warp(
+                recv_offsets + rank * num_expert_per_rank,
+                per_node_offsets + tgt_rank * num_expert_per_rank,
+                num_expert_per_rank * splits_elem_size,
+                exchange_meta_signal,
+                1,
+                libshmem_device.NVSHMEM_SIGNAL_ADD,
+                tgt_rank,
+            )
+    else:
+        for tgt_node_offset in range(nnodes):
+            tgt_node = (node_id + tgt_node_offset) % nnodes
+            tgt_relay = local_rank + tgt_node * local_world_size
+            for idx in range(pid - 1, splits_per_node, num_pid - 1):
+                tgt_local_rank = idx // num_expert_per_rank
+                eid = idx % num_expert_per_rank
+                tgt_rank = tgt_local_rank + tgt_node * local_world_size
+                split_id = tgt_rank * num_expert_per_rank + eid if rank_in_row else eid * world_size + tgt_rank
+                split_val = ld(in_splits + split_id)
+                offset_val = ld(in_offsets + split_id)
+                per_node_off_val = ld(per_node_offsets + tgt_rank * num_expert_per_rank + eid)
+                libshmem_device.putmem_nbi_block(
+                    transfer_buffer +
+                    tl.cast(node_id * max_num_token + per_node_off_val, tl.int64) * token_len_elem_i64,
+                    input + tl.cast(offset_val, tl.int64) * token_len_elem_i64,
+                    tl.cast(split_val, tl.int64) * token_len_bytes_i64,
+                    tgt_relay,
+                )
+            membar(scope="gl")
+            __syncthreads()
+            libshmem_device.fence()
+            if thread_idx == 0:
+                libshmem_device.signal_op(
+                    per_node_data_signal + node_id,
+                    1,
+                    libshmem_device.NVSHMEM_SIGNAL_ADD,
+                    tgt_relay,
+                )
+    profiler = profiler.record(is_start=False, task_type=2)  # exchange
 
-    profiler = profiler.record(is_start=True, task_type=3)  # intra-node pull
-    for warp_task_id in range(global_warp_id, splits_per_node * nnodes, num_warps * num_pid):
-        node_offset = warp_task_id // splits_per_node
-        idx_in_node = warp_task_id % splits_per_node
-        src_send_node = (node_id - node_offset + nnodes) % nnodes
-
-        tgt_local_rank = (idx_in_node // num_expert_per_rank + local_rank) % local_world_size
-        tgt_global_rank = tgt_local_rank + src_send_node * local_world_size
-        tgt_transfer_rank = tgt_local_rank + node_id * local_world_size
-        eid = idx_in_node % num_expert_per_rank
-
-        if src_send_node != node_id:
-            remote_signal = dl.symm_at(node_transfer_signal, tgt_transfer_rank)
-            if lane_id == 0:
-                while ld_acquire(remote_signal + src_send_node, "sys") != num_pid:
-                    pass
-            __shfl_sync_i32(0xFFFFFFFF, tl.cast(0, tl.int32), lane_id)
-
-        idx = eid * world_size + tgt_global_rank if rank_in_row else tgt_global_rank * num_expert_per_rank + eid
-        st_off = ld(local_store_offset + idx)
-        num_token = ld(out_splits + idx)
-        source_off = ld(out_source_offset + idx)
-
-        if node_offset > 0:
-            pull_buffer = transfer_buffer
-            rd_off = src_send_node * max_tokens_per_node + source_off
+    profiler = profiler.record(is_start=True, task_type=3)  # wait metadata + compute offsets
+    if pid == 0:
+        while ld_acquire(exchange_meta_signal, "sys") != 2 * world_size:
+            pass
+        if rank_in_row:
+            transpose_kernel(
+                recv_splits,
+                out_splits,
+                world_size,
+                num_expert_per_rank,
+                BLOCK_M=16,
+                BLOCK_N=32,
+            )
         else:
-            pull_buffer = send_data
-            rd_off = source_off
-
-        libshmem_device.getmem_nbi_warp(
-            recv_data + st_off * token_len_elem,
-            pull_buffer + rd_off * token_len_elem,
-            num_token * token_len_elem * elem_size,
-            tgt_transfer_rank,
+            with dl.simt_exec_region() as (simt_tid, threads_per_block):
+                for idx in range(simt_tid, nsplits, threads_per_block):
+                    out_splits_val = ld(recv_splits + idx)
+                    st(out_splits + idx, out_splits_val)
+        __syncthreads()
+        single_block_prefix_sum_kernel_scan_scan(
+            out_splits,
+            partial_sum_ptr,
+            out_source_offset,  # as the output
+            num_expert_per_rank if rank_in_row else world_size,  # row and col are reversed
+            world_size if rank_in_row else num_expert_per_rank,
+            num_warps=num_warps,
+            MAJOR_ALIGN=MAJOR_ALIGN,
         )
-        st(out_source_offset + idx, st_off)  # write back
+        __syncthreads()
+        if thread_idx == 0:
+            num_send_tokens = ld(in_offsets + nsplits - 1, scope='gpu', semantic='acquire') + ld(
+                in_splits + nsplits - 1, scope='gpu', semantic='acquire')
+            num_send_tokens = tl.cast(num_send_tokens, tl.int32)
+            num_recv_tokens = ld(out_source_offset + nsplits - 1, scope='gpu', semantic='acquire') + ld(
+                out_splits + nsplits - 1, scope='gpu', semantic='acquire')
+            num_recv_tokens = tl.cast(num_recv_tokens, tl.int32)
+            st(send_recv_num_tokens + stage * 2, num_send_tokens, scope='gpu', semantic='release')
+            st(send_recv_num_tokens + stage * 2 + 1, num_recv_tokens, scope='gpu', semantic='release')
+        barrier_all_intra_node_atomic_cas_block(local_rank, rank, local_world_size, intra_barrier_signal)
+    barrier_on_this_grid(grid_barrier_signal, launch_cooperative_grid)
+    membar(scope="sys")
+    profiler = profiler.record(is_start=False, task_type=3)  # wait metadata + compute offsets
 
-    __syncthreads()
-    profiler = profiler.record(is_start=False, task_type=3)
+    profiler = profiler.record(is_start=True, task_type=4)  # pull local data
+    num_push_pids = num_pid - 1
+    for src_node_offset in range(nnodes):
+        src_node = (node_id + src_node_offset) % nnodes
+        for idx in range(pid, splits_per_node, num_pid):
+            tgt_local_rank = idx // num_expert_per_rank
+            eid = idx % num_expert_per_rank
+            tgt_rank = tgt_local_rank + src_node * local_world_size
+            tgt_transfer_rank = tgt_local_rank + node_id * local_world_size
+            split_id = eid * world_size + tgt_rank if rank_in_row else tgt_rank * num_expert_per_rank + eid
+
+            if src_node != node_id:
+                remote_signal = dl.symm_at(per_node_data_signal, tgt_transfer_rank)
+                if thread_idx == 0:
+                    while ld_acquire(remote_signal + src_node, "sys") < num_push_pids:
+                        pass
+                __syncthreads()
+
+            store_offset_val = ld(out_source_offset + split_id)
+            split_val = ld(out_splits + split_id)
+            per_node_off_val = ld(recv_offsets + tgt_rank * num_expert_per_rank + eid)
+
+            libshmem_device.getmem_block(
+                output + tl.cast(store_offset_val, tl.int64) * token_len_elem_i64,
+                transfer_buffer + tl.cast(src_node * max_num_token + per_node_off_val, tl.int64) * token_len_elem_i64,
+                tl.cast(split_val, tl.int64) * token_len_bytes_i64,
+                tgt_transfer_rank,
+            )
+    profiler = profiler.record(is_start=False, task_type=4)  # pull local data
+
+    profiler = profiler.record(is_start=True, task_type=5)  # barrier
+    barrier_on_this_grid(grid_barrier_signal, launch_cooperative_grid)
+    if pid == 0:
+        libshmem_device.barrier_all_block()
+    profiler = profiler.record(is_start=False, task_type=5)  # barrier
 
 
 @dataclasses.dataclass
@@ -482,6 +317,8 @@ class AllToAllContext:
     world_size: int
     ne: int
     k: int
+    max_tokens_per_rank: int  # sender's view, max num of tokens per rank
+    max_recv_tokens_per_rank: int  # receiver's view, max num of tokens may receive from all senders
     token_len_elem: int
     local_world_size: int
     signal_pad_len: int
@@ -493,6 +330,7 @@ class AllToAllContext:
 
     # local buffers
     partial_sum_buf: torch.Tensor  # may differ between cases
+    num_send_recv_tokens: torch.Tensor  # pinned memory
 
     # others
     need_profile: bool
@@ -531,23 +369,29 @@ class AllToAllContext:
         self.per_node_offsets = self.split_meta_buf[8 * self.nsplits:9 * self.nsplits]
         self.local_store_offset = torch.empty((self.nsplits, ), dtype=SPLIT_DTYPE, device="cuda")
 
-        # signals
-        self.node_exchang_signal = self.signal_buf[0:self.nnodes]
-        self.node_push_signal = self.signal_buf[self.nnodes:2 * self.nnodes]
-        self.intra_exchange_barrier_signal = self.signal_buf[2 * self.nnodes:2 * self.nnodes + self.local_world_size]
-        self.intra_push_barrier_signal = self.signal_buf[2 * self.nnodes + self.local_world_size:2 * self.nnodes +
-                                                         2 * self.local_world_size]
+        # signal layout (managed by kernel via signal_pad offsets):
+        #   [0]                  : exchange_meta_signal (1 element)
+        #   [1 .. nnodes]        : per_node_data_signal (nnodes elements)
+        #   [1+nnodes .. ]       : intra_barrier_signal (local_world_size elements)
         self.grid_barrier = torch.zeros((1, ), dtype=SIGNAL_DTYPE, device="cuda")
 
         # data buffers
-        self.max_tokens_per_rank = self.k * self.nsplits
-        self.max_token_elem = self.max_tokens_per_rank * self.token_len_elem  # for send/ transfer/ recv, the max num of tokens are the same
-        assert self.data_meta_buf.numel() >= 3 * self.max_token_elem, "data_meta_buf must be large enough"
-        self.send_data = self.data_meta_buf[0:self.max_token_elem]
-        self.transfer_buffer = self.data_meta_buf[self.max_token_elem:2 * self.max_token_elem]
-        self.recv_data = self.data_meta_buf[2 * self.max_token_elem:3 * self.max_token_elem]
+        self.max_recv_elem_per_rank = self.max_recv_tokens_per_rank * self.token_len_elem
+        assert self.data_meta_buf.numel() >= (self.nnodes +
+                                              1) * self.max_recv_elem_per_rank, "data_meta_buf must be large enough"
+        self.send_data = self.data_meta_buf[self.nnodes * self.max_recv_elem_per_rank:]
+        self.transfer_buffer = self.data_meta_buf
+
         if not hasattr(self, 'profile_buf'):
             self.profile_buf = alloc_profiler_buffer(max_num_profile_slots=1000000)
+
+        self.total_stages = self.num_send_recv_tokens.numel() // 2
+        self.current_stage = 0
+
+    def get_stage(self) -> int:
+        ret = self.current_stage
+        self.current_stage = (self.current_stage + 1) % self.total_stages
+        return ret
 
     def dump_profiler_trace(self, info: str = None):
         profiler_dir = "./prof"
@@ -559,10 +403,12 @@ class AllToAllContext:
         export_to_perfetto_trace(
             profiler_buffer=self.profile_buf,
             task_names=[
-                "meta_exchange",
-                "grid_barrier",
-                "intermediate push",
-                "pull local data",
+                "build_meta",  # task_type=0
+                "grid_barrier",  # task_type=1
+                "exchange (meta+data)",  # task_type=2
+                "wait metadata + compute offsets",  # task_type=3
+                "pull local data (per-node)",  # task_type=4
+                "barrier",  # task_type=5
             ],
             file_name=trace_file,
         )
@@ -577,7 +423,14 @@ def create_context(
     token_dtype: torch.dtype,
     local_world_size: int = 8,
     need_profile: bool = True,
+    overflow_factor: Union[int, float] = None,
+    max_token_num_per_rank: int = None,
 ) -> AllToAllContext:
+    """
+    max_token_num_per_rank: view of senders' max num of tokens per rank
+    max_recv_tokens_per_rank: view of receivers' max num of tokens may receive from all senders, 
+            if overflow_factor is not None, it is the max num of tokens may receive from all senders
+    """
 
     nsplits = world_size * ne
     nnodes = world_size // local_world_size
@@ -586,9 +439,21 @@ def create_context(
     signal_buf = nvshmem_create_tensor((signal_len, ), dtype=SIGNAL_DTYPE)
     signal_buf.zero_()
 
-    max_tokens_per_rank = k * nsplits
-    max_token_elem = max_tokens_per_rank * token_len_elem
-    data_meta_buf = nvshmem_create_tensor((3 * max_token_elem, ), dtype=token_dtype)
+    # overflow worst case: one rank receives all data from all senders
+    overflow_factor = world_size if overflow_factor is None else max(1, overflow_factor)
+    if max_token_num_per_rank is None:
+        assert k >= 1, "k must be no less than 1 if max_token_num_per_rank is not provided"
+        max_tokens_per_rank = k * nsplits
+    else:
+        assert max_token_num_per_rank > 0, "max_token_num_per_rank must be greater than 0"
+        max_tokens_per_rank = max_token_num_per_rank
+    max_recv_tokens_per_rank = ceil(max_tokens_per_rank * overflow_factor)
+    max_recv_elem_per_rank = max_recv_tokens_per_rank * token_len_elem
+    data_elem = (nnodes + 1) * max_recv_elem_per_rank  # send(1) + recv(1) + transfer(nnodes)
+    data_meta_buf = nvshmem_create_tensor((data_elem, ), dtype=token_dtype)
+
+    num_send_recv_tokens = torch.empty((8, ), dtype=torch.int32, device="cpu", pin_memory=True)
+    num_send_recv_tokens.fill_(-1)
 
     WARP_TILE_SIZE = 32
     if ne > world_size:
@@ -605,6 +470,8 @@ def create_context(
         world_size=world_size,
         ne=ne,
         k=k,
+        max_recv_tokens_per_rank=max_recv_tokens_per_rank,
+        max_tokens_per_rank=max_tokens_per_rank,
         token_len_elem=token_len_elem,
         token_dtype=token_dtype,
         local_world_size=local_world_size,
@@ -614,6 +481,7 @@ def create_context(
         signal_buf=signal_buf,
         signal_pad_len=signal_len,
         partial_sum_buf=partial_sum_buf,
+        num_send_recv_tokens=num_send_recv_tokens,
     )
 
 
@@ -621,8 +489,20 @@ def create_context(
 def all_to_all_v_offset_op(ctx: AllToAllContext, rank_in_row: bool, input: torch.Tensor = None,
                            output: torch.Tensor = None, in_splits: torch.Tensor = None, in_offset: torch.Tensor = None,
                            copy_to_symm_buffer: bool = True,  # False: data already in comm buffer
-                           return_tensor: bool = True, major_align: int = 1, grid_size: int = None,
+                           return_stat: bool = True, major_align: int = 1, grid_size: int = None,
                            has_input_offset: bool = False, profiling: bool = False):
+    assert in_splits.dtype == ctx.split_meta_buf.dtype
+    assert in_splits.numel() == ctx.nsplits
+    assert input is not None and input.dtype == ctx.token_dtype
+    assert input.is_contiguous()
+    if input.dim() > 1:
+        assert input.size(1) == ctx.token_len_elem
+    if output is not None:
+        assert output.dtype == ctx.token_dtype
+        assert output.is_contiguous()
+    if copy_to_symm_buffer:
+        assert output is not None
+
     if copy_to_symm_buffer:
         assert in_splits is not None
         assert in_splits.dim() == 2
@@ -647,6 +527,9 @@ def all_to_all_v_offset_op(ctx: AllToAllContext, rank_in_row: bool, input: torch
     # nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     num_sms = min(ctx.ne, ctx.nsplits // 32)  # max num_warps=32 per block
     grid = (num_sms, ) if grid_size is None else (grid_size, )
+    copy_block_size = (1024 * 32) // input.element_size()
+    copy_block_size = 1 << (copy_block_size.bit_length() - 1)
+    current_stage = ctx.get_stage()
     all_to_all_v_2d_inter_node_kernel[grid](
         profiler_buf=ctx.profile_buf,
         in_splits_offsets=ctx.in_splits_offsets,
@@ -656,12 +539,15 @@ def all_to_all_v_offset_op(ctx: AllToAllContext, rank_in_row: bool, input: torch
         per_node_offsets=ctx.per_node_offsets,
         local_store_offset=ctx.local_store_offset,
         partial_sum_ptr=ctx.partial_sum_buf,
+        send_recv_num_tokens=ctx.num_send_recv_tokens,
+        stage=current_stage,
+        total_stages=ctx.total_stages,
         signal_pad=ctx.signal_buf,
         grid_barrier_signal=ctx.grid_barrier,
-        send_data=ctx.send_data,
+        input=ctx.send_data,
         transfer_buffer=ctx.transfer_buffer,
-        recv_data=ctx.recv_data,
-        K=ctx.k,
+        output=output,
+        max_num_token=ctx.max_recv_tokens_per_rank,
         sig_pad_len=ctx.signal_pad_len,
         rank_in_row=rank_in_row,
         token_len_elem=ctx.token_len_elem,
@@ -672,28 +558,23 @@ def all_to_all_v_offset_op(ctx: AllToAllContext, rank_in_row: bool, input: torch
         profiling=profiling,
         num_warps=32,
         MAJOR_ALIGN=major_align,
+        COPY_BLOCK_SIZE=copy_block_size,
     )
 
-    if return_tensor:
-        torch.cuda.current_stream().synchronize()
-        last_split_size = ctx.out_splits_offsets[ctx.nsplits - 1]
-        num_token_aligned = ctx.local_store_offset[-1] + last_split_size
-        num_elem = num_token_aligned * ctx.token_len_elem
-        if copy_to_symm_buffer:
-            assert output is not None
-            assert output.dtype == ctx.token_dtype
-            if not output.is_contiguous():
-                raise Warning("output tensor is not contiguous")
-            output_flat = output.contiguous().view(-1)
-            output_flat[:num_elem].copy_(ctx.recv_data.view(-1)[:num_elem])
-        ret = output if copy_to_symm_buffer else ctx.recv_data[:num_elem].view(-1, ctx.token_len_elem)
-        return ret, num_token_aligned
-    else:
-        return None, None
+    base_ptr = ctx.num_send_recv_tokens[current_stage * 2].data_ptr()
+    elem_bytes = ctx.num_send_recv_tokens.itemsize
+    while ctypes.c_int32.from_address(base_ptr).value == -1:  # num recv token
+        pass
+    while ctypes.c_int32.from_address(base_ptr + elem_bytes).value == -1:  # num recv token
+        pass
+    send_token_num = ctypes.c_int32.from_address(base_ptr).value
+    recv_token_num = ctypes.c_int32.from_address(base_ptr + elem_bytes).value
+    print(f"[DEBUG] Rank {ctx.rank} dynamic get send token num: {send_token_num}, recv token num: {recv_token_num}")
+    return output, send_token_num, recv_token_num
 
 
 def all_to_all_vdev_2d(ctx: AllToAllContext, input: torch.Tensor = None, output: torch.Tensor = None,
-                       in_splits: torch.Tensor = None, return_tensor: bool = True, copy_to_symm_buffer: bool = True,
+                       in_splits: torch.Tensor = None, return_stat: bool = True, copy_to_symm_buffer: bool = True,
                        major_align: int = 1, grid_size: int = None, profiling: bool = False):
     return all_to_all_v_offset_op(
         ctx=ctx,
@@ -707,14 +588,13 @@ def all_to_all_vdev_2d(ctx: AllToAllContext, input: torch.Tensor = None, output:
         grid_size=grid_size,
         has_input_offset=False,
         profiling=profiling,
-        return_tensor=return_tensor,
+        return_stat=return_stat,
     )
 
 
 def all_to_all_vdev_2d_offset(ctx: AllToAllContext, input: torch.Tensor = None, output: torch.Tensor = None,
-                              in_splits: torch.Tensor = None, in_offset: torch.Tensor = None,
-                              return_tensor: bool = True, copy_to_symm_buffer: bool = True, grid_size: int = None,
-                              profiling: bool = False):
+                              in_splits: torch.Tensor = None, in_offset: torch.Tensor = None, return_stat: bool = True,
+                              copy_to_symm_buffer: bool = True, grid_size: int = None, profiling: bool = False):
     return all_to_all_v_offset_op(
         ctx=ctx,
         rank_in_row=False,
@@ -727,5 +607,5 @@ def all_to_all_vdev_2d_offset(ctx: AllToAllContext, input: torch.Tensor = None, 
         grid_size=grid_size,
         has_input_offset=True,  # input offsets must be provided
         profiling=profiling,
-        return_tensor=return_tensor,
+        return_stat=return_stat,
     )

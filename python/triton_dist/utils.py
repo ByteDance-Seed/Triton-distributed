@@ -57,19 +57,15 @@ def is_cuda():
 
 
 if is_cuda():
-    # Use cuda.core.experimental.Device; requires cuda-python (e.g. 12.4). If you see
-    # cudaErrorInsufficientDriver, ensure cuda-bindings (e.g. 13.x) is not installed,
-    # as it overrides the CUDA runtime and can require a newer driver.
-    from cuda.core.experimental import Device
+    try:
+        from cuda.core import Device
+    except ImportError:
+        from cuda.core.experimental import Device
 
     try:
-        from cuda import cuda as _cuda, cudart as _cudart
-        cuda = _cuda
-        cudart = _cudart
-    except Exception:
-        from cuda.bindings import driver, runtime
-        cuda = driver
-        cudart = runtime
+        from cuda.bindings import driver as cuda, runtime as cudart
+    except ImportError:
+        from cuda import cuda, cudart
 
 
 def is_hip():
@@ -354,7 +350,6 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
         backend="cpu:gloo,cuda:nccl",
         world_size=WORLD_SIZE,
         rank=RANK,
-        device_id=torch.device(LOCAL_RANK),
         timeout=datetime.timedelta(seconds=1800),
     )
     assert torch.distributed.is_initialized()
@@ -848,8 +843,8 @@ def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps
 
     compiled = triton_func.run(*func_args, grid=(1, ), warmup=True, **func_kwargs)
     compiled._init_handles()
-    ret = cudart.cudaOccupancyMaxActiveBlocksPerMultiprocessor(compiled.function, num_warps * 32,
-                                                               compiled.metadata.shared)
+    cu_func = cuda.CUfunction(compiled.function)
+    ret = cuda.cuOccupancyMaxActiveBlocksPerMultiprocessor(cu_func, num_warps * 32, compiled.metadata.shared)
     CUDA_CHECK(ret[0])
     return ret[1]
 

@@ -1253,11 +1253,17 @@ _cuda_major = _get_cuda_major_version() if _is_cuda_platform() else 12
 _cu_suffix = f"cu{_cuda_major}"
 
 DEPS_NVIDIA = [
-    "cuda.core==0.2.0",
+    # Exact pins for deterministic CI installs (the internal mirror otherwise resolves
+    # ">=" floors to the newest upload, which caused recurring breakage).
+    # All pinned versions MUST exist for BOTH cu12 (H800/L20) and cu13 (Blackwell,
+    # aarch64); cu13 has no nvidia-nvshmem 3.3.9, so 3.6.5 (present on both) is used.
+    # nvshmem4py 0.3.0 is required by the team_split TeamConfig API (test_team_split);
+    # 0.1.x lacks TeamConfig and 0.2.x has a broken team_translate_pe binding.
+    "cuda.core==1.0.1",
     f"cuda-python>={_cuda_major}.0",
-    f"nvidia-nvshmem-{_cu_suffix}>=3.3.9",
+    f"nvidia-nvshmem-{_cu_suffix}==3.6.5",
     "Cython>=0.29.24",
-    f"nvshmem4py-{_cu_suffix}==0.1.2",
+    f"nvshmem4py-{_cu_suffix}==0.3.0",
 ] if _is_cuda_platform() else []
 DEPS_HIP = ["hip-python"] if _is_hip_platform() else []
 DEPS = DEPS_NVIDIA + DEPS_HIP

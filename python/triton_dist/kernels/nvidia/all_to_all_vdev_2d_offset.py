@@ -31,7 +31,7 @@ import triton.language as tl
 import triton_dist.language as dl
 from typing import Union
 from triton_dist.language.extra import libshmem_device
-from triton_dist.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, laneid, __shfl_sync_i32)
+from triton_dist.language.extra.cuda.language_extra import (__syncthreads, ld, st, tid, laneid, __shfl_sync_i32, membar)
 from triton_dist.kernels.nvidia.common_ops import barrier_on_this_grid, barrier_all_intra_node_atomic_cas_block
 from triton_dist.kernels.nvidia.gemm_rs_threadblock_swizzle import warp_prefix_sum_kernel
 import torch
@@ -66,7 +66,8 @@ def single_block_prefix_sum_kernel_scan_scan(
             tile_start = warp_task_id * WARP_SIZE
             valid_len = tl.minimum(WARP_SIZE, nsplits - tile_start)
             if valid_len > 0:
-                val = ld(split_ptr + tile_start + lane_id)
+                val = ld(split_ptr + tile_start +
+                         lane_id) if lane_id < valid_len else tl.cast(0, split_ptr.dtype.element_ty)
                 prefix_inclusive = warp_prefix_sum_kernel(val, lane_id, valid_len)
                 prefix_target = prefix_inclusive - val if exclusive else prefix_inclusive
                 if lane_id == valid_len - 1:
@@ -76,11 +77,13 @@ def single_block_prefix_sum_kernel_scan_scan(
             # using the first warp to do inclusive prefix sum for partial sum
             num_tiles_this_iter = tl.minimum(num_warps, total_tiles - i * num_warps)
             if warp_id == 0:
-                val = ld(partial_sum_ptr + i * num_warps + lane_id)
+                val = ld(partial_sum_ptr + i * num_warps +
+                         lane_id) if lane_id < num_tiles_this_iter else tl.cast(0, split_ptr.dtype.element_ty)
                 prefix_inclusive = warp_prefix_sum_kernel(val, lane_id, num_tiles_this_iter)
                 if i > 0:
-                    prefix_inclusive += ld(partial_sum_ptr + i * num_warps - 1)  # add back the offset from last iter
-                st(partial_sum_ptr + i * num_warps + lane_id, prefix_inclusive)  # TODO: caution: illegal mem access
+                    prefix_inclusive += ld(partial_sum_ptr + i * num_warps - 1)
+                if lane_id < num_tiles_this_iter:
+                    st(partial_sum_ptr + i * num_warps + lane_id, prefix_inclusive)
             __syncthreads()
 
             # add back the offset for each elem
@@ -103,7 +106,8 @@ def single_block_prefix_sum_kernel_scan_scan(
             is_valid_tile = warp_task_id < total_tiles and valid_len > 0
 
             if is_valid_tile:
-                val = ld(split_ptr + tile_start_flat + lane_id)
+                val = ld(split_ptr + tile_start_flat +
+                         lane_id) if lane_id < valid_len else tl.cast(0, split_ptr.dtype.element_ty)
                 prefix_inclusive = warp_prefix_sum_kernel(val, lane_id, valid_len)
                 prefix_target = prefix_inclusive - val if exclusive else prefix_inclusive
                 if lane_id == valid_len - 1:
@@ -112,23 +116,23 @@ def single_block_prefix_sum_kernel_scan_scan(
 
             num_tiles_this_iter = tl.minimum(num_warps, total_tiles - i * num_warps)
             if warp_id == 0:
-                val = ld(partial_sum_ptr + i * num_warps + lane_id)
-                prefix_inclusive = warp_prefix_sum_kernel(
-                    val, lane_id, num_tiles_this_iter)  # inter-warp: add offset from previous warps
+                val = ld(partial_sum_ptr + i * num_warps +
+                         lane_id) if lane_id < num_tiles_this_iter else tl.cast(0, split_ptr.dtype.element_ty)
+                prefix_inclusive = warp_prefix_sum_kernel(val, lane_id, num_tiles_this_iter)
                 if i > 0:
-                    prefix_inclusive += ld(partial_sum_ptr + i * num_warps -
-                                           1)  # inter-block: add back the offset from last iter
+                    prefix_inclusive += ld(partial_sum_ptr + i * num_warps - 1)
 
                 for k in range(num_tiles_this_iter):
                     g_tile_id = i * num_warps + k
-                    if (g_tile_id + 1) % num_tiles_per_row == 0:  #
+                    if (g_tile_id + 1) % num_tiles_per_row == 0:
                         row_end_sum = __shfl_sync_i32(0xFFFFFFFF, prefix_inclusive, k)
                         aligned_val = (row_end_sum + MAJOR_ALIGN - 1) // MAJOR_ALIGN * MAJOR_ALIGN
                         aligned_val = tl.maximum(aligned_val, MAJOR_ALIGN)
                         delta = aligned_val - row_end_sum
                         if lane_id >= k:
                             prefix_inclusive += delta
-                st(partial_sum_ptr + i * num_warps + lane_id, prefix_inclusive)  # TODO: caution: illegal mem access
+                if lane_id < num_tiles_this_iter:
+                    st(partial_sum_ptr + i * num_warps + lane_id, prefix_inclusive)
             __syncthreads()
 
             # add back the offset for each elem
@@ -273,14 +277,16 @@ def all_to_all_v_2d_kernel(
 
     profiler = profiler.record(is_start=True, task_type=3)
     elem_size = tl.constexpr(send_data.dtype.element_ty.primitive_bitwidth) // 8
+    token_stride_bytes_i64 = tl.cast(token_stride * elem_size, tl.int64)
+    token_stride_i64 = tl.cast(token_stride, tl.int64)
 
     rr_shift = rank if rank_in_row else rank * num_expert_per_rank  # round-robin
     for idx in range(pid, nsplits, num_pid):
         task_id = (idx + rr_shift) % nsplits
-        chunk_size_bytes = tl.load(out_splits + task_id) * token_stride * elem_size
-        read_offset = tl.load(source_offset + task_id) * token_stride
+        chunk_size_bytes = tl.cast(tl.load(out_splits + task_id), tl.int64) * token_stride_bytes_i64
+        read_offset = tl.cast(tl.load(source_offset + task_id), tl.int64) * token_stride_i64
         local_off = tl.load(local_split_offset + task_id)
-        write_offset = local_off * token_stride
+        write_offset = tl.cast(local_off, tl.int64) * token_stride_i64
         peer = task_id % M if rank_in_row else task_id // M  # important: splits/offs are transposed, using `M` instead of `N` to compute peer
         libshmem_device.getmem_nbi_block(recv_data + write_offset, send_data + read_offset, chunk_size_bytes, peer)
         tl.store(source_offset + task_id, local_off)  # write back
@@ -289,26 +295,17 @@ def all_to_all_v_2d_kernel(
 
 @triton_dist.jit(do_not_specialize=["num_expert_per_rank", "stage"])
 def all_to_all_v_2d_kernel_v2(
-    profiler_buf,
-    input,
-    output,
-    input_splits,  # (nsplits,), local
-    output_splits,  # (nsplits,), local
-    send_recv_num_tokens,  # (2,), pinned memory
-    symm_splits_workspace,  # (2, nsplits), symmetric
-    symm_data_workspace,  # (max_num_token * token_len,), symmetric
-    partial_sum_ptr,  # (num_tiles,)
-    signal_pad_ptr,
-    stage,
-    total_stages: tl.constexpr,
-    rank_in_row: tl.constexpr,
-    token_len: tl.constexpr,  # token len elem, must be a power of 2
-    num_expert_per_rank: tl.constexpr,
-    profiling: tl.constexpr = False,
-    copy_to_symm_buffer: tl.constexpr = True,
-    launch_cooperative_grid: tl.constexpr = False,
-    num_warps: tl.constexpr = 32,
-    BS_M: tl.constexpr = 1,
+        profiler_buf, input, output, input_splits,  # (nsplits,), local
+        output_splits,  # (nsplits,), local
+        send_recv_num_tokens,  # (2,), pinned memory
+        symm_splits_workspace,  # (2, nsplits), symmetric
+        symm_data_workspace,  # (max_num_token * token_len,), symmetric
+        partial_sum_ptr,  # (num_tiles,)
+        signal_pad_ptr, stage, total_stages: tl.constexpr, rank_in_row: tl.constexpr,
+        token_len: tl.constexpr,  # token len in elements, does not need to be a power of 2
+        num_expert_per_rank: tl.constexpr, profiling: tl.constexpr = False, copy_to_symm_buffer: tl.constexpr = True,
+        launch_cooperative_grid: tl.constexpr = False, num_warps: tl.constexpr = 32,
+        COPY_BLOCK_SIZE: tl.constexpr = 1,  # flat copy block size in elements, must be a power of 2
 ):
     profiler = Profiler.create(
         profiler_buffer=profiler_buf,
@@ -337,6 +334,7 @@ def all_to_all_v_2d_kernel_v2(
     recv_data = output
 
     if pid == 0:
+        barrier_all_intra_node_atomic_cas_block(rank, rank, world_size, barrier_ptr)
         last_stage = (stage + total_stages - 1) % total_stages
         tl.store(send_recv_num_tokens + last_stage * 2 + tl.arange(0, 2), -1)
         profiler = profiler.record(is_start=True, task_type=1)  # prefix sum
@@ -371,10 +369,11 @@ def all_to_all_v_2d_kernel_v2(
         start_token = pid * tokens_per_pid + tl.minimum(pid, remainder)
         count = tokens_per_pid + (1 if pid < remainder else 0)
         end_token = start_token + count
-        num_iters = tl.cdiv(count, BS_M)
+        total_copy_elems = count * token_len
+        num_iters = tl.cdiv(total_copy_elems, COPY_BLOCK_SIZE)
         start_elem = start_token * token_len
         for iter in range(num_iters):
-            offs = start_elem + iter * BS_M * token_len + tl.arange(0, BS_M * token_len)
+            offs = start_elem + iter * COPY_BLOCK_SIZE + tl.arange(0, COPY_BLOCK_SIZE)
             mask = (offs < end_token * token_len)
             val = tl.load(input + offs, mask=mask)
             tl.store(send_data + offs, val, mask=mask)
@@ -408,10 +407,13 @@ def all_to_all_v_2d_kernel_v2(
         barrier_all_intra_node_atomic_cas_block(rank, rank, world_size, barrier_ptr)
         profiler = profiler.record(is_start=False, task_type=6)
     barrier_on_this_grid(grid_barrier, launch_cooperative_grid)
+    membar(scope="sys")
     profiler = profiler.record(is_start=False, task_type=2)  # exchange source offset
 
     profiler = profiler.record(is_start=True, task_type=4)  # exchange data
     elem_size = tl.constexpr(send_data.dtype.element_ty.primitive_bitwidth) // 8
+    token_len_bytes_i64 = tl.cast(token_len * elem_size, tl.int64)
+    token_len_i64 = tl.cast(token_len, tl.int64)
     tokens_per_pid = num_recv_tokens // num_pid
     remainder = num_recv_tokens % num_pid
     start_token = pid * tokens_per_pid + tl.minimum(pid, remainder)
@@ -442,9 +444,9 @@ def all_to_all_v_2d_kernel_v2(
             if valid_chunk_len > 0:
                 in_split_offset = chunk_start - task_base_token
                 read_base = tl.load(source_offset + curr_task_idx)
-                read_ptr = (read_base + in_split_offset) * token_len
-                write_ptr = (task_base_token + in_split_offset) * token_len
-                chunk_size_bytes = valid_chunk_len * token_len * elem_size
+                read_ptr = tl.cast(read_base + in_split_offset, tl.int64) * token_len_i64
+                write_ptr = tl.cast(task_base_token + in_split_offset, tl.int64) * token_len_i64
+                chunk_size_bytes = tl.cast(valid_chunk_len, tl.int64) * token_len_bytes_i64
                 if rank_in_row:
                     peer = curr_task_idx % M
                 else:
@@ -585,7 +587,8 @@ def all_to_all_v_offset_op_v2(ctx: AllToAllContext, rank_in_row: bool, input: to
     assert input.size(0) <= ctx.max_num_token and output.size(0) <= ctx.max_num_token
 
     grid = (ctx.ne, ) if grid_size is None else (grid_size, )
-    BS_M = (1024 * 32) // (ctx.token_len_elem * input.element_size())
+    copy_block_size = (1024 * 32) // input.element_size()
+    copy_block_size = 1 << (copy_block_size.bit_length() - 1)
     current_stage = ctx.get_stage()
     all_to_all_v_2d_kernel_v2[grid](
         ctx.profile_buf,
@@ -607,7 +610,7 @@ def all_to_all_v_offset_op_v2(ctx: AllToAllContext, rank_in_row: bool, input: to
         copy_to_symm_buffer=copy_to_symm_buffer,
         **launch_cooperative_grid_options(),
         num_warps=32,
-        BS_M=BS_M,
+        COPY_BLOCK_SIZE=copy_block_size,
     )
 
     if return_stat:

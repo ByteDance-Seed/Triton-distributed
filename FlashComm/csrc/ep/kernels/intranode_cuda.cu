@@ -397,26 +397,26 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
 // NOTE: token_within_expert_offset and local_splits are computed by
 // kernel_compute_stable_local_token_within_expert_offset
 template <int32_t kNumWarps>
-void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
-    kernel_compute_dispatch_layout(
-        int32_t *topk_indices,               // [num_token, topk]
-        int32_t *token_within_expert_offset, // [num_token, topk]
-        int32_t *local_splits,               // [num_experts + 1]
-        int32_t **full_splits_ptrs,          // [num_ranks, num_experts + 1]
-        int32_t **barrier_ptrs,              // [num_ranks]
-        int32_t *recv_base_offset, // [num_ranks, experts_per_rank, num_ranks],
-                                   // dst_rank, local_expert_idx, src_rank
-        int32_t *token_dst_scatter_indices, // [num_token, topk]
-        int32_t *token_topk_send_mask,      // [num_token, topk]
-        int32_t *recv_token_count_cpu, // [num_ranks] (optional, pinned memory)
-        int32_t *recv_token_count,     // [num_ranks] (optional, device memory)
-        int32_t *recv_aligned_token_count_cpu, // [num_ranks] (optional, pinned)
-        int32_t *recv_aligned_token_count,     // [num_ranks] (optional, device)
-        int32_t *recv_expert_counts, // [experts_per_rank] (optional, device,
-                                     // local rank only)
-        int64_t **token_src_rank_topk_and_indices_ptrs, // [num_ranks] (optional)
-        int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
-        int32_t num_ranks, int32_t expert_alignment) {
+void __global__
+__launch_bounds__(kNumWarps *WARP_SIZE, 1) kernel_compute_dispatch_layout(
+    int32_t *topk_indices,               // [num_token, topk]
+    int32_t *token_within_expert_offset, // [num_token, topk]
+    int32_t *local_splits,               // [num_experts + 1]
+    int32_t **full_splits_ptrs,          // [num_ranks, num_experts + 1]
+    int32_t **barrier_ptrs,              // [num_ranks]
+    int32_t *recv_base_offset, // [num_ranks, experts_per_rank, num_ranks],
+                               // dst_rank, local_expert_idx, src_rank
+    int32_t *token_dst_scatter_indices, // [num_token, topk]
+    int32_t *token_topk_send_mask,      // [num_token, topk]
+    int32_t *recv_token_count_cpu,      // [num_ranks] (optional, pinned memory)
+    int32_t *recv_token_count,          // [num_ranks] (optional, device memory)
+    int32_t *recv_aligned_token_count_cpu, // [num_ranks] (optional, pinned)
+    int32_t *recv_aligned_token_count,     // [num_ranks] (optional, device)
+    int32_t *recv_expert_counts, // [experts_per_rank] (optional, device,
+                                 // local rank only)
+    int64_t **token_src_rank_topk_and_indices_ptrs, // [num_ranks] (optional)
+    int32_t num_token, int32_t topk, int32_t num_experts, int32_t rank,
+    int32_t num_ranks, int32_t expert_alignment) {
   const int thread_id = threadIdx.x;
   const int block_id = blockIdx.x;
   const int num_block = gridDim.x;

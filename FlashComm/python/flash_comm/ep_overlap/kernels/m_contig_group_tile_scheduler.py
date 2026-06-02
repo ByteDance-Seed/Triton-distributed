@@ -1,6 +1,6 @@
-#################################################################################
+################################################################################
 #
-# Copyright (c) 2026 ByteDance Ltd. and/or its affiliates
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files
