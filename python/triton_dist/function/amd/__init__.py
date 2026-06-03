@@ -22,32 +22,15 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-from .ep_ll_a2a_layer import EPLowLatencyAllToAllLayer
-
-__all__ = [
-    "EPLowLatencyAllToAllLayer",
-]
+__all__ = []
 
 try:
-    from .ep_a2a_layer import EPAll2AllLayer
-    __all__.append("EPAll2AllLayer")
-except ImportError:
-    pass
-
-try:
-    from .tp_attn import TP_Attn
-    __all__.append("TP_Attn")
-except ImportError:
-    pass
-
-try:
-    from .tp_mlp import TP_MLP
-    __all__.append("TP_MLP")
-except ImportError:
-    pass
-
-try:
-    from .ep_a2a_fused_layer import EpAll2AllFusedOp, EPAll2AllFusedLayer
-    __all__ += ["EpAll2AllFusedOp", "EPAll2AllFusedLayer"]
-except ImportError:
-    pass
+    from .ep_moe_fused import (
+        TritonDistFusedEpMoeFunction,
+        fused_ep_moe,
+        fused_ep_moe_autograd,
+    )
+    __all__ += ["TritonDistFusedEpMoeFunction", "fused_ep_moe", "fused_ep_moe_autograd"]
+except ImportError as e:
+    import warnings
+    warnings.warn(f"function.amd.ep_moe_fused unavailable (mori_shmem not installed?): {e}")

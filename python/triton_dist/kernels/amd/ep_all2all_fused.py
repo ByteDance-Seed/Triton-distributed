@@ -23,33 +23,23 @@
 #
 ################################################################################
 """
-AMD (HIP/ROCm) fused EP All-to-All + grouped GEMM "mega kernel" (intra-node).
+AMD (HIP/ROCm) fused EP All-to-All + grouped GEMM "mega kernel".
 
-This is the AMD counterpart of ``kernels/nvidia/ep_all2all_fused.py``. It fuses
-MoE token *dispatch* (expert-parallel all-to-all) with the expert *grouped GEMM*
-into a single persistent kernel so that, as soon as an expert's tokens have
+Fuses MoE token *dispatch* (expert-parallel all-to-all) with the expert *grouped
+GEMM* into a single persistent kernel so that, as soon as an expert's tokens have
 arrived from every source rank, its GEMM tiles can start -- overlapping
-communication with compute at tile granularity.
+communication with compute at tile granularity. (Reference design:
+``kernels/nvidia/ep_all2all_fused.py``.)
 
-Mapping NVIDIA -> AMD:
-  * NVSHMEM device put/signal      -> mori via ``libshmem_device`` proxy
-                                      (``putmem_warp`` / ``signal_op`` / ``signal_wait_until``)
-  * ``NVSHMEM_SIGNAL_DTYPE`` int64 -> ``MORI_SHMEM_SIGNAL_DTYPE`` uint64
-  * ``nvshmem_create_tensor``      -> ``mori_shmem_create_tensor``
-  * warp size 32 / ``sync_warp``   -> wavefront 64 / ``threads_per_warp()``
-  * ``ld_acquire(.., "gpu")``      -> ``ld(.., scope="agent", semantic="acquire")``
-  * cooperative-grid env-reg trick -> not needed (CTAs coordinate purely through
-                                      the per-expert symmetric barrier buffer)
-  * TMA / descriptor GEMM          -> plain pointer-arithmetic ``tl.dot``
-
-Scope: the forward path is implemented as two mega kernels --
-``dispatch + grouped GEMM(1)`` and ``grouped GEMM(2) + combine`` (serial / gather
-mode). Not implemented here (same pattern, deferred): scatter-combine mode,
-transposed/backward grouped GEMM, FP8 online quant, profiler instrumentation,
-the two-stage (local-checkpoint) dispatch and the lazy symmetric allocator. Drop
-tokens are not supported (asserted on entry). Cross-rank split exchange and
-grouped-GEMM tiling metadata are computed on the host in plain torch (run once
-per call); the data plane stays inside the fused kernels.
+The forward path is two mega kernels: ``dispatch + grouped GEMM(1)`` and
+``grouped GEMM(2) + combine`` (serial / gather combine). Cross-rank data movement
+and synchronization use mori_shmem device primitives via ``libshmem_device``
+(``putmem_warp`` / ``signal_op`` / ``signal_wait_until`` / ``barrier_all``);
+symmetric buffers come from ``mori_shmem_create_tensor`` and a per-expert
+``MORI_SHMEM_SIGNAL_DTYPE`` (uint64) barrier; the wavefront width is 64 and
+grouped-GEMM tiles are plain pointer-arithmetic ``tl.dot``. The cross-rank split
+exchange and grouped-GEMM tiling metadata are computed on the host in plain torch
+(run once per call); the data plane stays inside the fused kernels.
 """
 
 import math
@@ -100,8 +90,7 @@ def dot_k_const(
 ):
     """A single (BLOCK_M, BLOCK_N) GEMM tile with a K reduction loop.
 
-    Plain ``tl.dot`` accumulation in fp32 (no TMA, no warp-specialization --
-    both NVIDIA-only).
+    Plain ``tl.dot`` accumulation in fp32.
     """
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
@@ -427,7 +416,7 @@ class EpA2AFusedContext:
     num_tot_experts: int
     experts_per_rank: int
     dtype: torch.dtype
-    weight_dtype: torch.dtype
+    weight_dtype: torch.dtype  # Not in use; reserved for future path
     capacity: float
     cap_tokens: int
 
@@ -461,7 +450,7 @@ def create_ep_a2a_fused_context(
     rank: int,
     world_size: int,
     dtype: torch.dtype = torch.bfloat16,
-    weight_dtype: torch.dtype = torch.float32,
+    weight_dtype: torch.dtype = torch.float32,  # Not in use; reserved for future path
     capacity: float = 4.0,
 ) -> EpA2AFusedContext:
     assert num_tot_experts % world_size == 0, "num_tot_experts must be divisible by world_size"
@@ -523,6 +512,7 @@ def _build_gemm_tiling(split_size: torch.Tensor, block_m: int, device):
         return torch.tensor(lst, dtype=torch.int32, device=device)
 
     return dict(
+        block_m=block_m,
         expert_ids=_i32(expert_ids),
         split_size_cum=_i32(split_size_cum),
         tile_num=_i32(tile_num),
@@ -576,6 +566,8 @@ def fused_dispatch_token_moe_grouped_gemm(
     input: torch.Tensor,  # [num_tokens, hidden] this rank's tokens
     topk_indices: torch.Tensor,  # [num_tokens, topk] int32 (global expert ids)
     gemm_weight: torch.Tensor,  # [experts_per_rank, hidden, N]
+    *,  # keyword-only below: avoids any silent positional misbind of the new `meta` arg
+    meta: Optional[dict] = None,  # precomputed layout metadata (e.g. from a layer.preprocess); built if None
     num_sms: int = 64,
     num_dispatch_tasks: int = 20,
     BLOCK_SIZE_M: int = 128,
@@ -592,21 +584,31 @@ def fused_dispatch_token_moe_grouped_gemm(
     counts) needed by a subsequent combine.
     """
     assert input.is_contiguous() and input.dtype == ctx.dtype
-    assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk
+    assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk and topk_indices.is_contiguous()
+    assert gemm_weight.dtype == ctx.dtype, "expert weights must match the activation dtype (ctx.dtype)"
     num_tokens, hidden = input.shape
     assert hidden == ctx.hidden and num_tokens <= ctx.max_tokens
     G, K, N = gemm_weight.shape
     assert G == ctx.experts_per_rank and K == ctx.hidden
-    # Drop tokens are unsupported: every (token, slot) must map to a real expert.
+    # Every (token, slot) must map to a real expert in [0, num_tot_experts).
     assert bool(((topk_indices >= 0) & (topk_indices < ctx.num_tot_experts)).all()), \
-        "topk_indices out of [0, num_tot_experts); drop tokens are not supported"
+        "topk_indices out of range [0, num_tot_experts)"
 
-    meta = _build_dispatch_metadata(ctx, topk_indices, BLOCK_SIZE_M)
+    if meta is None:
+        meta = _build_dispatch_metadata(ctx, topk_indices, BLOCK_SIZE_M)
+    else:
+        assert meta.get("block_m") == BLOCK_SIZE_M, \
+            "precomputed meta was built with a different BLOCK_SIZE_M than this launch"
     M = meta["M_local"]
     device = input.device
-    if M > ctx.cap_tokens:
+    # Global capacity check: every rank evaluates the same all-gathered per-rank recv counts,
+    # so all ranks raise together. A per-rank ``M > cap_tokens`` check would let under-capacity
+    # ranks fall through into the barrier/kernel while overflowing ranks bail out -> hang.
+    max_recv = int(meta["num_recv_tokens_per_rank"].max().item())
+    if max_recv > ctx.cap_tokens:
         raise RuntimeError(
-            f"received M={M} routed tokens > cap_tokens={ctx.cap_tokens}; increase `capacity` or `max_tokens`")
+            f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
+            "increase `capacity` or `max_tokens`")
     num_sms = min(num_sms, torch.cuda.get_device_properties(device).multi_processor_count)
 
     # stage this rank's tokens into the symmetric send buffer (putmem source)
@@ -778,7 +780,7 @@ def mega_kernel_moe_grouped_gemm_combine_token(
     grid_sync_counter,  # local int32 [1]
     NUM_WARPS: tl.constexpr,
 ):
-    """Serial-mode combine mega kernel (mirrors NVIDIA non-scatter path):
+    """Serial-mode combine mega kernel:
 
       phase 1: every CTA strides over the grouped-GEMM(2) tiles, writing the
                down-proj output into the symmetric ``c_ptr``.
@@ -868,11 +870,15 @@ def fused_group_gemm_combine_token(
     G, K2, N2 = gemm_weight.shape
     assert G == ctx.experts_per_rank
     assert N2 == ctx.hidden, "combine maps expert outputs back to `hidden`; expected N2 == ctx.hidden"
-    assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk
+    assert gemm_weight.dtype == ctx.dtype, "expert weights must match the activation dtype (ctx.dtype)"
+    assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk and topk_indices.is_contiguous()
     device = gemm_input.device
-    if M > ctx.cap_tokens:
+    # Global capacity check (see fused_dispatch_token_moe_grouped_gemm): raise on every rank together.
+    max_recv = int(meta["num_recv_tokens_per_rank"].max().item())
+    if max_recv > ctx.cap_tokens:
         raise RuntimeError(
-            f"received M={M} routed tokens > cap_tokens={ctx.cap_tokens}; increase `capacity` or `max_tokens`")
+            f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
+            "increase `capacity` or `max_tokens`")
     num_sms = min(num_sms, torch.cuda.get_device_properties(device).multi_processor_count)
 
     has_gate = topk_weights is not None

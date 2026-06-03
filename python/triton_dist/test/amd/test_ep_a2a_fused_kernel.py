@@ -39,9 +39,13 @@ its own context; all ranks run the same sequence so collectives stay matched):
   - capacity    : capacity too small -> every rank must raise a clear RuntimeError
 
 Usage (mori_shmem; RCCL on this firmware requires HSA_NO_SCRATCH_RECLAIM=1):
+  1. For 4-GPU run
     HIP_VISIBLE_DEVICES=4,5,6,7 ARNOLD_WORKER_GPU=4 \\
     TRITON_DIST_SHMEM_BACKEND=mori_shmem HSA_NO_SCRATCH_RECLAIM=1 \\
-    bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a_fused.py
+    bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a_fused_kernel.py
+  2. For 8-GPU run
+    TRITON_DIST_SHMEM_BACKEND=mori_shmem HSA_NO_SCRATCH_RECLAIM=1 \\
+    bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a_fused_kernel.py
 """
 
 import os
