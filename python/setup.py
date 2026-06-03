@@ -1212,10 +1212,46 @@ def get_git_version_suffix():
 
 
 # set ext_modules
+#
+# In addition to the main CMake extension we declare ``triton.runtime._binder_c``
+# as a standard CPython Extension — it lives under
+# ``3rdparty/triton/python/triton/runtime/_binder_c.c`` and re-implements the
+# launch-time argument binder in C (see ``docs/host-overhead/80-summary.md``).
+#
+# Listing it here means setuptools' standard ``build_ext`` compiles the
+# ``.so`` alongside ``libtriton.so`` during ``pip install`` / ``pip wheel``,
+# so it ends up packaged in the wheel.  ``_fastpath.py`` has a ``try/except
+# ImportError`` fallback to the exec'd Python ``dynamic_func`` so a missing
+# ``.so`` is non-fatal — but with this entry in place, the ``.so`` is no
+# longer "missing" by default.
+#
+# Source path is given *relative to this setup.py* and through the
+# in-package symlink that ``add_link_to_distributed()`` creates before any
+# build command runs (``python/triton -> ../3rdparty/triton/python/triton``).
+# Two reasons to go through the symlink rather than a ``../3rdparty/...``
+# path:
+#
+#   1) ``setuptools.editable_wheel`` runs ``build_py.analyze_manifest``
+#      which checks every Extension source via ``assert_relative`` (so an
+#      absolute path fails) *and* later treats sources as if they sat
+#      inside their declared package — ``..``-prefixed paths don't.
+#   2) The symlink is guaranteed to exist by the time any command sees the
+#      ``Extension``, because every plugin command (``plugin_install`` /
+#      ``plugin_develop`` / ``plugin_editable_wheel`` / ``plugin_bdist_wheel``)
+#      calls ``add_links()`` before its ``super().run()``.
+_BINDER_C_EXT = Extension(
+    "triton.runtime._binder_c",
+    sources=[os.path.join("triton", "runtime", "_binder_c.c")],
+    extra_compile_args=["-O2", "-fvisibility=hidden"],
+)
+
 if _is_ascend_platform() and check_env_flag("TRITON_USE_ASCEND", "OFF"):
     ext_modules = [CMakeExtension("3rdparty/triton-ascend/python/triton", "triton/_C/")]
 else:
-    ext_modules = [CMakeExtension("3rdparty/triton/python/triton", "triton/_C/")]
+    ext_modules = [
+        CMakeExtension("3rdparty/triton/python/triton", "triton/_C/"),
+        _BINDER_C_EXT,
+    ]
 
 # Dynamically define supported Python versions and classifiers
 MIN_PYTHON = (3, 9)
