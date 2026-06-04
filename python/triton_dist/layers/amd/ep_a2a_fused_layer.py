@@ -50,6 +50,7 @@ from triton_dist.kernels.amd.ep_all2all_fused import (
     fused_dispatch_token_moe_grouped_gemm,
     fused_group_gemm_combine_token,
     _build_dispatch_metadata,
+    _build_dispatch_metadata_device,
 )
 
 
@@ -96,6 +97,7 @@ class EpAll2AllFusedOp(torch.nn.Module):
         num_warps: int = 8,
         num_stages: int = 2,
         num_dispatch_tasks: int = 16,
+        use_device_metadata: bool = True,
     ):
         super().__init__()
         self.ep_group = ep_group
@@ -125,6 +127,8 @@ class EpAll2AllFusedOp(torch.nn.Module):
         self.gemm_GROUP_SIZE_M = gemm_GROUP_SIZE_M
         self.num_warps = num_warps
         self.num_stages = num_stages
+        # build dispatch/combine metadata with device kernels (host torch fallback if False)
+        self.use_device_metadata = use_device_metadata
 
         # eager symmetric-buffer allocation.
         self.ctx = create_ep_a2a_fused_context(
@@ -148,9 +152,18 @@ class EpAll2AllFusedOp(torch.nn.Module):
 
     # ============================= preprocess =================================
     def preprocess(self, exp_indices: torch.Tensor) -> EPAllToAllLayoutDesc:
-        """Cross-rank split exchange + recv-offset + grouped-GEMM tiling (computed host-side in torch)."""
+        """Cross-rank split exchange + recv-offset + grouped-GEMM tiling.
+
+        Built on-device by default (``use_device_metadata=True``); set it False to use the host torch path.
+        ``exp_indices`` must be in ``[0, num_tot_experts)`` on every rank — the range check is per-rank
+        local, so invalid routing on only some ranks may hang rather than fail cleanly.
+        """
         assert exp_indices.dtype == torch.int32 and exp_indices.shape[1] == self.topk and exp_indices.is_contiguous()
-        meta = _build_dispatch_metadata(self.ctx, exp_indices, self.GROUP_GEMM_BLOCK_SIZE_M)
+        if self.use_device_metadata:
+            meta = _build_dispatch_metadata_device(self.ctx, exp_indices, self.GROUP_GEMM_BLOCK_SIZE_M,
+                                                   num_sms=self.num_sm)
+        else:
+            meta = _build_dispatch_metadata(self.ctx, exp_indices, self.GROUP_GEMM_BLOCK_SIZE_M)
         return EPAllToAllLayoutDesc(
             num_dispatch_token_cur_rank=exp_indices.shape[0],
             recv_buf_offset_per_expert=meta["recv_buf_offset"],
@@ -188,7 +201,8 @@ class EpAll2AllFusedOp(torch.nn.Module):
             "exp_indices must be the tensor passed to preprocess (use ep_a2a_layout_desc.topk_indices_tensor)"
         gemm1_out, meta = fused_dispatch_token_moe_grouped_gemm(
             self.ctx, input, ep_a2a_layout_desc.topk_indices_tensor, gemm_weight, meta=ep_a2a_layout_desc.meta,
-            num_sms=self.num_sm, num_dispatch_tasks=self.num_dispatch_tasks, BLOCK_SIZE_M=self.GROUP_GEMM_BLOCK_SIZE_M,
+            use_device_metadata=self.use_device_metadata, num_sms=self.num_sm,
+            num_dispatch_tasks=self.num_dispatch_tasks, BLOCK_SIZE_M=self.GROUP_GEMM_BLOCK_SIZE_M,
             BLOCK_SIZE_N=(gemm_BLOCK_SIZE_N or self.FWD_GEMM_BLOCK_SIZE_N), BLOCK_SIZE_K=self.gemm_BLOCK_SIZE_K,
             GROUP_SIZE_M=self.gemm_GROUP_SIZE_M, num_warps=self.num_warps, num_stages=self.num_stages,
             gemm_output=gemm_output_data)
@@ -210,7 +224,8 @@ class EpAll2AllFusedOp(torch.nn.Module):
         assert combine_mode == "serial", "AMD combine only supports serial/gather mode"
         return fused_group_gemm_combine_token(
             self.ctx, gemm_input_data, gemm_weight, ep_a2a_layout_desc.meta,
-            ep_a2a_layout_desc.topk_indices_tensor, topk_weights=gate_input, num_sms=self.num_sm,
+            ep_a2a_layout_desc.topk_indices_tensor, topk_weights=gate_input,
+            use_device_metadata=self.use_device_metadata, num_sms=self.num_sm,
             BLOCK_SIZE_M=self.GROUP_GEMM_BLOCK_SIZE_M,
             BLOCK_SIZE_N=(gemm_BLOCK_SIZE_N or self.COMBINE_GEMM_BLOCK_SIZE_N), BLOCK_SIZE_K=self.gemm_BLOCK_SIZE_K,
             GROUP_SIZE_M=self.gemm_GROUP_SIZE_M, num_warps=self.num_warps, num_stages=self.num_stages,

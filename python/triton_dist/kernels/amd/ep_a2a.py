@@ -46,7 +46,9 @@ def kernel_bincount(n, input, output, length, num_sm, num_warps: tl.constexpr):
     threads_per_block = num_warps * threads_per_warp()
     for i in range(pid * threads_per_block + thread_idx, n, num_pid * threads_per_block):
         val = ld(input + i)
-        if val < length:
+        # lower bound guards against negative/sentinel ids writing out of bounds before any
+        # host-side range check runs (e.g. the device-metadata path bincounts before validation)
+        if val >= 0 and val < length:
             atomic_add(output + val, 1, scope="agent", semantic="relaxed")
 
 

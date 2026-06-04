@@ -45,6 +45,8 @@ try:
         fused_group_gemm_combine_token,
         mega_kernel_dispatch_token_moe_grouped_gemm,
         mega_kernel_moe_grouped_gemm_combine_token,
+        kernel_build_fused_dispatch_metadata,
+        kernel_build_gemm_tiling,
     )
 except ImportError as e:
     import warnings
@@ -60,6 +62,8 @@ __all__ = [
     "fused_group_gemm_combine_token",
     "mega_kernel_dispatch_token_moe_grouped_gemm",
     "mega_kernel_moe_grouped_gemm_combine_token",
+    "kernel_build_fused_dispatch_metadata",
+    "kernel_build_gemm_tiling",
     "kernel_dispatch_token_intra_node",
     "kernel_skipped_token_local_dispatch_intra_node",
     "kernel_skipped_token_inplace_local_combine_intra_node",

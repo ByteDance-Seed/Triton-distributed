@@ -33,6 +33,9 @@ Runs the full fused MoE forward on top of an ``EpAll2AllFusedOp``:
     ``w1_local = [experts_per_rank, hidden, inter]``,
     ``w2_local = [experts_per_rank, inter, hidden]``;
   * the caller passes a pre-built ``EpAll2AllFusedOp`` (which owns the symmetric buffers).
+
+Dispatch/combine metadata is built on-device by default; pass
+``EpAll2AllFusedOp(..., use_device_metadata=False)`` to fall back to the host torch path.
 """
 
 from typing import Callable, Optional

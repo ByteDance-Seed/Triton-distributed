@@ -38,8 +38,10 @@ and synchronization use mori_shmem device primitives via ``libshmem_device``
 symmetric buffers come from ``mori_shmem_create_tensor`` and a per-expert
 ``MORI_SHMEM_SIGNAL_DTYPE`` (uint64) barrier; the wavefront width is 64 and
 grouped-GEMM tiles are plain pointer-arithmetic ``tl.dot``. The cross-rank split
-exchange and grouped-GEMM tiling metadata are computed on the host in plain torch
-(run once per call); the data plane stays inside the fused kernels.
+exchange and grouped-GEMM tiling metadata are built on-device by default (kernels
+``kernel_build_fused_dispatch_metadata`` / ``kernel_build_gemm_tiling``); pass
+``use_device_metadata=False`` to fall back to the host torch path. The data plane
+stays inside the fused kernels.
 """
 
 import math
@@ -61,6 +63,8 @@ from triton_dist.language.extra.hip.language_extra import (
     atomic_add,
     atomic_add_per_warp,
 )
+from triton_dist.language.extra.language_extra import threads_per_warp
+from triton_dist.kernels.amd.ep_a2a import bincount
 from triton_dist.kernels.amd.common_ops import barrier_on_this_grid
 from triton_dist.utils import (
     MORI_SHMEM_SIGNAL_DTYPE,
@@ -425,11 +429,16 @@ class EpA2AFusedContext:
     output_buf: torch.Tensor
     barriers_buf: torch.Tensor
     combine_in_buf: torch.Tensor
+    # symmetric buffers for the device-side metadata all-gather
+    local_splits_buf: torch.Tensor
+    full_splits_buf: torch.Tensor
+    splits_signal_buf: torch.Tensor
 
     # scratch (local)
     task_counter: torch.Tensor
     expert_counter: torch.Tensor
     combine_grid_sync: torch.Tensor
+    meta_grid_sync: torch.Tensor
 
     def ep_barrier(self):
         mori_shmem_barrier_all_on_stream(torch.cuda.current_stream())
@@ -439,6 +448,9 @@ class EpA2AFusedContext:
         mori_shmem_free_tensor_sync(self.output_buf)
         mori_shmem_free_tensor_sync(self.barriers_buf)
         mori_shmem_free_tensor_sync(self.combine_in_buf)
+        mori_shmem_free_tensor_sync(self.local_splits_buf)
+        mori_shmem_free_tensor_sync(self.full_splits_buf)
+        mori_shmem_free_tensor_sync(self.splits_signal_buf)
 
 
 def create_ep_a2a_fused_context(
@@ -465,18 +477,28 @@ def create_ep_a2a_fused_context(
     # gemm2 output / combine source: symmetric so origin ranks can pull rows back.
     combine_in_buf = mori_shmem_create_tensor([cap_tokens, hidden], dtype)
 
+    # device-side metadata all-gather buffers (symmetric)
+    local_splits_buf = mori_shmem_create_tensor([num_tot_experts], torch.int32)
+    local_splits_buf.zero_()
+    full_splits_buf = mori_shmem_create_tensor([world_size, num_tot_experts], torch.int32)
+    full_splits_buf.zero_()
+    splits_signal_buf = mori_shmem_create_tensor([world_size], MORI_SHMEM_SIGNAL_DTYPE)
+    splits_signal_buf.zero_()
+
     device = torch.cuda.current_device()
     task_counter = torch.zeros([1], dtype=torch.int32, device=device)
     expert_counter = torch.zeros([num_tot_experts], dtype=torch.int32, device=device)
     combine_grid_sync = torch.zeros([1], dtype=torch.int32, device=device)
+    meta_grid_sync = torch.zeros([1], dtype=torch.int32, device=device)
 
     mori_shmem_barrier_all_on_stream(torch.cuda.current_stream())
     return EpA2AFusedContext(
         group=group, rank=rank, world_size=world_size, max_tokens=max_tokens, hidden=hidden, topk=topk,
         num_tot_experts=num_tot_experts, experts_per_rank=experts_per_rank, dtype=dtype, weight_dtype=weight_dtype,
         capacity=capacity, cap_tokens=cap_tokens, send_buf=send_buf, output_buf=output_buf,
-        barriers_buf=barriers_buf, combine_in_buf=combine_in_buf, task_counter=task_counter,
-        expert_counter=expert_counter, combine_grid_sync=combine_grid_sync)
+        barriers_buf=barriers_buf, combine_in_buf=combine_in_buf, local_splits_buf=local_splits_buf,
+        full_splits_buf=full_splits_buf, splits_signal_buf=splits_signal_buf, task_counter=task_counter,
+        expert_counter=expert_counter, combine_grid_sync=combine_grid_sync, meta_grid_sync=meta_grid_sync)
 
 
 def _build_gemm_tiling(split_size: torch.Tensor, block_m: int, device):
@@ -518,7 +540,6 @@ def _build_gemm_tiling(split_size: torch.Tensor, block_m: int, device):
         tile_num=_i32(tile_num),
         tile_num_cum=_i32(tile_num_cum),
         total_tiles=torch.tensor([total_tiles], dtype=torch.int32, device=device),
-        total_tiles_int=total_tiles,
     )
 
 
@@ -531,6 +552,11 @@ def _build_dispatch_metadata(ctx: EpA2AFusedContext, topk_indices: torch.Tensor,
     ws = ctx.world_size
     epr = ctx.experts_per_rank
     num_experts = ctx.num_tot_experts
+
+    # Validate at this public-boundary entry, consistently with the device path (torch.bincount
+    # would raise on negatives but silently drop over-range ids via the [:num_experts] slice).
+    assert bool(((topk_indices >= 0) & (topk_indices < num_experts)).all()), \
+        "topk_indices out of range [0, num_tot_experts); drop-token / invalid ids are not supported"
 
     # local_splits[e] = #tokens this rank routes to global expert e
     local_splits = torch.bincount(topk_indices.reshape(-1), minlength=num_experts).to(torch.int32)[:num_experts]
@@ -556,8 +582,257 @@ def _build_dispatch_metadata(ctx: EpA2AFusedContext, topk_indices: torch.Tensor,
         num_recv_tokens_per_rank=num_recv_tokens_per_rank,
         M_local=M_local,
         split_size=split_size,
+        metadata_backend="host",
     )
     meta.update(_build_gemm_tiling(split_size, block_m, device))
+    return meta
+
+
+# ---------------------------------------------------------------------------
+#  Device-side metadata kernels (replace the host torch path above)
+# ---------------------------------------------------------------------------
+@triton_dist.jit
+def kernel_build_fused_dispatch_metadata(
+    local_splits_buf,  # symm int32 [num_experts]: this rank's per-global-expert token count
+    full_splits_buf,  # symm int32 [world_size, num_experts]: all-gather destination
+    splits_signal_buf,  # symm signal [world_size]: per-source all-gather done flag
+    recv_buf_offset_per_expert,  # int32 [world_size, experts_per_rank, world_size] (out)
+    num_input_tokens_per_rank,  # int32 [world_size] (out)
+    num_recv_tokens_per_rank,  # int32 [world_size] (out)
+    split_size,  # int32 [experts_per_rank] (out, MUST be zeroed on host: accumulated via atomic_add)
+    grid_sync_counter,  # int32 [1]: grid barrier workspace (single slot, reused)
+    experts_per_rank: tl.constexpr,
+    topk: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,  # power-of-two >= num_experts
+    num_warps: tl.constexpr,
+):
+    """Device equivalent of ``_build_dispatch_metadata`` (intra-node).
+
+    Mirrors the validated AMD pattern in ``kernel_get_ag_splits_and_recv_offset_intra_node``
+    (``ep_a2a_intra_node.py``) -- the AMD/mori port of NVIDIA's
+    ``kernel_get_ag_splits_and_recv_offset`` -- and additionally accumulates this rank's
+    per-local-expert ``split_size``. Produces a byte-identical layout to the host path
+    (``recv_buf_offset`` ordered g-major / src-minor; ``num_input = sum // topk``).
+    """
+    rank = dl.rank()
+    world_size = dl.num_ranks()
+    pid = tl.program_id(0)
+    num_pid = tl.num_programs(0)
+    num_experts = experts_per_rank * world_size
+    elem_size = tl.constexpr(local_splits_buf.dtype.element_ty.primitive_bitwidth) // 8
+    nbytes = num_experts * elem_size
+    threads_per_block = num_warps * threads_per_warp()
+    thread_idx = tid(0)
+
+    # phase 1: all-gather local_splits -> full_splits_buf[rank] on every peer (incl. self)
+    for remote_rank in range(pid, world_size, num_pid):
+        libshmem_device.putmem_signal_nbi_block(
+            full_splits_buf + rank * num_experts,
+            local_splits_buf,
+            nbytes,
+            splits_signal_buf + rank,
+            1,
+            libshmem_device.MORI_SIGNAL_SET,
+            remote_rank,
+        )
+
+    # ensure all all-gather traffic is globally visible before any consumer reads
+    barrier_on_this_grid(grid_sync_counter, False)
+    if pid == 0:
+        libshmem_device.barrier_all_block()
+    barrier_on_this_grid(grid_sync_counter, False)
+
+    offs = tl.arange(0, BLOCK_SIZE)
+    expert_mask = offs < num_experts
+
+    # phase 2: scatter full_splits[target, e] -> recv_buf_offset[e//epr, e%epr, target];
+    #          compute num_input_tokens[target]; accumulate this rank's split_size.
+    for target_rank in range(pid, world_size, num_pid):
+        token = dl.wait(splits_signal_buf + target_rank, 1, "sys", "acquire")
+        full_splits_buf = dl.consume_token(full_splits_buf, token)
+        __syncthreads()
+        for expert_idx in range(thread_idx, num_experts, threads_per_block):
+            val = ld(full_splits_buf + target_rank * num_experts + expert_idx, semantic="acquire")
+            ep_rank = expert_idx // experts_per_rank
+            expert_idx_intra_rank = expert_idx % experts_per_rank
+            st(
+                recv_buf_offset_per_expert + ep_rank * experts_per_rank * world_size +
+                expert_idx_intra_rank * world_size + target_rank, val, semantic="release")
+            if ep_rank == rank:
+                atomic_add(split_size + expert_idx_intra_rank, val, scope="agent", semantic="relaxed")
+        __syncthreads()
+        splits_cur_rank = tl.load(full_splits_buf + target_rank * num_experts + offs, mask=expert_mask, other=0,
+                                  volatile=True)
+        total_topk_token_cur_rank = tl.sum(splits_cur_rank)
+        tl.store(num_input_tokens_per_rank + target_rank, total_topk_token_cur_rank // topk)
+        __syncthreads()
+
+    # split_size (atomic) and recv_buf_offset (raw counts) are fully written across all pids
+    barrier_on_this_grid(grid_sync_counter, False)
+
+    # phase 3: per ep_rank, exclusive prefix sum over [experts_per_rank * world_size];
+    #          num_recv_tokens_per_rank[ep_rank] = total.
+    for ep_rank in range(pid, world_size, num_pid):
+        splits_cur = tl.load(recv_buf_offset_per_expert + ep_rank * num_experts + offs, mask=expert_mask, other=0,
+                             volatile=True)
+        recv_tokens = tl.sum(splits_cur)
+        cumsum_exclude = tl.cumsum(splits_cur) - splits_cur
+        tl.store(recv_buf_offset_per_expert + ep_rank * num_experts + offs, cumsum_exclude, mask=expert_mask)
+        tl.store(num_recv_tokens_per_rank + ep_rank, recv_tokens)
+    __syncthreads()
+
+
+@triton.jit
+def _element_at(x: tl.tensor, idx) -> tl.tensor:
+    return tl.sum(tl.where(tl.arange(0, x.numel) == idx, x, 0))
+
+
+@triton.jit
+def kernel_build_gemm_tiling(
+    split_size_ptr,  # int32 [E]: per-local-expert token counts
+    split_size_cum_ptr,  # int32 [num_tiles] (out): row_begin of each m-tile's expert
+    expert_ids_ptr,  # int32 [num_tiles] (out): local expert id of each m-tile
+    tile_num_ptr,  # int32 [num_tiles] (out): #m-tiles of each m-tile's expert
+    tile_num_cum_ptr,  # int32 [num_tiles] (out): inclusive cumulative #m-tiles
+    num_tiles_total_ptr,  # int32 [1] (out)
+    E: tl.constexpr,
+    E_PAD: tl.constexpr,  # power-of-two >= E
+    BLOCK_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    """Device port of NVIDIA ``build_block_row_idx_info_kernel`` (``nvidia/group_gemm.py``).
+
+    Expands per-expert token counts into the per-m-tile grouped-GEMM metadata consumed by
+    ``tile_kernel_moe_grouped_gemm_nk_const`` -- the device equivalent of ``_build_gemm_tiling``.
+    """
+    sm_id = tl.program_id(0)
+    idx = tl.arange(0, E_PAD)
+    mask = idx < E
+    row_splits = tl.load(split_size_ptr + idx, mask=mask, other=0)
+    row_cumsums = tl.cumsum(row_splits, axis=0)
+    row_offs = row_cumsums - row_splits
+    tiles_splits = tl.cdiv(row_splits, BLOCK_SIZE_M)
+    tiles_cumsum = tl.cumsum(tiles_splits, axis=0)
+    num_tiles_total = tl.sum(tiles_splits, axis=0)
+
+    if sm_id == 0:
+        tl.store(num_tiles_total_ptr, num_tiles_total)
+
+    for pid in range(sm_id, num_tiles_total, NUM_SMS):
+        if pid < num_tiles_total:
+            expert_idx = tl.argmax((pid < tiles_cumsum).to(tl.int1), axis=0, tie_break_left=True)
+            if expert_idx == 0:
+                row_offset = 0
+                tile_split = _element_at(tiles_splits, 0)
+                tile_cumsum = tile_split
+            else:
+                row_offset = _element_at(row_offs, expert_idx)
+                tile_split = _element_at(tiles_splits, expert_idx)
+                tile_cumsum = _element_at(tiles_cumsum, expert_idx)
+            tl.store(expert_ids_ptr + pid, expert_idx)
+            tl.store(split_size_cum_ptr + pid, row_offset)
+            tl.store(tile_num_ptr + pid, tile_split)
+            tl.store(tile_num_cum_ptr + pid, tile_cumsum)
+
+
+def _build_gemm_tiling_device(split_size: torch.Tensor, block_m: int, epr: int, device, M_local: int, num_sms: int = 64):
+    """Device-kernel version of ``_build_gemm_tiling`` (same dict layout)."""
+    # An expert contributes at most cdiv(tokens, block_m) tiles; the +epr bound covers
+    # the partial tile of every expert, so M_grid is a safe upper bound on total tiles.
+    M_grid = max((M_local + block_m - 1) // block_m + epr, 1)
+    expert_ids = torch.zeros([M_grid], dtype=torch.int32, device=device)
+    split_size_cum = torch.zeros([M_grid], dtype=torch.int32, device=device)
+    tile_num = torch.zeros([M_grid], dtype=torch.int32, device=device)
+    tile_num_cum = torch.zeros([M_grid], dtype=torch.int32, device=device)
+    total_tiles = torch.zeros([1], dtype=torch.int32, device=device)
+    E_PAD = max(1 << (epr - 1).bit_length(), 1)  # power-of-two >= epr
+    num_sms = min(num_sms, torch.cuda.get_device_properties(device).multi_processor_count)
+    kernel_build_gemm_tiling[(num_sms, )](
+        split_size,
+        split_size_cum,
+        expert_ids,
+        tile_num,
+        tile_num_cum,
+        total_tiles,
+        epr,
+        E_PAD,
+        block_m,
+        num_sms,
+    )
+    return dict(
+        block_m=block_m,
+        expert_ids=expert_ids,
+        split_size_cum=split_size_cum,
+        tile_num=tile_num,
+        tile_num_cum=tile_num_cum,
+        total_tiles=total_tiles,
+    )
+
+
+def _build_dispatch_metadata_device(ctx: "EpA2AFusedContext", topk_indices: torch.Tensor, block_m: int,
+                                    num_sms: int = 64):
+    """Device-kernel version of ``_build_dispatch_metadata`` (same meta keys).
+
+    Replaces the host ``bincount`` + ``all_gather_into_tensor`` + recv-offset / tiling torch
+    ops with on-device kernels: only one device->host sync remains (reading ``M_local``).
+    """
+    device = topk_indices.device
+    ws = ctx.world_size
+    epr = ctx.experts_per_rank
+    num_experts = ctx.num_tot_experts
+
+    # Validate at this public-boundary entry (preprocess feeds user routing here): fail early and
+    # clearly, consistently with the host path. Without it the device bincount would silently *skip*
+    # out-of-range ids (the lower-bound guard), yielding a descriptor based on filtered routing.
+    assert bool(((topk_indices >= 0) & (topk_indices < num_experts)).all()), \
+        "topk_indices out of range [0, num_tot_experts); drop-token / invalid ids are not supported"
+
+    # local_splits[e] via device bincount into the symmetric all-gather source buffer
+    ctx.local_splits_buf.zero_()
+    bincount(topk_indices.reshape(-1).contiguous(), num_experts, output=ctx.local_splits_buf)
+
+    recv_buf_offset = torch.zeros((ws, epr, ws), dtype=torch.int32, device=device)
+    num_input_tokens_per_rank = torch.zeros((ws, ), dtype=torch.int32, device=device)
+    num_recv_tokens_per_rank = torch.zeros((ws, ), dtype=torch.int32, device=device)
+    split_size = torch.zeros((epr, ), dtype=torch.int32, device=device)  # zeroed: atomic_add target
+
+    # Stays on-stream: cross-rank sync is done entirely inside the kernel (grid barrier ->
+    # barrier_all_block -> grid barrier), so NO host ep_barrier is needed here -- matching the
+    # validated `get_ag_splits_and_recv_offset_for_dispatch_intra_node` (ep_a2a_intra_node.py),
+    # which uses zero host barriers. ``barrier_all_block`` provides remote-op quiescence, so a
+    # stale ``splits_signal_buf`` (SET=1 from a prior call) is harmless and needs no reset; it is
+    # zeroed once at allocation. Only the grid-barrier counter must be reset per launch.
+    ctx.meta_grid_sync.zero_()
+
+    BLOCK_SIZE = max(1 << (num_experts - 1).bit_length(), 1)  # power-of-two >= num_experts
+    kernel_build_fused_dispatch_metadata[(ws, )](
+        ctx.local_splits_buf,
+        ctx.full_splits_buf,
+        ctx.splits_signal_buf,
+        recv_buf_offset,
+        num_input_tokens_per_rank,
+        num_recv_tokens_per_rank,
+        split_size,
+        ctx.meta_grid_sync,
+        epr,
+        ctx.topk,
+        BLOCK_SIZE,
+        num_warps=8,
+    )
+
+    M_local = int(num_recv_tokens_per_rank[ctx.rank].item())
+    meta = dict(
+        # clone: ctx.local_splits_buf is shared/overwritten by the next preprocess, so a
+        # descriptor must own a stable copy (dispatch reads local_splits for signal decisions).
+        local_splits=ctx.local_splits_buf.clone(),
+        recv_buf_offset=recv_buf_offset,
+        num_input_tokens_per_rank=num_input_tokens_per_rank,
+        num_recv_tokens_per_rank=num_recv_tokens_per_rank,
+        M_local=M_local,
+        split_size=split_size,
+        metadata_backend="device",
+    )
+    meta.update(_build_gemm_tiling_device(split_size, block_m, epr, device, M_local, num_sms=num_sms))
     return meta
 
 
@@ -568,6 +843,7 @@ def fused_dispatch_token_moe_grouped_gemm(
     gemm_weight: torch.Tensor,  # [experts_per_rank, hidden, N]
     *,  # keyword-only below: avoids any silent positional misbind of the new `meta` arg
     meta: Optional[dict] = None,  # precomputed layout metadata (e.g. from a layer.preprocess); built if None
+    use_device_metadata: bool = True,  # build meta with device kernels (host torch fallback if False)
     num_sms: int = 64,
     num_dispatch_tasks: int = 20,
     BLOCK_SIZE_M: int = 128,
@@ -582,6 +858,12 @@ def fused_dispatch_token_moe_grouped_gemm(
 
     ``meta`` carries the layout (recv offsets, scatter idx, per-rank token
     counts) needed by a subsequent combine.
+
+    Contract: ``topk_indices`` must be in ``[0, num_tot_experts)`` on **every** rank
+    (drop-token / negative sentinels are unsupported). The range check is per-rank
+    local, so passing invalid routing on only *some* ranks is undefined behavior and
+    may hang at the next cross-rank step rather than failing cleanly — callers must
+    guarantee valid routing on all ranks.
     """
     assert input.is_contiguous() and input.dtype == ctx.dtype
     assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk and topk_indices.is_contiguous()
@@ -590,12 +872,18 @@ def fused_dispatch_token_moe_grouped_gemm(
     assert hidden == ctx.hidden and num_tokens <= ctx.max_tokens
     G, K, N = gemm_weight.shape
     assert G == ctx.experts_per_rank and K == ctx.hidden
-    # Every (token, slot) must map to a real expert in [0, num_tot_experts).
+    # Validate the routing the dispatch kernel will actually scatter on. This is the safety boundary
+    # for the scatter pointer arithmetic, so it always runs on the *current* topk_indices: a precomputed
+    # meta only proves some indices were validated at build time, not that these are them / unmutated.
+    # Per-rank local: callers must pass in-range routing on every rank (see docstring).
     assert bool(((topk_indices >= 0) & (topk_indices < ctx.num_tot_experts)).all()), \
         "topk_indices out of range [0, num_tot_experts)"
 
     if meta is None:
-        meta = _build_dispatch_metadata(ctx, topk_indices, BLOCK_SIZE_M)
+        if use_device_metadata:
+            meta = _build_dispatch_metadata_device(ctx, topk_indices, BLOCK_SIZE_M, num_sms=num_sms)
+        else:
+            meta = _build_dispatch_metadata(ctx, topk_indices, BLOCK_SIZE_M)
     else:
         assert meta.get("block_m") == BLOCK_SIZE_M, \
             "precomputed meta was built with a different BLOCK_SIZE_M than this launch"
@@ -855,6 +1143,7 @@ def fused_group_gemm_combine_token(
     meta: dict,  # layout descriptor returned by fused_dispatch_token_moe_grouped_gemm
     topk_indices: torch.Tensor,  # [num_tokens, topk] int32 (same as dispatch)
     topk_weights: Optional[torch.Tensor] = None,  # [num_tokens, topk] fp32 routing weights
+    use_device_metadata: Optional[bool] = None,  # None -> follow meta["metadata_backend"]; else override
     num_sms: int = 64,
     BLOCK_SIZE_M: int = 128,
     BLOCK_SIZE_N: int = 128,
@@ -889,7 +1178,15 @@ def fused_group_gemm_combine_token(
         topk_weights = torch.empty((1, ), dtype=torch.float32, device=device)
 
     token_dst_scatter_idx = meta["token_dst_scatter_idx"]
-    tiling = _build_gemm_tiling(meta["split_size"], BLOCK_SIZE_M, device)
+    # When unset, follow how the dispatch metadata was built so combine stays consistent
+    # with dispatch (avoids silently running device tiling after a host-metadata dispatch).
+    if use_device_metadata is None:
+        use_device_metadata = meta.get("metadata_backend", "device") == "device"
+    if use_device_metadata:
+        tiling = _build_gemm_tiling_device(meta["split_size"], BLOCK_SIZE_M, ctx.experts_per_rank, device,
+                                           meta["M_local"], num_sms=num_sms)
+    else:
+        tiling = _build_gemm_tiling(meta["split_size"], BLOCK_SIZE_M, device)
 
     if combine_output is None:
         combine_output = torch.empty([num_tokens, N2], dtype=ctx.dtype, device=device)
