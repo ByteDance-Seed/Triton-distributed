@@ -263,11 +263,22 @@ def tile_kernel_moe_grouped_gemm_nk_const(
 
     local_pid_m, pid_n = tl.swizzle2d(local_pid_m, pid_n, tile_num, num_block_n, GROUP_SIZE_M)
 
-    # Wait until every source rank has delivered this expert's tokens. Use mori's
-    # signal_wait_until (pairs with the producer's signal_op): on AMD a plain `ld`
-    # with agent scope may never observe a *peer* rank's cross-device signal, and
-    # signal_wait_until's acquire also makes the peer-written tokens visible to the
-    # following tl.load -- matching the validated pattern in the other AMD kernels.
+    # Wait until every source rank has delivered this expert's tokens, then issue a
+    # system-scope fence before reading the peer-written rows.
+    #
+    # IMPORTANT: mori's signal_wait_until is a *relaxed* system wait
+    # (ShmemTypeWaitUntilEquals -> while(AtomicLoadRelaxedSystem(addr) != val){}); it
+    # does NOT carry acquire semantics, so it alone does not make the peer-written
+    # `output_buf` rows visible to the following tl.load. NVIDIA uses ld_acquire here;
+    # the mori port dropped the acquire, so we restore consumer-side visibility with an
+    # explicit system fence after the wait. __syncthreads() only orders within the block
+    # and does not invalidate system-scope (peer-GPU) caches.
+    #
+    # We use libshmem_device.fence() (= __threadfence_system, a seq_cst system fence that
+    # subsumes acquire) on purpose: the dedicated language_extra.fence(scope="system")
+    # lowers to `fence syncscope("system") ...`, an AMDGPU-unsupported scope string that
+    # fails to compile on gfx942 ("Unsupported atomic synchronization scope"). The HIP
+    # __threadfence_system builtin lowers to the correct system-scope fence.
     if NEED_WAIT:
         if thread_idx < world_size:
             libshmem_device.signal_wait_until(
@@ -276,6 +287,7 @@ def tile_kernel_moe_grouped_gemm_nk_const(
                 1,
             )
         __syncthreads()
+        libshmem_device.fence()
 
     row_remain = split_size - local_pid_m * BLOCK_SIZE_M
 
@@ -1161,6 +1173,11 @@ def fused_group_gemm_combine_token(
     assert N2 == ctx.hidden, "combine maps expert outputs back to `hidden`; expected N2 == ctx.hidden"
     assert gemm_weight.dtype == ctx.dtype, "expert weights must match the activation dtype (ctx.dtype)"
     assert topk_indices.dtype == torch.int32 and topk_indices.shape[1] == ctx.topk and topk_indices.is_contiguous()
+    # Validate the routing combine will gather on: the kernel computes expert_rank = expert_idx // epr
+    # and reads peer buffers via symm_at(expert_rank), so an out-of-range / negative id would index an
+    # invalid peer rank or address. Mirror the dispatch boundary check; per-rank local (see dispatch docstring).
+    assert bool(((topk_indices >= 0) & (topk_indices < ctx.num_tot_experts)).all()), \
+        "topk_indices out of range [0, num_tot_experts)"
     device = gemm_input.device
     # Global capacity check (see fused_dispatch_token_moe_grouped_gemm): raise on every rank together.
     max_recv = int(meta["num_recv_tokens_per_rank"].max().item())
@@ -1191,7 +1208,12 @@ def fused_group_gemm_combine_token(
     if combine_output is None:
         combine_output = torch.empty([num_tokens, N2], dtype=ctx.dtype, device=device)
     else:
+        # The gather kernel writes rows linearly (st(output_buf + token_idx*hidden + i), no strides),
+        # so a non-contiguous / wrong-dtype / wrong-device buffer would be written with the wrong layout.
         assert combine_output.shape == (num_tokens, N2)
+        assert combine_output.is_contiguous(), "combine_output must be contiguous"
+        assert combine_output.dtype == ctx.dtype, "combine_output dtype must match ctx.dtype"
+        assert combine_output.device == device, "combine_output must be on the same device as gemm_input"
 
     ctx.combine_grid_sync.zero_()
     ctx.ep_barrier()
