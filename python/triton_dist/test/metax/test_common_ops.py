@@ -1,10 +1,10 @@
 import torch
-import triton
+import triton_dist
 import triton.language as tl
-from triton_dist.language.extra.language_extra import tid
+from triton_dist.language.extra.maca.language_extra import tid
 
 
-@triton.jit
+@triton_dist.jit
 def tid_store(ptr):
     tid_ = tid(0)
     st_ptr = ptr + tl.arange(0, 64)

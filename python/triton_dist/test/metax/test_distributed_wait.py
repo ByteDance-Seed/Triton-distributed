@@ -1,5 +1,6 @@
 import torch
 import triton
+import triton_dist
 import triton.language as tl
 import triton_dist.language as dl
 
@@ -37,7 +38,7 @@ run: python {os.path.abspath(__file__)} --case XXX
 """)
 
 
-@triton.jit
+@triton_dist.jit
 def kernel_consumer_gemm(
     # Pointers to matrices
     a_ptr,
@@ -173,7 +174,7 @@ def test_lower_wait(args):
     C = torch.empty([M, N_per_rank], dtype=dtype, device=device)
 
     compiled = consumer_gemm(ag_A, B, C, rank, num_ranks, barrier_tensor)
-    print(compiled.asm["ptx"])
+    print(compiled.asm["llir"])
 
     os.environ["TRITON_ALWAYS_COMPILE"] = "0"
     os.environ["MLIR_ENABLE_DUMP"] = "0"
@@ -293,7 +294,7 @@ def _matmul_launch_metadata(grid, kernel, args):
     return ret
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata)
+@triton_dist.jit(launch_metadata=_matmul_launch_metadata)
 def kernel_consumer_gemm_persistent(
     a_ptr,
     b_ptr,

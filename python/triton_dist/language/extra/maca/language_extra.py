@@ -25,33 +25,32 @@
 
 import triton.language as tl
 from triton.language import core
-# from triton.language.extra.maca.libdevice import ffs
 
 
 @core.extern
-def __syncthreads(_builder=None):
-    return tl.debug_barrier(_builder=_builder)
+def __syncthreads(_semantic=None):
+    return tl.debug_barrier(_semantic=_semantic)
 
 
 @core.extern
-def __tid__(axis: core.constexpr, _builder=None):
+def __tid__(axis: core.constexpr, _semantic=None):
     return tl.inline_intrinsic_elementwise(
         intrinsic=f"llvm.mxc.thread.id.{axis.value}",
         args=[],
         dtype=tl.int32,
         is_pure=True,
-        _builder=_builder,
+        _semantic=_semantic,
     )
 
 
 @core.extern
-def tid(axis: core.constexpr, _builder=None):
+def tid(axis: core.constexpr, _semantic=None):
     if axis == 0:
-        return __tid__(core.constexpr("x"), _builder=_builder)
+        return __tid__(core.constexpr("x"), _semantic=_semantic)
     elif axis == 1:
-        return __tid__(core.constexpr("y"), _builder=_builder)
+        return __tid__(core.constexpr("y"), _semantic=_semantic)
     elif axis == 2:
-        return __tid__(core.constexpr("z"), _builder=_builder)
+        return __tid__(core.constexpr("z"), _semantic=_semantic)
     else:
         tl.static_assert(False, "axis must be 0, 1 or 2")
 

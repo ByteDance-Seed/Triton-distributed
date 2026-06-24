@@ -93,7 +93,7 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
                 mori_shmem.shmem_module_init(kernel_module)
     elif is_maca():
         if "mxshmem" in kernel.asm['ttir']:
-            import pymxshmem
+            import triton.pymxshmem as pymxshmem
             pymxshmem.mxshmemx_mcmodule_init(kernel_module)
     else:
         raise ValueError("Unsupported device type for shmem kernel module init hook.")

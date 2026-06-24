@@ -1,15 +1,14 @@
+#ifdef USE_MACA
 #include "TritonDistributed/Conversion/TritonDistributedToLLVM/Passes.h"
 #include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/GPUToMACA/GPUToMACAPass.h"
-#include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/MACADialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
@@ -53,11 +52,11 @@ struct ConvertMETAXDistributedToLLVM
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
-    TargetInfo targetInfo(computeCapability);
+    TargetInfo targetInfo(computeCapability, 0);
 
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
-    TritonGPUToLLVMTypeConverter typeConverter(context, option);
+    TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
 
     RewritePatternSet patterns(context);
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
@@ -74,8 +73,8 @@ struct ConvertMETAXDistributedToLLVM
                                                benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns,
                                                 targetInfo, benefit);
-    mlir::triton::populateMemoryOpToLLVMPattern(typeConverter, targetInfo,
-                                                patterns, benefit);
+    mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
+                                                 patterns, benefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
                                                    patterns, benefit);
     mlir::triton::METAX::populateDistributedOpToLLVMPatterns(
@@ -98,3 +97,4 @@ createConvertMETAXDistributedToLLVMPass(int32_t computeCapability) {
 
 } // namespace triton
 } // namespace mlir
+#endif

@@ -135,3 +135,48 @@ def softlink_apply_patches():
             base_dir = Path(__file__).parent.parent
             # make origin_file a softlink to pach_file
             create_symlink_rel(Path(patch_file), Path(origin_file), base_dir)
+
+
+# ------ MACA extension ------
+def get_pymaca_project():
+    pymaca_dir = os.path.join(get_base_dir(), "3rdparty", "pymaca")
+    return pymaca_dir
+
+
+def get_pymxshmem_project():
+    return os.path.join(get_base_dir(), "shmem", "mxshmem_bind", "pymxshmem")
+
+
+def get_pymaca_cmake_dir(project_name):
+    plat_name = sysconfig.get_platform()
+    python_version = sysconfig.get_python_version()
+    dir_name = f"cmake.{plat_name}-{sys.implementation.name}-{python_version}"
+    cmake_dir = Path(get_base_dir()) / "python" / "build" / dir_name / project_name
+    cmake_dir.mkdir(parents=True, exist_ok=True)
+    return cmake_dir
+
+
+def get_pymxshmem_cmake_dir(project_name):
+    plat_name = sysconfig.get_platform()
+    python_version = sysconfig.get_python_version()
+    dir_name = f"cmake.{plat_name}-{sys.implementation.name}-{python_version}"
+    cmake_dir = Path(get_base_dir()) / "python" / "build" / dir_name / project_name
+    cmake_dir.mkdir(parents=True, exist_ok=True)
+    return cmake_dir
+
+
+def maca_patch_jit(triton_jit_path):
+    if not os.path.exists(triton_jit_path):
+        print(f"Can't find {triton_jit_path}")
+    with open(triton_jit_path, "r") as f:
+        content = f.read()
+    # replace jit.is_dist with always return True
+    old_code = "def is_dist(self):\n        return False\n"
+    new_code = "def is_dist(self):\n        return True\n"
+    if old_code in content:
+        content = content.replace(old_code, new_code)
+        with open(triton_jit_path, "w") as f:
+            f.write(content)
+        print(f"Patched {triton_jit_path}: is_dist always returns True")
+    else:
+        print(f"Can't find is_dist function in {triton_jit_path}")

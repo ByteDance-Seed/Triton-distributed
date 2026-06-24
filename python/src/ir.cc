@@ -38,7 +38,12 @@
 
 #include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
 #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
+#ifdef USE_MACA
+// for directory compatible
+#include "third_party/proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
+#else
 #include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#endif
 
 namespace {
 

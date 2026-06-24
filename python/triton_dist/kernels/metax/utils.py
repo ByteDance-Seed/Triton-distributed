@@ -14,7 +14,6 @@ class MxSmiUtil:
         device_count = len(lines)
         matrix = [[-1 for _ in range(device_count)] for _ in range(device_count)]
 
-        # 解析每行数据
         for i, line in enumerate(lines):
             parts = line.split()
             for j in range(1, len(parts)):

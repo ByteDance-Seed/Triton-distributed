@@ -1,8 +1,9 @@
+#ifdef USE_MACA
 #include "TritonDistributed/Conversion/TritonDistributedToLLVM/TritonDistributedToLLVMPass.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/LLVMIR/MACADialect.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Types.h"
@@ -150,12 +151,14 @@ struct WaitOpConversion
     } else if (op.getSemantic() == triton::MemSemantic::ACQUIRE_RELEASE) {
       semantic = LLVM::AtomicOrdering::acq_rel;
     }
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto barrier_ptr = adaptor.getBarrierPtr();
     auto num_barriers = adaptor.getNumBarriers();
     auto wait_val = adaptor.getWaitValue();
-    auto tid = tid_val();
-    Value warpSize = i32_val(64);
-    Value laneId = urem(tid, warpSize);
+    // auto tid = tid_val();
+    auto tid = rewriter.create<MACA::ThreadIdXOp>(loc, i32_ty);
+    Value warpSize = b.i32_val(64);
+    Value laneId = b.urem(tid, warpSize);
 
     auto pred = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
                                                laneId, num_barriers);
@@ -166,10 +169,10 @@ struct WaitOpConversion
     rewriter.setInsertionPointToStart(ifOp.thenBlock());
     // calculate offset of each barrier.
     auto addr =
-        gep(ptr_ty(rewriter.getContext(), 1), intType, barrier_ptr, laneId);
+        b.gep(ptr_ty(rewriter.getContext(), 1), intType, barrier_ptr, laneId);
     // load init val for while op.
-    Value init = load(intType, addr, barrier_width, false, false, false,
-                      semantic, scope);
+    Value init = b.load(intType, addr, barrier_width, false, false, false,
+                        false, semantic, scope);
 
     // create while
     auto whileOp =
@@ -202,14 +205,14 @@ struct WaitOpConversion
     }
     rewriter.setInsertionPointToStart(afterBlock);
     // update argument
-    Value ret = load(intType, addr, barrier_width, false, false, false,
-                     semantic, scope);
+    Value ret = b.load(intType, addr, barrier_width, false, false, false, false,
+                       semantic, scope);
     rewriter.create<scf::YieldOp>(loc, ValueRange{ret});
 
     // barrier
     rewriter.setInsertionPointAfter(ifOp);
     StringRef funcName("llvm.mxc.barrier.inst");
-    Value voidVal = undef(void_ty(op.getContext()));
+    Value voidVal = b.undef(void_ty(op.getContext()));
     ValueRange voidVals = {};
     mlir::LLVM::createBuiltinFunc<triton::distributed::WaitOp>(
         rewriter, loc, op, funcName, getVoidType(), voidVals);
@@ -286,21 +289,32 @@ public:
   matchAndRewrite(triton::distributed::ExternCallOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op->getLoc();
-
-    if (op->getNumResults() > 1) {
-      llvm::errs() << "ExternCallConversion does not support multi outs.";
-      return failure();
-    }
+    TritonLLVMOpBuilder b = TritonLLVMOpBuilder(loc, rewriter);
 
     LLVM::LLVMVoidType voidTy = void_ty(op->getContext());
     auto newOperands = adaptor.getOperands();
-    Type retType =
-        op->getNumResults() == 0
-            ? voidTy
-            : this->getTypeConverter()->convertType(op->getResult(0).getType());
     StringRef funcName = op.getSymbol();
     StringRef libname = op.getLibname();
     StringRef libpath = op.getLibpath();
+
+    // Handle multi-return values by packing them into a struct type
+    Type retType;
+    bool useStructForRet = op->getNumResults() > 1;
+
+    if (op->getNumResults() == 0) {
+      retType = voidTy;
+    } else if (op->getNumResults() == 1) {
+      retType =
+          this->getTypeConverter()->convertType(op->getResult(0).getType());
+    } else {
+      // Pack multiple return values into a struct
+      SmallVector<Type> retTypes;
+      for (auto result : op->getResults()) {
+        retTypes.push_back(
+            this->getTypeConverter()->convertType(result.getType()));
+      }
+      retType = LLVM::LLVMStructType::getLiteral(op->getContext(), retTypes);
+    }
 
     Operation *externCallOp;
     if (useMXSHMEMLibrary(op.getLibname())) {
@@ -315,8 +329,19 @@ public:
 
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
-    } else {
+    } else if (op->getNumResults() == 1) {
       rewriter.replaceOp(op, externCallOp->getResult(0));
+    } else {
+      // For multi-return, unpack the struct and replace each result
+      Value structVal = externCallOp->getResult(0);
+      SmallVector<Value> unpackedValues;
+      for (unsigned i = 0; i < op->getNumResults(); ++i) {
+        Value extracted = b.extract_val(
+            this->getTypeConverter()->convertType(op->getResult(i).getType()),
+            structVal, i);
+        unpackedValues.push_back(extracted);
+      }
+      rewriter.replaceOp(op, unpackedValues);
     }
 
     return success();
@@ -331,6 +356,8 @@ void mlir::triton::METAX::populateDistributedOpToLLVMPatterns(
     std::string MXSHMEMLibname, std::string MXSHMEMLibpath) {
   patterns.add<WaitOpConversion, ConsumeTokenOpConversion>(typeConverter,
                                                            benefit);
+
+  // convert to mxshmem device func call
   registerGenericOpToMXSHMEMDevice<triton::distributed::GetRankOp>(
       patterns, typeConverter, benefit, "mxshmem_my_pe", MXSHMEMLibname,
       MXSHMEMLibpath);
@@ -344,3 +371,4 @@ void mlir::triton::METAX::populateDistributedOpToLLVMPatterns(
                                    MXSHMEMLibpath);
   patterns.add<ExternCallConversion>(typeConverter, benefit);
 }
+#endif

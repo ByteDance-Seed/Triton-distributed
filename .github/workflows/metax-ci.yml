@@ -1,0 +1,76 @@
+name: Metax GPU Tests
+
+on:
+  push:
+    branches: [v3.6]
+  pull_request:
+    branches: [v3.6]
+  workflow_dispatch:
+
+jobs:
+  metax-smoke-test:
+    name: Build and Test on Metax GPUs
+    runs-on: "metax-runner"
+    timeout-minutes: 60
+    env:
+      PYTHON: "python3"
+      MAX_JOBS: "32"
+      LLVM_SYSPATH: ${{ vars.METAX_LLVM_SYSPATH || '/opt/maca/llvm' }}
+
+    steps:
+      - name: Checkout v3.6
+        uses: actions/checkout@v4
+        with:
+          ref: v3.6
+          submodules: 'true'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          apt-get update
+          apt install -y zlib1g-dev git
+
+      - name: Activate conda and remove preinstalled Triton
+        shell: bash
+        run: |
+          if [ -f "${CONDA_PREFIX}/etc/profile.d/conda.sh" ]; then
+            source "${CONDA_PREFIX}/etc/profile.d/conda.sh"
+          elif [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+            source "/opt/conda/etc/profile.d/conda.sh"
+          elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+            source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+          fi
+          conda activate
+          pip uninstall -y triton || true
+
+      - name: Build triton-distributed for Metax
+        shell: bash
+        run: |
+          if [ -f "${CONDA_PREFIX}/etc/profile.d/conda.sh" ]; then
+            source "${CONDA_PREFIX}/etc/profile.d/conda.sh"
+          elif [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+            source "/opt/conda/etc/profile.d/conda.sh"
+          elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+            source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+          fi
+          conda activate
+          if [ ! -x "${LLVM_SYSPATH}/bin/mlir-opt" ]; then
+            echo "LLVM_SYSPATH does not contain bin/mlir-opt: ${LLVM_SYSPATH}"
+            echo "Set repository variable METAX_LLVM_SYSPATH to the LLVM install path configured in the runner pod."
+            exit 1
+          fi
+          export MAX_JOBS=32
+          bash ./scripts/build_metax.sh "${LLVM_SYSPATH}"
+
+      - name: Metax backend smoke test
+        shell: bash
+        run: |
+          if [ -f "${CONDA_PREFIX}/etc/profile.d/conda.sh" ]; then
+            source "${CONDA_PREFIX}/etc/profile.d/conda.sh"
+          elif [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+            source "/opt/conda/etc/profile.d/conda.sh"
+          elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+            source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+          fi
+          conda activate
+          python ./python/triton_dist/test/metax/test_common_ops.py

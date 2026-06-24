@@ -4,9 +4,7 @@
 #include <c10/cuda/CUDAFunctions.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cstdint>
-#include <device/mxshmem_defines.h>
 #include <host_device_common/mxshmem_error.h>
-#include <host_device_common/mxshmem_types.h>
 #include <mxshmem.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
@@ -86,6 +84,7 @@ extern "C" void flush_l2c(cudaStream_t stream);
 MXSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(MXSHMEMI_TYPENAME_P_IMPL_PYBIND)
 #undef MXSHMEMI_TYPENAME_P_IMPL_PYBIND
 
+// Dont call this in main(), avoid call mxshmem_free(ptr) after mxshmem_finalize
 inline torch::Tensor create_tensor(const std::vector<int64_t> &shape,
                                    c10::ScalarType dtype) {
   check_mxshmem_init();
@@ -147,10 +146,10 @@ mxshmem_create_tensor_list(const std::vector<int64_t> &shape,
 
 PYBIND11_MODULE(_pymxshmem, m) {
   m.def("mxshmemx_mcmodule_init", [](intptr_t module) {
-    CHECK_MXSHMEMX(mxshmemx_mcmodule_init((CUmodule)module));
+    CHECK_MXSHMEMX(mxshmemx_cumodule_init((CUmodule)module));
   });
   m.def("mxshmemx_mcmodule_finalize", [](intptr_t module) {
-    CHECK_MXSHMEMX(mxshmemx_mcmodule_finalize((CUmodule)module));
+    CHECK_MXSHMEMX(mxshmemx_cumodule_finalize((CUmodule)module));
   });
   m.def("mxshmem_malloc", [](size_t size) {
     void *ptr = mxshmem_malloc(size);

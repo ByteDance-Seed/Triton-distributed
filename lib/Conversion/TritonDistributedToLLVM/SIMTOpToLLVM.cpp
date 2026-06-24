@@ -40,7 +40,7 @@ using namespace mlir::triton;
 using namespace std::literals;
 
 namespace {
-
+#ifndef USE_MACA
 Value getSharedMemAddress(RewriterBase &rewriter,
                           const SharedMemoryObject &smemObj,
                           const SmallVector<Value> &indices,
@@ -167,13 +167,16 @@ struct SIMTExecRegionPattern
 protected:
   const TargetInfoBase &targetInfo;
 };
+#endif
 
 } // namespace
 
 void mlir::triton::populateSIMTOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfoBase &targetInfo,
     RewritePatternSet &patterns, PatternBenefit benefit) {
+#ifndef USE_MACA
   patterns.add<LoadSharedOpPattern, StoreSharedOpPattern>(typeConverter,
                                                           targetInfo, benefit);
   patterns.add<SIMTExecRegionPattern>(typeConverter, targetInfo, benefit);
+#endif
 }

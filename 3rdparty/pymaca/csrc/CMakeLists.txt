@@ -5,7 +5,9 @@ find_package(
   COMPONENTS Interpreter Development
   REQUIRED)
 find_program(PYTHON_EXECUTABLE NAMES python3 python)
+find_package(pybind11 CONFIG REQUIRED HINTS "${Python3_SITELIB}")
 
+# find MACA_PATH
 if(DEFINED ENV{MACA_PATH})
     set(MACA_PATH $ENV{MACA_PATH})
     message(STATUS "Using maca path from environment")
@@ -35,22 +37,18 @@ message(STATUS "Found MACA_LIBRARY_DIR: ${MACA_LIBRARY_DIR}")
 include_directories(${MACA_INCLUDE_DIR})
 include_directories(${MACA_INCLUDE_DIR}/mcr/)
 
+# get pybind11 lib suffix
 execute_process(
-  COMMAND ${PYTHON_EXECUTABLE} "-c"
-          "from __future__ import print_function; import os; import pybind11;
-print(os.path.dirname(pybind11.__file__),end='');"
-  RESULT_VARIABLE _PYTHON_SUCCESS
-  OUTPUT_VARIABLE PYBIND11_DIR)
-message("PYTHON_EXECUTABLE:${PYTHON_EXECUTABLE}")
-if(NOT _PYTHON_SUCCESS MATCHES 0)
-  message("PYBIND11_DIR: ${PYBIND11_DIR}")
-  message(FATAL_ERROR "Pybind11 config Error.")
-endif()
-list(APPEND CMAKE_PREFIX_PATH ${PYBIND11_DIR})
-find_package(pybind11 REQUIRED)
+  COMMAND
+    "${PYTHON_EXECUTABLE}" "-c"
+    "import sys, importlib; s = importlib.import_module('distutils.sysconfig' if sys.version_info < (3, 10) else 'sysconfig'); print(s.get_config_var('EXT_SUFFIX') or s.get_config_var('SO'))"
+  OUTPUT_VARIABLE PYTHON_MODULE_EXTENSION
+  ERROR_VARIABLE PYTHON_MODULE_EXTENSION_ERR
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 file(GLOB LIB_FILES "pybind.cc")
 message(STATUS "lib files: ${LIB_FILES}")
-pybind11_add_module(maca SHARED ${LIB_FILES})
 
+add_library(maca SHARED ${LIB_FILES})
+set_target_properties(maca PROPERTIES PREFIX "" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 target_link_libraries(maca PUBLIC Python3::Module pybind11::headers ${MACA_LIBRARY_DIR}/libmcruntime.so)
