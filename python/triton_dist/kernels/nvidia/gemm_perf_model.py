@@ -120,6 +120,7 @@ def get_tflops_approx(device: torch.dtype, num_ctas: int, num_warps: int, dtype:
 
 
 def get_full_tflops_approx(dtype: torch.dtype, device: Optional[torch.device] = None):
+    device = torch.cuda.current_device() if device is None else device
     prop = torch.cuda.get_device_properties(device)
     return get_tflops_approx(device, prop.multi_processor_count, 4, dtype)
 
