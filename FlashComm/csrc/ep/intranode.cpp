@@ -532,7 +532,9 @@ void combine_preprocess_inplace(
   check_tensor_common(recv_token_count, "recv_token_count", true, torch::kInt32,
                       1);
   check_tensor_shape(recv_token_count, "recv_token_count", {num_ranks});
-  constexpr int32_t kNumWarps = 8;
+  // Must match the launch config of combine_preprocess_inplace_cuda
+  // (kernel_combine_preprocess_inplace) in intranode_cuda.cu.
+  constexpr int32_t kNumWarps = 16;
   constexpr int32_t kElemsPerThread = 32;
   int32_t kVec = 16 / token_size;
   FLASH_CHECK(hidden_size % kVec == 0)

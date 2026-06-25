@@ -176,7 +176,8 @@ private:
   OP(5120, __VA_ARGS__)                                                        \
   OP(6144, __VA_ARGS__)                                                        \
   OP(7168, __VA_ARGS__)                                                        \
-  OP(8192, __VA_ARGS__)
+  OP(8192, __VA_ARGS__)                                                        \
+  OP(12288, __VA_ARGS__)
 
 // Token types: only BFloat16 for now
 #define SUPPORTED_TOKEN_TYPES(OP, ...)                                         \
