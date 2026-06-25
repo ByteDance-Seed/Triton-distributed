@@ -1120,6 +1120,7 @@ def get_packages():
             "triton_dist/mega_triton_kernel",
             "triton_dist/function",
             "triton_dist/function/nvidia",
+            "triton_dist/function/amd",
             "triton_dist/layers",
             "triton_dist/layers/nvidia",
             "triton_dist/layers/amd",

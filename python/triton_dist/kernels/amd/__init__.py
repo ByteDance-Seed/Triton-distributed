@@ -52,3 +52,26 @@ __all__ = [
     "fast_all_to_all",
     "all_to_all_post_process",
 ]
+
+try:
+    from .ep_all2all_fused import (
+        create_ep_a2a_fused_context,
+        fused_dispatch_token_moe_grouped_gemm,
+        fused_group_gemm_combine_token,
+        mega_kernel_dispatch_token_moe_grouped_gemm,
+        mega_kernel_moe_grouped_gemm_combine_token,
+        kernel_build_fused_dispatch_metadata,
+        kernel_build_gemm_tiling,
+    )
+    __all__ += [
+        "create_ep_a2a_fused_context",
+        "fused_dispatch_token_moe_grouped_gemm",
+        "fused_group_gemm_combine_token",
+        "mega_kernel_dispatch_token_moe_grouped_gemm",
+        "mega_kernel_moe_grouped_gemm_combine_token",
+        "kernel_build_fused_dispatch_metadata",
+        "kernel_build_gemm_tiling",
+    ]
+except ImportError as e:
+    import warnings
+    warnings.warn(f"ep_all2all_fused unavailable (mori_shmem not installed): {e}")
