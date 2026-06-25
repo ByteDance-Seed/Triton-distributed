@@ -136,9 +136,7 @@ def get_tensorcore_dtype_support(device_id=0):
         (8, 9): [torch.float16, torch.bfloat16, torch.float32, torch.int8, torch.float8_e4m3fn,
                  torch.float8_e5m2],  # Ada L40S/RTX 40xx
         # Hopper
-        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
-        # Blackwell
-        (10, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
+        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8]
     }
     return DTYPE_MAP.get(cap, [torch.float16, torch.float32])
 
@@ -180,8 +178,6 @@ def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
         return 989 * (2 / dtype.itemsize)
     if device_name == "NVIDIA H20":
         return 148 * (2 / dtype.itemsize)
-    if device_name == "NVIDIA B200":
-        return 2250 * (2 / dtype.itemsize)
 
     logging.warning(
         f"device {device_name} not listed here. calculate tflops by estimation, or you can report it to developers.")
@@ -211,7 +207,6 @@ def get_dram_gbps_by_device_name(device_name: str):
         "NVIDIA H100 SXM": 3958,
         "NVIDIA H100 NVL": 3341,
         "NVIDIA H800": 3350,
-        "NVIDIA B200": 8000,
     }
     return _DRAM_GBPS[device_name]
 
