@@ -1,0 +1,13 @@
+diff --git a/bishengir/include/bishengir/Dialect/HIVM/IR/HIVMOps.td b/bishengir/include/bishengir/Dialect/HIVM/IR/HIVMOps.td
+index 1d99d36..d66089f 100644
+--- a/bishengir/include/bishengir/Dialect/HIVM/IR/HIVMOps.td
++++ b/bishengir/include/bishengir/Dialect/HIVM/IR/HIVMOps.td
+@@ -504,7 +504,7 @@ def CustomOp
+   }];
+ 
+   let arguments = (ins StrAttr:$name, Variadic<AnyType>:$inputs,
+-      Variadic<AnyType>:$outputs, Variadic<AnyType>:$temp_buffers);
++      Variadic<AnyType>:$outputs, Variadic<AnyType>:$temp_buffers, UnitAttr:$no_side_effect);
+ 
+   let results = (outs Variadic<AnyType>:$results);
+ 

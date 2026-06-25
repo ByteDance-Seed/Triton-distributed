@@ -30,10 +30,19 @@
 
 namespace py = pybind11;
 
+#ifndef TRITON_USE_ASCEND
 void init_triton_distributed_passes(pybind11::module &&m);
+#else
+void init_triton_distributed_ascend_passes(pybind11::module &&m);
+#endif
+
 void init_triton_distributed_ir(py::module &&m);
 
 void init_triton_distributed(py::module &&m) {
+#ifndef TRITON_USE_ASCEND
   init_triton_distributed_passes(m.def_submodule("passes"));
+#else
+  init_triton_distributed_ascend_passes(m.def_submodule("ascend_passes"));
+#endif
   init_triton_distributed_ir(m.def_submodule("ir"));
 }
