@@ -10,7 +10,7 @@ export OMPI_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}/install/ompi"
 
 pushd ${ROCSHMEM_INSTALL_DIR}/lib
 
-export BITCODE_LIB_ARCH=gfx942
+export BITCODE_LIB_ARCH=${BITCODE_LIB_ARCH:-gfx942}
 CLANG="${ROCM_CXX:-${ROCM_PATH}/lib/llvm/bin/clang++}"
 CLANG_FLAGS=(
     -x hip
