@@ -110,6 +110,7 @@ class TP_MLP:
             local_world_size=self.world_size,
             output_dtype=self.dtype,
             rs_stream=ag_intranode_stream,
+            tp_group=self.group,
         )
         nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
         torch.cuda.synchronize()

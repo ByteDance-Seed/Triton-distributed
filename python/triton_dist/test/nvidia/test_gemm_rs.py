@@ -109,7 +109,7 @@ class GemmRS(torch.nn.Module):
         self.rs_stream: torch.cuda.Stream = torch.cuda.Stream(priority=-1)
 
         self.ctx = create_gemm_rs_context(max_M, N, self.rank, self.world_size, self.local_world_size, output_dtype,
-                                          self.rs_stream, reduce_st)
+                                          self.rs_stream, reduce_st, tp_group=tp_group)
         self.reduce_st = reduce_st
         self.fuse_scatter = fuse_scatter
         self.persistent = persistent
