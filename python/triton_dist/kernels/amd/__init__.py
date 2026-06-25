@@ -38,6 +38,21 @@ except ImportError as e:
     import warnings
     warnings.warn(f"allgather_gemm/gemm_reduce_scatter unavailable (pyrocshmem not installed): {e}")
 
+__all__ = [
+    "ag_gemm_intra_node",
+    "create_ag_gemm_intra_node_context",
+    "gemm_rs_intra_node",
+    "create_gemm_rs_intra_node_context",
+    "kernel_dispatch_token_intra_node",
+    "kernel_skipped_token_local_dispatch_intra_node",
+    "kernel_skipped_token_inplace_local_combine_intra_node",
+    "kernel_combine_token_intra_node",
+    "get_ag_splits_and_recv_offset_for_dispatch_intra_node",
+    "create_all_to_all_context",
+    "fast_all_to_all",
+    "all_to_all_post_process",
+]
+
 try:
     from .ep_all2all_fused import (
         create_ep_a2a_fused_context,
@@ -48,28 +63,15 @@ try:
         kernel_build_fused_dispatch_metadata,
         kernel_build_gemm_tiling,
     )
+    __all__ += [
+        "create_ep_a2a_fused_context",
+        "fused_dispatch_token_moe_grouped_gemm",
+        "fused_group_gemm_combine_token",
+        "mega_kernel_dispatch_token_moe_grouped_gemm",
+        "mega_kernel_moe_grouped_gemm_combine_token",
+        "kernel_build_fused_dispatch_metadata",
+        "kernel_build_gemm_tiling",
+    ]
 except ImportError as e:
     import warnings
     warnings.warn(f"ep_all2all_fused unavailable (mori_shmem not installed): {e}")
-
-__all__ = [
-    "ag_gemm_intra_node",
-    "create_ag_gemm_intra_node_context",
-    "gemm_rs_intra_node",
-    "create_gemm_rs_intra_node_context",
-    "create_ep_a2a_fused_context",
-    "fused_dispatch_token_moe_grouped_gemm",
-    "fused_group_gemm_combine_token",
-    "mega_kernel_dispatch_token_moe_grouped_gemm",
-    "mega_kernel_moe_grouped_gemm_combine_token",
-    "kernel_build_fused_dispatch_metadata",
-    "kernel_build_gemm_tiling",
-    "kernel_dispatch_token_intra_node",
-    "kernel_skipped_token_local_dispatch_intra_node",
-    "kernel_skipped_token_inplace_local_combine_intra_node",
-    "kernel_combine_token_intra_node",
-    "get_ag_splits_and_recv_offset_for_dispatch_intra_node",
-    "create_all_to_all_context",
-    "fast_all_to_all",
-    "all_to_all_post_process",
-]
