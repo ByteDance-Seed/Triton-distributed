@@ -86,6 +86,14 @@ def is_maca():
         return False
 
 
+def is_ascend():
+    """Checks if 'npu-smi' is available on the system's PATH."""
+    if shutil.which("npu-smi"):
+        return True
+    else:
+        return False
+
+
 def get_shmem_backend():
     if is_cuda():
         return 'nvshmem'
@@ -142,6 +150,8 @@ elif is_hip():
                               "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
 elif is_maca():
     import triton.pymaca.maca as maca
+elif is_ascend():
+    pass
 else:
     raise Exception("either CUDA or HIP platform is supported")
 
@@ -1020,23 +1030,23 @@ requirement upfront is important.
 
 Usage:
     from ditron_kernel.utils.lazy_allocator import LazyAllocator, LazyTensor
-    
+
     # Create allocator with custom tensor creation function
     allocator = LazyAllocator(
         create_tensor_fn=nvshmem_create_tensor,
         lazy=True
     )
-    
+
     # Create lazy tensors (no actual allocation yet)
     buf1 = allocator.create_tensor("buffer1", [1024, 256], torch.bfloat16)
     buf2 = allocator.create_tensor("buffer2", [512], torch.int32, fill_value=0)
-    
+
     # Query total size before allocation
     print(f"Total memory needed: {allocator.get_total_size_gb():.2f} GB")
-    
+
     # Actually allocate all tensors
     allocator.sync()
-    
+
     # Now tensors can be used normally
     buf1[0] = 1.0
 """
@@ -1084,10 +1094,10 @@ class LazyTensorSpec:
 class LazyTensor:
     """
     A lazy tensor wrapper that delays allocation until sync() is called.
-    
+
     Before sync(): records the shape/dtype, allows querying size
     After sync(): behaves like a normal tensor
-    
+
     This class implements __torch_function__ to be compatible with PyTorch
     operations like torch.empty_like(), torch.zeros_like(), etc.
     """
@@ -1259,7 +1269,7 @@ class LazyTensor:
         """
         Handle PyTorch functions that receive LazyTensor as input.
         Automatically unwrap LazyTensor to underlying tensor.
-        
+
         This makes LazyTensor compatible with functions like:
         - torch.empty_like()
         - torch.zeros_like()
@@ -1289,34 +1299,34 @@ class LazyTensor:
 class LazyAllocator:
     """
     Lazy allocator for tensors.
-    
+
     This allocator can delay tensor allocation until sync() is called,
     allowing users to query the total memory requirement before allocation.
-    
+
     Args:
         create_tensor_fn: Function to create a tensor, signature: (shape, dtype) -> Tensor
         free_tensor_fn: Optional function to free a tensor, signature: (tensor) -> None
         lazy: If True, delay allocation until sync() is called.
               If False, allocate immediately (default behavior).
-    
+
     Usage:
         allocator = LazyAllocator(
             create_tensor_fn=nvshmem_create_tensor,
             free_tensor_fn=nvshmem_free_tensor_sync,
             lazy=True
         )
-        
+
         # Create lazy tensors (no actual allocation)
         tensor1 = allocator.create_tensor("buf1", [1024, 256], torch.bfloat16)
         tensor2 = allocator.create_tensor("buf2", [512], torch.int32)
-        
+
         # Query total size before allocation
         total_bytes = allocator.get_total_size()
         print(f"Total memory needed: {total_bytes / 1e9:.2f} GB")
-        
+
         # Actually allocate all tensors
         allocator.sync()
-        
+
         # Now tensors can be used normally
         tensor1.fill_(0)
     """
@@ -1325,7 +1335,7 @@ class LazyAllocator:
                  free_tensor_fn: Optional[Callable[[torch.Tensor], None]] = None, lazy: bool = False):
         """
         Initialize the allocator.
-        
+
         Args:
             create_tensor_fn: Function to create a tensor, signature: (shape, dtype) -> Tensor
             free_tensor_fn: Optional function to free a tensor, signature: (tensor) -> None
@@ -1353,13 +1363,13 @@ class LazyAllocator:
                       fill_value: Optional[float] = None) -> LazyTensor:
         """
         Create a (potentially lazy) tensor.
-        
+
         Args:
             name: Name for debugging/tracking
             shape: Tensor shape
             dtype: Tensor dtype
             fill_value: Optional value to fill after allocation
-        
+
         Returns:
             LazyTensor that wraps the allocation
         """
@@ -1379,7 +1389,7 @@ class LazyAllocator:
     def get_total_size(self) -> int:
         """
         Get the total size in bytes.
-        
+
         This can be called before sync() to query the total memory needed.
         """
         return self._total_bytes
@@ -1395,7 +1405,7 @@ class LazyAllocator:
     def get_tensor_breakdown(self) -> Dict[str, int]:
         """
         Get a breakdown of memory usage by tensor.
-        
+
         Returns:
             Dict mapping tensor name to size in bytes
         """
@@ -1414,7 +1424,7 @@ class LazyAllocator:
     def sync(self) -> None:
         """
         Materialize all lazy tensors.
-        
+
         This actually allocates the memory for all pending tensors.
         """
         if self._materialized:
@@ -1439,7 +1449,7 @@ class LazyAllocator:
     def free_tensor(self, tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> None:
         """
         Free a tensor using the configured free function.
-        
+
         Handles both LazyTensor and regular torch.Tensor.
         """
         if tensor_or_lazy is None:
@@ -1464,10 +1474,10 @@ class LazyAllocator:
 def get_underlying_tensor(tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> Optional[torch.Tensor]:
     """
     Get the underlying tensor from a LazyTensor or return the tensor as-is.
-    
+
     Args:
         tensor_or_lazy: LazyTensor, torch.Tensor, or None
-    
+
     Returns:
         The underlying torch.Tensor, or None
     """
@@ -1490,24 +1500,24 @@ def nvshmem_free_lazy_tensor(tensor_or_lazy):
 class NVSHMEMLazyAllocator(LazyAllocator):
     """
     Lazy allocator specifically for nvshmem tensors.
-    
+
     This is a convenience wrapper around LazyAllocator that uses
     nvshmem_create_tensor and nvshmem_free_tensor_sync by default.
-    
+
     Usage:
         allocator = NVSHMEMLazyAllocator(lazy=True)
-        
+
         # Create lazy tensors (no actual allocation)
         tensor1 = allocator.create_tensor("buf1", [1024, 256], torch.bfloat16)
         tensor2 = allocator.create_tensor("buf2", [512], torch.int32)
-        
+
         # Query total size before allocation
         total_bytes = allocator.get_total_nvshmem_size()
         print(f"Total nvshmem needed: {total_bytes / 1e9:.2f} GB")
-        
+
         # Actually allocate all tensors
         allocator.sync()
-        
+
         # Now tensors can be used normally
         tensor1.fill_(0)
     """
@@ -1515,7 +1525,7 @@ class NVSHMEMLazyAllocator(LazyAllocator):
     def __init__(self, lazy: bool = False):
         """
         Initialize the nvshmem allocator.
-        
+
         Args:
             lazy: If True, delay allocation until sync() is called.
                   If False, allocate immediately (default behavior).

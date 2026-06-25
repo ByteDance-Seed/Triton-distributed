@@ -1,0 +1,92 @@
+diff --git a/python/triton/compiler/code_generator.py b/python/triton/compiler/code_generator.py
+index 81b2d0a..1df8db3 100644
+--- a/python/triton/compiler/code_generator.py
++++ b/python/triton/compiler/code_generator.py
+@@ -18,7 +18,7 @@ from triton.extension.buffer.language import core as bl
+ from triton.extension.buffer.language.builder import setup_unified_builder_with_buffer_builder
+
+ from .. import knobs, language
+-from .._C.libtriton import ir, gluon_ir, buffer_ir
++from .._C.libtriton import ir, gluon_ir, buffer_ir, distributed
+ from .._C.libtriton.ascend import ir as ascend_ir
+ from ..language import constexpr, str_to_ty, tensor, tuple as tl_tuple
+ from ..language.core import _unwrap_if_constexpr, base_value, base_type
+@@ -324,6 +324,7 @@ class CodeGenerator(ast.NodeVisitor):
+                 self.builder = ir.builder(context, compile_mode="simt")
+             else:
+                 self.builder = ir.builder(context, compile_mode="simd")
++            self.builder = distributed.ir.DistributedOpBuilder(context)
+             self.semantic = TritonSemantic(self.builder)
+
+         self.name_loc_as_prefix = None
+diff --git a/python/triton/compiler/compiler.py b/python/triton/compiler/compiler.py
+index 08059cc..b17b7ff 100644
+--- a/python/triton/compiler/compiler.py
++++ b/python/triton/compiler/compiler.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+ import hashlib
+ import json
+-from .._C.libtriton import get_cache_invalidating_env_vars, ir, buffer_ir
++from .._C.libtriton import get_cache_invalidating_env_vars, ir, buffer_ir, distributed
+ from .._C.libtriton.ascend import ir as ascend_ir
+ from ..backends import backends
+ from ..backends.compiler import Language
+@@ -294,6 +294,7 @@ def compile(src, target=None, options=None, _env_vars=None):
+     if not isinstance(src, IRSource):
+         context = ir.context()
+         ir.load_dialects(context)
++        distributed.ir.load_dialects(context)
+         buffer_ir.load_dialects(context)
+         ascend_ir.load_dialects(context)
+         backend.load_dialects(context)
+diff --git a/third_party/ascend/backend/compiler.py b/third_party/ascend/backend/compiler.py
+index 7c78d6c..a61e8bb 100644
+--- a/third_party/ascend/backend/compiler.py
++++ b/third_party/ascend/backend/compiler.py
+@@ -31,7 +31,7 @@ from pathlib import Path
+ from types import ModuleType
+ from typing import Any, Dict, Optional, Tuple, Union
+
+-from triton._C.libtriton import ir, passes, ascend
++from triton._C.libtriton import ir, passes, ascend, distributed
+ from triton.backends.ascend.utils import (
+     _check_bishengir_api_change,
+     _check_bishengir_able_save_ir,
+@@ -116,6 +116,7 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
+             auto_blockify_size = 1
+         pm = ir.pass_manager(mod.context)
+         pm.enable_debug()
++        distributed.ascend_passes.ttgpuir.add_convert_triton_distributed_to_hivm(pm)
+         ascend.passes.ttir.add_auto_blockify(
+             pm,
+             auto_blockify_size
+diff --git a/third_party/ascend/backend/driver.py b/third_party/ascend/backend/driver.py
+index 1d5fc45..8c008f6 100644
+--- a/third_party/ascend/backend/driver.py
++++ b/third_party/ascend/backend/driver.py
+@@ -597,13 +597,7 @@ static inline DevicePtrInfo getPointer(PyObject *obj, int idx) {
+     aclError status = aclrtPointerGetAttributes(ptr_info.dev_ptr, &attributes);
+
+     if (status == ACL_SUCCESS) {
+-      if (attributes.location.type != ACL_MEM_LOCATION_TYPE_DEVICE && attributes.location.type != 4) {
+-        Py_DECREF(ret);
+-        PyErr_Format(PyExc_ValueError,
+-                     "Pointer argument (at %d) cannot be accessed from Triton (cpu tensor?)", idx);
+-        ptr_info.valid = false;
+-        return ptr_info;
+-      }
++
+     } else {
+       Py_DECREF(ret);
+       PyErr_Format(PyExc_RuntimeError,
+diff --git a/third_party/proton/Dialect/lib/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/CMakeLists.txt b/third_party/proton/Dialect/lib/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/CMakeLists.txt
+index 80b387a..6242c5f 100644
+--- a/third_party/proton/Dialect/lib/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/CMakeLists.txt
++++ b/third_party/proton/Dialect/lib/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-include_directories(${PROJECT_SOURCE_DIR}/third_party/amd/include)
++include_directories(${PROJECT_SOURCE_DIR}/3rdparty/triton-ascend/third_party/amd/include)
+
+ add_triton_library(ProtonAMDGPUToLLVM
+     TargetInfo.cpp

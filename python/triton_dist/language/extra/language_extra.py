@@ -22,19 +22,26 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-import triton_dist.language.extra.cuda.language_extra as cuda_language_extra
-import triton_dist.language.extra.hip.language_extra as hip_language_extra
-import triton_dist.language.extra.maca.language_extra as maca_language_extra
-from triton_dist.utils import is_cuda, is_hip, is_maca
+from triton_dist.utils import is_ascend, is_cuda, is_hip, is_maca
 from triton_dist.language import vector
 from triton.language import core
 from .utils import ModuleProxy
 
-_extra_module = ModuleProxy([
-    (is_cuda, cuda_language_extra),
-    (is_hip, hip_language_extra),
-    (is_maca, maca_language_extra),
-])
+proxy_list = []
+if is_cuda():
+    import triton_dist.language.extra.cuda.language_extra as cuda_language_extra
+    proxy_list.append((is_cuda, cuda_language_extra))
+if is_hip():
+    import triton_dist.language.extra.hip.language_extra as hip_language_extra
+    proxy_list.append((is_hip, hip_language_extra))
+if is_maca():
+    import triton_dist.language.extra.maca.language_extra as maca_language_extra
+    proxy_list.append((is_maca, maca_language_extra))
+if is_ascend():
+    import triton_dist.language.extra.ascend.language_extra as ascend_language_extra
+    proxy_list.append((is_ascend, ascend_language_extra))
+
+_extra_module = ModuleProxy(proxy_list)
 
 
 @_extra_module.dispatch
