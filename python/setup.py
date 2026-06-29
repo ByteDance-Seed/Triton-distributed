@@ -127,7 +127,7 @@ class BackendInstaller:
                     pass
 
             if backend_name == "ascend":
-                TA_dir = Path().resolve().parent / "3rdparty/triton-ascend"
+                TA_dir = Path(get_base_dir()) / "3rdparty/triton-ascend"
                 npuir_path = TA_dir / "third_party/ascend/AscendNPU-IR"
                 TA_patch = TA_dir / "../triton-ascend.patch"
                 npuir_patch = TA_dir / "../AscendNPU-IR.patch"
