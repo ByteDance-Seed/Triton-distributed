@@ -39,6 +39,73 @@ from triton_dist.utils import is_ascend, is_cuda, is_hip, is_maca, HIP_CHECK
 
 T = TypeVar("T")
 
+# Environment variable for CGA (Cooperative Grid Array) cluster size
+# Format: "x,y,z" or "x" (defaults y=1, z=1)
+# Example: TRITON_DIST_CGA_CLUSTER_SIZE="2,1,1" or TRITON_DIST_CGA_CLUSTER_SIZE="2"
+_CGA_CLUSTER_SIZE_ENV = "TRITON_DIST_CGA_CLUSTER_SIZE"
+
+
+def _is_power_of_two(n: int) -> bool:
+    """Check if n is a power of 2 (including 1)."""
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _parse_cga_cluster_size() -> Optional[tuple]:
+    """
+    Parse TRITON_DIST_CGA_CLUSTER_SIZE environment variable.
+    
+    Returns:
+        tuple: (cluster_x, cluster_y, cluster_z) if set and valid, None otherwise.
+        
+    Constraints:
+        - Each dimension must be a power of 2 (1, 2, 4, 8, ...)
+        - Total product (x * y * z) must not exceed 16
+        
+    Examples:
+        "2" -> (2, 1, 1)
+        "2,1,1" -> (2, 1, 1)
+        "2,2,1" -> (2, 2, 1)
+        "4,4,1" -> (4, 4, 1)  # total = 16, valid
+        "4,4,2" -> None       # total = 32 > 16, invalid
+    """
+    env_value = os.environ.get(_CGA_CLUSTER_SIZE_ENV)
+    if not env_value:
+        return None
+
+    try:
+        parts = [int(x.strip()) for x in env_value.split(",")]
+        if len(parts) == 1:
+            cluster_dims = (parts[0], 1, 1)
+        elif len(parts) == 2:
+            cluster_dims = (parts[0], parts[1], 1)
+        elif len(parts) == 3:
+            cluster_dims = (parts[0], parts[1], parts[2])
+        else:
+            warnings.warn(f"Invalid {_CGA_CLUSTER_SIZE_ENV} format: '{env_value}'. "
+                          f"Expected 'x', 'x,y', or 'x,y,z'. Ignoring.")
+            return None
+
+        # Validate each dimension is a power of 2
+        for i, dim in enumerate(cluster_dims):
+            if not _is_power_of_two(dim):
+                warnings.warn(f"Invalid {_CGA_CLUSTER_SIZE_ENV} value: '{env_value}'. "
+                              f"Dimension {i} ({dim}) is not a power of 2. Ignoring.")
+                return None
+
+        # Validate total product does not exceed 16
+        total = cluster_dims[0] * cluster_dims[1] * cluster_dims[2]
+        if total > 16:
+            warnings.warn(f"Invalid {_CGA_CLUSTER_SIZE_ENV} value: '{env_value}'. "
+                          f"Total cluster size ({total}) exceeds maximum of 16. Ignoring.")
+            return None
+
+        return cluster_dims
+
+    except ValueError as e:
+        warnings.warn(f"Invalid {_CGA_CLUSTER_SIZE_ENV} value: '{env_value}'. "
+                      f"Expected integers. Error: {e}. Ignoring.")
+        return None
+
 
 def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
     key = kwargs["key"]
@@ -166,6 +233,32 @@ class TritonDistJITFunction(KernelInterface[T]):
 
     def run(self, *args, **kwargs):
         kwargs.setdefault('extern_libs', self._extern_libs)
+
+        # Apply CGA cluster size from environment variable if not explicitly set
+        cga_cluster_size = _parse_cga_cluster_size()
+        if cga_cluster_size is not None:
+            # Only set if user hasn't explicitly provided cluster_dims
+            if 'cluster_dims' not in kwargs:
+                # num_ctas should be the product of cluster_dims for cluster launch
+                expected_num_ctas = cga_cluster_size[0] * cga_cluster_size[1] * cga_cluster_size[2]
+
+                if 'num_ctas' in kwargs:
+                    # Check consistency between user-provided num_ctas and computed value
+                    user_num_ctas = kwargs['num_ctas']
+                    if user_num_ctas != expected_num_ctas:
+                        warnings.warn(
+                            f"num_ctas={user_num_ctas} does not match {_CGA_CLUSTER_SIZE_ENV}={cga_cluster_size} "
+                            f"(expected num_ctas={expected_num_ctas}). "
+                            f"Ignoring {_CGA_CLUSTER_SIZE_ENV} and using user-provided num_ctas.")
+                        # Don't set cluster_dims since num_ctas is inconsistent
+                    else:
+                        # num_ctas matches, safe to set cluster_dims
+                        kwargs['cluster_dims'] = cga_cluster_size
+                else:
+                    # No user-provided num_ctas, set both cluster_dims and num_ctas
+                    kwargs['cluster_dims'] = cga_cluster_size
+                    kwargs['num_ctas'] = expected_num_ctas
+
         return self._triton_jit_fn.run(*args, **kwargs)
 
     def warmup(self, *args, grid, **kwargs):

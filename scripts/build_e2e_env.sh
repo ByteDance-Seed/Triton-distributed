@@ -122,6 +122,7 @@ MODELS=(
 )
 
 download_model=false
+skip_model_download=false
 
 for arg in "$@"; do
     case $arg in
@@ -129,12 +130,16 @@ for arg in "$@"; do
             download_model=true
             shift
             ;;
+        --skip_model_download)
+            skip_model_download=true
+            shift
+            ;;
         *)
             ;;
     esac
 done
 
-if [ "$download_model" = true ]; then
+if [ "$download_model" = true ] && [ "$skip_model_download" = false ]; then
     # --- Loop through each model and download it ---
     for MODEL_NAME in "${MODELS[@]}"; do
     while true; do
@@ -158,6 +163,9 @@ if [ "$download_model" = true ]; then
     done
 
     echo "All specified models have been downloaded."
+elif [ "$skip_model_download" = true ]; then
+    echo "Skipping model download (using pre-downloaded model weights)"
+    echo "Ensure HF_HOME or HUGGINGFACE_HUB_CACHE environment variable points to the correct model cache directory"
 else
     echo "No Model download required. If you want to download model, add '--download_model' option."
 fi

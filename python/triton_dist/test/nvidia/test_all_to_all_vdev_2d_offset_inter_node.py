@@ -278,7 +278,7 @@ def test_all_to_all_v_offset(args):
             threshold=torch.inf,
         )
     ctx = create_context(rank, world_size, ne, k, token_len, token_dtype)
-    output = torch.empty((ctx.max_token_elem, ), dtype=token_dtype, device="cuda")
+    output = torch.empty((ctx.max_recv_elem_per_rank, ), dtype=token_dtype, device="cuda")
     print_kwargs = {"allowed_ranks": list(range(world_size)), "need_sync": True}
 
     def create_data(rank_in_row):
@@ -326,7 +326,7 @@ def test_all_to_all_v_offset(args):
         for _ in range(args.rounds):
             in_splits, in_offsets, tokens = create_data(args.rank_is_row_in)
             straggler(rank)
-            ret, _ = all_to_all_v_offset_op(
+            ret, _, _ = all_to_all_v_offset_op(
                 ctx,
                 input=tokens,
                 output=output,
@@ -360,10 +360,10 @@ def test_all_to_all_v_offset(args):
     pre_copy(in_splits, in_offsets, tokens)
 
     def op():
-        all_to_all_v_offset_op(ctx, input=tokens, output=None, in_splits=in_splits, in_offset=in_offsets,
+        all_to_all_v_offset_op(ctx, input=tokens, output=output, in_splits=in_splits, in_offset=in_offsets,
                                copy_to_symm_buffer=False,  # already copied
                                grid_size=args.grid_size if args.grid_size > 0 else None, major_align=args.align,
-                               rank_in_row=args.rank_is_row_in, return_tensor=False, has_input_offset=test_with_offset,
+                               rank_in_row=args.rank_is_row_in, has_input_offset=test_with_offset,
                                profiling=args.profile)
 
     sleep_async(20)  # incase of CPU bound

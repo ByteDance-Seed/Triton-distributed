@@ -124,4 +124,24 @@ def StoreSharedOp : TT_SIMT_Op<"store_shared", [TypesMatchWith<"type of 'value' 
     $value `,` $dest `[` $indices `]` attr-dict `:` type($dest)
   }];
 }
+
+def MemDescToPtrOp : TT_SIMT_Op<"memdesc_to_ptr", [
+                     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Get a generic-address-space pointer from a shared memory descriptor";
+  let description = [{
+    Extract a raw pointer from a shared memory descriptor at the given indices.
+    The Triton-distributed Python API builds the result as `tt.ptr` in
+    **address space 0** (LLVM/NVVM generic), not Triton's default pointer AS
+    (typically 1 for global). Use that value with inline PTX (`l`/`r`
+    constraints), mbarrier, TMA helpers, etc.
+
+    Lowering: base + linearize(indices, strides) in shared (3), then
+    `addrspacecast` to the result pointer type (generic 0 when using
+    `smem_get_ptr`).
+  }];
+
+  let arguments = (ins TTG_MemDescType:$src, Variadic<Index>:$indices);
+  let results = (outs TT_Ptr:$result);
+  let assemblyFormat = "$src `[` $indices `]` attr-dict `:` type($src) `->` type($result)";
+}
 #endif // DISTRIBUTED_OPS

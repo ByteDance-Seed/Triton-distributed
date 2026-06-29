@@ -168,6 +168,7 @@ def get_pymxshmem_cmake_dir(project_name):
 def maca_patch_jit(triton_jit_path):
     if not os.path.exists(triton_jit_path):
         print(f"Can't find {triton_jit_path}")
+        return
     with open(triton_jit_path, "r") as f:
         content = f.read()
     # replace jit.is_dist with always return True

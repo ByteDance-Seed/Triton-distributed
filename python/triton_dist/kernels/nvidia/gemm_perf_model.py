@@ -136,9 +136,11 @@ def get_tensorcore_dtype_support(device_id=0):
         (8, 9): [torch.float16, torch.bfloat16, torch.float32, torch.int8, torch.float8_e4m3fn,
                  torch.float8_e5m2],  # Ada L40S/RTX 40xx
         # Hopper
-        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8]
+        (9, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
+        # Blackwell
+        (10, 0): [torch.float16, torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
     }
-    return DTYPE_MAP.get(cap, [torch.float16, torch.float32])
+    return DTYPE_MAP.get(cap, [torch.float16, torch.bfloat16, torch.float32])
 
 
 def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
@@ -178,6 +180,12 @@ def get_tensorcore_tflops_by_device_name(dtype, device_id=0):
         return 989 * (2 / dtype.itemsize)
     if device_name == "NVIDIA H20":
         return 148 * (2 / dtype.itemsize)
+    # Blackwell (FP16 dense = sparse / 2, per NVIDIA datasheet footnote 2)
+    # https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+    if device_name.find("GB200") >= 0:
+        return 2500 * (2 / dtype.itemsize)
+    if device_name.find("B200") >= 0:
+        return 2250 * (2 / dtype.itemsize)
 
     logging.warning(
         f"device {device_name} not listed here. calculate tflops by estimation, or you can report it to developers.")
@@ -207,15 +215,20 @@ def get_dram_gbps_by_device_name(device_name: str):
         "NVIDIA H100 SXM": 3958,
         "NVIDIA H100 NVL": 3341,
         "NVIDIA H800": 3350,
+        "NVIDIA GB200": 8000,
+        "NVIDIA B200": 7700,
     }
-    return _DRAM_GBPS[device_name]
+    return _DRAM_GBPS.get(device_name)
 
 
 def get_dram_gbps(device=None):
     try:
         return triton.testing.get_dram_gbps(device)
     except Exception:
-        return get_dram_gbps_by_device_name(torch.cuda.get_device_name(device))
+        gbps = get_dram_gbps_by_device_name(torch.cuda.get_device_name(device))
+        if gbps is not None:
+            return gbps
+        raise
 
 
 def estimate_gemm_sol_time_ms(M: int, N: int, K: int, dtype=torch.bfloat16):

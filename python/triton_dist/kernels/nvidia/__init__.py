@@ -44,6 +44,8 @@ from .all_to_all_single_gemm import create_all_to_all_single_gemm_context, all_t
 from .gdn import chunk_gated_delta_rule_fwd
 from .low_latency_all_to_all_v2 import create_ep_ll_a2a_ctx, dispatch_kernel_v2, combine_kernel_v2
 from .ulysses_sp_dispatch import create_ulysses_sp_pre_attn_comm_context
+from .pre_attn_a2a import kernel_pre_attn_a2a
+from .post_attn_a2a import kernel_post_attn_a2a
 
 __all__ = [
     "_forward_pull_kernel",
@@ -98,4 +100,6 @@ __all__ = [
     "dispatch_kernel_v2",
     "combine_kernel_v2",
     "create_ulysses_sp_pre_attn_comm_context",
+    "kernel_pre_attn_a2a",
+    "kernel_post_attn_a2a",
 ]

@@ -260,6 +260,19 @@ if __name__ == "__main__":
 
     dist.broadcast(golden_output, src=0)
 
+    # Warm up NCCL communicators for sub-groups before pipeline forward.
+    # When device_id is set in init_process_group, PyTorch uses ncclCommSplit
+    # (a world-collective) lazily on first sub-group collective. During pipeline
+    # execution only a subset of ranks call TP collectives while others spin on
+    # GPU wait_signal, causing ncclCommSplit to deadlock. Pre-warming here
+    # forces the split while all ranks are idle.
+    _warmup = torch.zeros(1, device='cuda')
+    dist.all_reduce(_warmup, group=tp_group)
+    dist.all_reduce(_warmup, group=pp_group)
+    torch.cuda.synchronize()
+    dist.barrier()
+    del _warmup
+
     pipelined_stage.set_backend('triton_dist')
     pipelined_output_triton_dist_p2p = pipelined_stage.forward(inputs_full=initial_hidden_states,
                                                                num_micro_batches=NUM_MICRO_BATCHES)

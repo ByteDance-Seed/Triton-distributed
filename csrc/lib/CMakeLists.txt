@@ -57,7 +57,7 @@ function(set_nvshmem_home)
 
   if(PYTHON_NVSHMEM_PATH AND NOT PYTHON_NVSHMEM_PATH STREQUAL "")
       set(NVSHMEM_HOME "${PYTHON_NVSHMEM_PATH}" PARENT_SCOPE)
-      message(STATUS "Found NVSHMEM_HOME from Python nvidia-nvshmem-cu12: ${PYTHON_NVSHMEM_PATH}")
+      message(STATUS "Found NVSHMEM_HOME from Python nvidia.nvshmem: ${PYTHON_NVSHMEM_PATH}")
       return()
   endif()
   # not found

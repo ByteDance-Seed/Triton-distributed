@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
     ep_group = split_torch_process_group(WORLD_GROUP, pp_size)
 
-    config = nvshmem.core.team_get_config(libshmem_device.NVSHMEM_TEAM_WORLD)
+    config = nvshmem.core.TeamConfig()
     print("config", config)
 
     ep_team, pp_team = nvshmem.core.team_split_2d(libshmem_device.NVSHMEM_TEAM_WORLD, ep_size, config, 0, config, 0)

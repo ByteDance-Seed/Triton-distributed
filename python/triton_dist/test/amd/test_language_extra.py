@@ -113,10 +113,13 @@ def test_shfl_up_sync(device):
     output = torch.zeros(size, device=device, dtype=torch.int32)
     delta = 1
 
+    # CUDA semantics: lane i reads from lane max(i - delta, i_if_clamped)
+    # i.e., lane i reads val[i - delta] when i >= delta, else val[i]
     golden = []
     for i in range(num_warps):
         arr = torch.arange(i * WARP_SIZE, (i + 1) * WARP_SIZE, dtype=torch.int32)
-        golden.append(torch.cat([arr[:delta], arr[:-delta]]))
+        shifted = torch.cat([arr[:delta], arr[:WARP_SIZE - delta]])
+        golden.append(shifted)
     golden = torch.cat(golden).to(DEVICE)
 
     shfl_up_sync_kernel[(1, )](
@@ -127,7 +130,7 @@ def test_shfl_up_sync(device):
         num_warps=num_warps,
     )
 
-    assert torch.allclose(output, golden), f"shfl_up mismatch:\n  output={output}\n  golden={golden}"
+    assert torch.allclose(output, golden), f"shfl_up mismatch:\n  got:    {output}\n  expect: {golden}"
     print("✅ [shfl_up_sync] passed.")
 
 
@@ -149,10 +152,13 @@ def test_shfl_down_sync(device):
 
     assert delta >= 0
 
+    # CUDA semantics: lane i reads from lane min(i + delta, i_if_clamped)
+    # i.e., lane i reads val[i + delta] when (i + delta) < WARP_SIZE, else val[i]
     golden = []
     for i in range(num_warps):
         arr = torch.arange(i * WARP_SIZE, (i + 1) * WARP_SIZE, dtype=torch.int32)
-        golden.append(torch.cat([arr[delta:], arr[-delta:]]))
+        shifted = torch.cat([arr[delta:], arr[WARP_SIZE - delta:]])
+        golden.append(shifted)
     golden = torch.cat(golden).to(DEVICE)
 
     shfl_down_sync_kernel[(1, )](
@@ -163,8 +169,52 @@ def test_shfl_down_sync(device):
         num_warps=num_warps,
     )
 
-    assert torch.allclose(output, golden), f"shfl_down mismatch:\n  output={output}\n  golden={golden}"
+    assert torch.allclose(output, golden), f"shfl_down mismatch:\n  got:    {output}\n  expect: {golden}"
     print("✅ [shfl_down_sync] passed.")
+
+
+def test_shfl_up_down_multi_delta(device):
+    """Test shuffle up/down with multiple delta values to verify clamping."""
+
+    @triton.jit
+    def shfl_up_kernel(input, output, delta, width):
+        thread_idx = tid(0)
+        x = ld(input + thread_idx, scope="agent", semantic="relaxed")
+        y = __shfl_up_sync_i32(x, delta)
+        st(output + thread_idx, y, scope="agent", semantic="relaxed")
+
+    @triton.jit
+    def shfl_down_kernel(input, output, delta, width):
+        thread_idx = tid(0)
+        x = ld(input + thread_idx, scope="agent", semantic="relaxed")
+        y = __shfl_down_sync_i32(x, delta)
+        st(output + thread_idx, y, scope="agent", semantic="relaxed")
+
+    WARP_SIZE = 64
+    num_warps = 1
+    size = WARP_SIZE * num_warps
+
+    for delta in [1, 2, 4, 16, 32, 63]:
+        inp = torch.arange(size, device=device, dtype=torch.int32)
+
+        # shfl_up: lane i reads from lane max(i - delta, clamp_to_self)
+        out_up = torch.zeros(size, device=device, dtype=torch.int32)
+        arr = torch.arange(WARP_SIZE, dtype=torch.int32)
+        golden_up = torch.tensor([arr[max(i - delta, 0)] if i >= delta else arr[i] for i in range(WARP_SIZE)],
+                                 dtype=torch.int32).to(device)
+        shfl_up_kernel[(1, )](inp, out_up, delta, 64, num_warps=num_warps)
+        assert torch.allclose(out_up,
+                              golden_up), f"shfl_up delta={delta} mismatch:\n  got:    {out_up}\n  expect: {golden_up}"
+
+        # shfl_down: lane i reads from lane min(i + delta, clamp_to_self)
+        out_down = torch.zeros(size, device=device, dtype=torch.int32)
+        golden_down = torch.tensor([arr[i + delta] if (i + delta) < WARP_SIZE else arr[i] for i in range(WARP_SIZE)],
+                                   dtype=torch.int32).to(device)
+        shfl_down_kernel[(1, )](inp, out_down, delta, 64, num_warps=num_warps)
+        assert torch.allclose(out_down, golden_down), \
+            f"shfl_down delta={delta} mismatch:\n  got:    {out_down}\n  expect: {golden_down}"
+
+    print("✅ [shfl_up_down_multi_delta] passed.")
 
 
 if __name__ == "__main__":
@@ -172,3 +222,4 @@ if __name__ == "__main__":
     test_shfl_sync(DEVICE)
     test_shfl_up_sync(DEVICE)
     test_shfl_down_sync(DEVICE)
+    test_shfl_up_down_multi_delta(DEVICE)

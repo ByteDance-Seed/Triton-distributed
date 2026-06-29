@@ -211,6 +211,79 @@ void init_triton_distributed_ir(py::module &&m) {
               std::vector<Value> &yields) -> triton::simt::BlockYieldOp {
              return self.create<triton::simt::BlockYieldOp>(yields);
            })
+      .def("create_load_shared",
+           [](TritonOpBuilder &self, Value src,
+              std::vector<Value> &indices) -> Value {
+             auto srcTy = mlir::cast<triton::gpu::MemDescType>(src.getType());
+             auto elemTy = srcTy.getElementType();
+             std::vector<Value> to_index;
+             for (auto &val : indices) {
+               if (!isa<IndexType>(val.getType())) {
+                 to_index.push_back(self.create<arith::IndexCastOp>(
+                     self.getBuilder().getIndexType(), val));
+               } else {
+                 to_index.push_back(val);
+               }
+             }
+             return self.create<triton::simt::LoadSharedOp>(elemTy, src,
+                                                            to_index);
+           })
+      .def("create_store_shared",
+           [](TritonOpBuilder &self, Value value, Value dest,
+              std::vector<Value> &indices) {
+             std::vector<Value> to_index;
+             for (auto &val : indices) {
+               if (!isa<IndexType>(val.getType())) {
+                 to_index.push_back(self.create<arith::IndexCastOp>(
+                     self.getBuilder().getIndexType(), val));
+               } else {
+                 to_index.push_back(val);
+               }
+             }
+             self.create<triton::simt::StoreSharedOp>(value, dest, to_index);
+           })
+      .def("create_memdesc_to_ptr",
+           [](TritonOpBuilder &self, Value src, std::vector<Value> &indices,
+              Type resultTy) -> Value {
+             std::vector<Value> to_index;
+             for (auto &val : indices) {
+               if (!isa<IndexType>(val.getType())) {
+                 to_index.push_back(self.create<arith::IndexCastOp>(
+                     self.getBuilder().getIndexType(), val));
+               } else {
+                 to_index.push_back(val);
+               }
+             }
+             return self.create<triton::simt::MemDescToPtrOp>(resultTy, src,
+                                                              to_index);
+           })
+      // Shared memory ops (gluon-compatible)
+      .def("create_local_alloc",
+           [](TritonOpBuilder &self, Type resultTy) -> Value {
+             return self.create<triton::gpu::LocalAllocOp>(resultTy);
+           })
+      .def("create_local_alloc",
+           [](TritonOpBuilder &self, Type resultTy, Value value) -> Value {
+             return self.create<triton::gpu::LocalAllocOp>(resultTy, value);
+           })
+      .def("create_local_store",
+           [](TritonOpBuilder &self, Value memDesc, Value value) {
+             self.create<triton::gpu::LocalStoreOp>(value, memDesc);
+           })
+      .def("create_local_load",
+           [](TritonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
+             return self.create<triton::gpu::LocalLoadOp>(resultTy, memDesc);
+           })
+      .def("create_local_dealloc",
+           [](TritonOpBuilder &self, Value memDesc) {
+             self.create<triton::gpu::LocalDeallocOp>(memDesc);
+           })
+      .def("create_memdesc_subview",
+           [](TritonOpBuilder &self, Type resultType, Value src,
+              std::vector<Value> &offsets) -> Value {
+             return self.create<triton::gpu::MemDescSubviewOp>(resultType, src,
+                                                               offsets);
+           })
       .def("create_extract",
            [](TritonOpBuilder &self, Value src,
               std::vector<Value> &indices) -> Value {
@@ -241,6 +314,33 @@ void init_triton_distributed_ir(py::module &&m) {
                }
              }
              return self.create<tensor::InsertOp>(scalar, dest, to_index);
+           })
+      // Shared memory type construction
+      .def("get_shared_mem_desc_ty",
+           [](TritonOpBuilder &self, Type &elementType,
+              std::vector<int64_t> &shape, Attribute layout,
+              std::vector<int64_t> &allocShape) -> Type {
+             auto ctx = self.getContext();
+             return triton::gpu::MemDescType::get(
+                 shape, elementType, layout,
+                 triton::gpu::SharedMemorySpaceAttr::get(ctx),
+                 /*mutableMemory=*/true,
+                 /*allocShape=*/allocShape);
+           })
+      .def("get_swizzled_shared_layout",
+           [](TritonOpBuilder &self, int vec, int perPhase, int maxPhase,
+              std::vector<unsigned> &order) -> Attribute {
+             auto ctx = self.getContext();
+             unsigned rank = order.size();
+             SmallVector<unsigned> ctasPerCga(rank, 1);
+             SmallVector<unsigned> ctaSplitNum(rank, 1);
+             SmallVector<unsigned> ctaOrder(rank);
+             for (unsigned i = 0; i < rank; ++i)
+               ctaOrder[i] = i;
+             auto ctaLayout = triton::gpu::CTALayoutAttr::get(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
+             return triton::gpu::SwizzledSharedEncodingAttr::get(
+                 ctx, vec, perPhase, maxPhase, order, ctaLayout);
            })
       // GPU Ops
       .def("create_laneid",

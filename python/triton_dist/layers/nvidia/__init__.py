@@ -28,8 +28,10 @@ from .ep_a2a_layer import EPAll2AllLayer
 from .gemm_allreduce_layer import GemmARLayer
 from .ep_ll_a2a_layer import EPLowLatencyAllToAllLayer
 from .ulysses_sp_a2a_layer import UlyssesSPAllToAllLayer
+from .post_attn_a2a_layer import PostAttnA2AOp
+from .pre_attn_a2a_layer import PreAttnA2AOp, PreAttnQKVPackA2AOp
 
 __all__ = [
     "SpGQAFlashDecodeAttention", "AllGatherLayer", "EPAll2AllLayer", "GemmARLayer", "EPLowLatencyAllToAllLayer",
-    "UlyssesSPAllToAllLayer"
+    "UlyssesSPAllToAllLayer", "PostAttnA2AOp", "PreAttnA2AOp", "PreAttnQKVPackA2AOp"
 ]
