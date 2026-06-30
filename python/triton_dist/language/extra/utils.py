@@ -22,6 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+import inspect
 from typing import Dict, Callable, Any
 from functools import wraps
 from triton.language import core
@@ -47,11 +48,23 @@ class ModuleProxy:
         delattr(self._module, name)
 
     def dispatch(self, func: Callable) -> Any:
+        func_signature = inspect.signature(func)
+        parameters = list(func_signature.parameters.values())
+        if "_semantic" not in func_signature.parameters:
+            parameters.append(inspect.Parameter(
+                "_semantic",
+                inspect.Parameter.KEYWORD_ONLY,
+                default=None,
+            ))
 
         @core.builtin
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args, _semantic=None, **kwargs):
             method = getattr(self._module, func.__name__)
+            if "_semantic" in inspect.signature(method).parameters:
+                kwargs["_semantic"] = _semantic
             return method(*args, **kwargs)
+
+        wrapper.__signature__ = func_signature.replace(parameters=parameters)
 
         return wrapper
