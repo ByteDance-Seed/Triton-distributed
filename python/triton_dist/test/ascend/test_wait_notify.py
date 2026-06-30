@@ -92,7 +92,7 @@ def run_test_distributed(rank, world_size):
     # Cleanup
     ash.aclshmem_free_tensor(data_mem)
     ash.aclshmem_free_tensor(signal_mem)
-    _ = ash.aclshmem_finialize()
+    _ = ash.aclshmem_finalize()
 
 
 @pytest.mark.dist
