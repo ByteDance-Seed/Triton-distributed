@@ -37,9 +37,6 @@ static const llvm::SmallVector<std::string> mixTypeList = {
     "aclshmem_barrier_all"};
 static const llvm::SmallVector<std::string> vecTypeList = {
     "aclshmemx_barrier_all_vec"};
-static const llvm::SmallVector<std::string> sideEffectSymbols = {
-    "aclshmemx_barrier_all_vec", "aclshmem_barrier_all", "aclshmem_int8_p",
-    "aclshmem_int16_p",          "aclshmem_int32_p",     "aclshmem_int64_p"};
 static const llvm::DenseMap<llvm::StringRef, hivm::PIPE> pipeMap;
 static const int distributedDialectPrefixLen = 12;
 void populateDistributedOpToHIVMPatterns(RewritePatternSet &patterns,

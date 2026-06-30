@@ -50,7 +50,7 @@ def run_test_distributed(rank, world_size):
     y_ref = torch_mype(x0, rank, 3)
     _shmemx_get_my_pe[3, 1, 1](x0)
     assert torch.equal(x0.cpu(), y_ref.cpu())
-    _ = ash.aclshmem_finialize()
+    _ = ash.aclshmem_finalize()
 
 
 @pytest.mark.dist
