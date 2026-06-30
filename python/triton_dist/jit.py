@@ -209,6 +209,9 @@ def get_shmem_extern_lib() -> Dict[str, str]:
         extern_libs = {"libshmem": str(mxshmem_lib)}
         return extern_libs
 
+    elif is_ascend():
+        return {}
+
     else:
         raise NotImplementedError("Unsupported device type to get shmem bitcode lib path.")
 
