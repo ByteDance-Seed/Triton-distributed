@@ -31,6 +31,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -122,7 +123,7 @@ public:
     if (auto sym = op->template getAttrOfType<StringAttr>("symbol")) {
       symbolName = sym.str();
     }
-    bool hasSideEffect = true;
+    bool hasSideEffect = !mlir::isMemoryEffectFree(op.getOperation());
 
     llvm::TypeSwitch<Operation *, void>(op)
         .Case([&](distributed::SymmAtOp) {
@@ -158,9 +159,6 @@ public:
     if (symbolName.empty()) {
       symbolName = op->getName().getStringRef().drop_front(
           ASCEND::distributedDialectPrefixLen);
-    }
-    if (!llvm::is_contained(ASCEND::sideEffectSymbols, symbolName)) {
-      hasSideEffect = false;
     }
     std::string customName = customPrefix + "." + symbolName;
     ValueRange operands = op->getOperands();

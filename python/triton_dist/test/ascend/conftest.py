@@ -6,20 +6,30 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "dist: mark distributed Ascend tests")
+
+
 def _worker_wrapper(rank, world_size, backend, fn, args, error_queue):
     """
     Common entry point for each worker process.
     Exits normally on success; on failure, pushes the exception into error_queue.
     """
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
     try:
         torch.npu.set_device(rank)
         dist.init_process_group(
             backend=backend,
+            init_method="env://",
             rank=rank,
             world_size=world_size,
+            device_id=torch.device(f"npu:{torch.npu.current_device()}"),
         )
+        dist.barrier()
         fn(rank, world_size, *args)
     except Exception as e:
         error_queue.put((rank, e))

@@ -119,6 +119,12 @@ def barrier(team):
 
 
 @_shmem_module.dispatch
+def barrier_vec(team):
+    """ACLSHMEM Only"""
+    ...
+
+
+@_shmem_module.dispatch
 def barrier_block(team):
     ...
 
@@ -561,3 +567,19 @@ MORI_AMO_FETCH_XOR = 19
 MORI_AMO_SWAP = 20
 MORI_AMO_COMPARE_SWAP = 21
 MORI_AMO_OP_SENTINEL = sys.maxsize
+
+# aclshmem_team_t
+ACLSHMEM_TEAM_INVALID = -1
+ACLSHMEM_TEAM_WORLD = 0
+
+# aclshmem_cmp_op_type_t
+ACLSHMEM_CMP_EQ = 0
+ACLSHMEM_CMP_NE = 1
+ACLSHMEM_CMP_GT = 2
+ACLSHMEM_CMP_GE = 3
+ACLSHMEM_CMP_LT = 4
+ACLSHMEM_CMP_LE = 5
+
+# aclshmem_signal_op_type_t
+ACLSHMEM_SIGNAL_SET = 0
+ACLSHMEM_SIGNAL_ADD = 1
