@@ -201,6 +201,11 @@ git clone https://github.com/ByteDance-Seed/Triton-distributed.git
 ```sh
 cd Triton-distributed/
 git submodule update --init --depth=1
+# 3rdparty/triton-ascend and 3rdparty/shmem are hosted on gitcode.com and are
+# marked `update = none` in .gitmodules, so the command above skips them (this
+# keeps CI environments that cannot reach gitcode.com from failing at submodule
+# init). Fetch them explicitly for an Ascend build (--checkout overrides `none`):
+git submodule update --init --checkout --depth=1 3rdparty/triton-ascend 3rdparty/shmem
 cd 3rdparty/triton-ascend
 git submodule update --init --depth=1
 ```
