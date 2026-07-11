@@ -10,6 +10,8 @@
 [submodule "3rdparty/shmem"]
 	path = 3rdparty/shmem
 	url = https://gitcode.com/cann/shmem.git
+	update = none
 [submodule "3rdparty/triton-ascend"]
 	path = 3rdparty/triton-ascend
 	url = https://gitcode.com/Ascend/triton-ascend.git
+	update = none

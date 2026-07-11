@@ -38,6 +38,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <string>
 #include <type_traits>
 
@@ -111,7 +112,7 @@ public:
       return getTypeName(pointerTy.getPointeeType()) + "_ptr_" +
              char('0' + tensorTy.getRank()) + "d";
     }
-    assert(false && "unsupport type");
+    llvm_unreachable("unsupported type in getTypeName");
   }
 
   LogicalResult matchAndRewrite(DistOp op,

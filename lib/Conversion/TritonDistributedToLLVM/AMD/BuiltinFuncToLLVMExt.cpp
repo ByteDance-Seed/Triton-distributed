@@ -89,6 +89,20 @@ private:
     return std::nullopt;
   }
 
+  static size_t skipTypePrefix(ArrayRef<StringRef> parts) {
+    if (!parts.empty()) {
+      StringRef p = parts[0];
+      bool allDigits = !p.empty() && llvm::all_of(p, [](char c) {
+        return c >= '0' && c <= '9';
+      });
+      if (allDigits)
+        return 1;
+      if (p == "fp16" || p == "bf16")
+        return 1;
+    }
+    return 0;
+  }
+
   LogicalResult convertToLLVMIntrinsic(LLVM::CallOp callOp,
                                        mlir::PatternRewriter &rewriter) const {
     StringRef calleeName = callOp.getCallee().value();
@@ -116,14 +130,6 @@ private:
         return "";
       else
         llvm_unreachable("unknown scope string");
-    };
-
-    auto skipBitwidthPrefix =
-        [](const SmallVector<StringRef> &parts) -> size_t {
-      if (!parts.empty() &&
-          llvm::all_of(parts[0], [](char c) { return std::isdigit(c); }))
-        return 1;
-      return 0;
     };
 
     auto operands = callOp.getOperands();
@@ -184,6 +190,7 @@ private:
         };
 
     Operation *replacementOp = nullptr;
+
     // syncthreads
     if (calleeName == "__triton_hip_syncthreads") {
       assert(operands.size() == 0);
@@ -197,31 +204,65 @@ private:
       replacementOp = zero.getDefiningOp();
     }
 
-    // load
-    if (auto maybeParts =
-            matchPrefixAndSplitRemainder(calleeName, "__triton_hip_load_")) {
-      auto parts = maybeParts.value();
-      size_t idx = skipBitwidthPrefix(parts);
-      assert(parts.size() - idx == 2 &&
-             "expected load function to have 2 parts (memOrder, scope) after "
-             "optional bitwidth prefix");
-      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
-      auto scopeStr = strToScope(parts[idx + 1]);
-      assert(operands.size() == 1 && "expected load to have 1 operand");
+    // 128-bit vector load
+    else if (calleeName == "__triton_hip_load_v4_b32") {
+      assert(operands.size() == 1);
+      auto vecTy = LLVM::getVectorType(i32_ty, 4);
+      auto loadOp = rewriter.create<LLVM::LoadOp>(loc, vecTy, operands[0],
+                                                  /*alignment=*/16);
 
+      Value packed = rewriter.create<LLVM::UndefOp>(loc, returnType);
+      for (unsigned i = 0; i < 4; ++i) {
+        Value idx = rewriter.create<LLVM::ConstantOp>(
+            loc, i32_ty, IntegerAttr::get(i32_ty, i));
+        Value elem = rewriter.create<LLVM::ExtractElementOp>(loc, loadOp, idx);
+        packed = rewriter.create<LLVM::InsertValueOp>(loc, packed, elem, i);
+      }
+      replacementOp = packed.getDefiningOp();
+    }
+
+    // 128-bit vector store
+    else if (calleeName == "__triton_hip_store_v4_b32") {
+      assert(operands.size() == 5);
+
+      auto vecTy = LLVM::getVectorType(i32_ty, 4);
+      Value vec = rewriter.create<LLVM::UndefOp>(loc, vecTy);
+      for (unsigned i = 0; i < 4; ++i) {
+        Value idx = rewriter.create<LLVM::ConstantOp>(
+            loc, i32_ty, IntegerAttr::get(i32_ty, i));
+        vec = rewriter.create<LLVM::InsertElementOp>(loc, vec, operands[i + 1],
+                                                     idx);
+      }
+      rewriter.create<LLVM::StoreOp>(loc, vec, operands[0],
+                                     /*alignment=*/16);
+      rewriter.eraseOp(callOp);
+      return mlir::success();
+    }
+
+    // scalar load: __triton_hip_load_[<bitwidth>_]<semantic>_<scope>
+    else if (auto maybeParts = matchPrefixAndSplitRemainder(
+                 calleeName, "__triton_hip_load_")) {
+      auto parts = maybeParts.value();
+      size_t off = skipTypePrefix(parts);
+      assert(parts.size() - off == 2 &&
+             "expected load function to have 2 parts (memOrder, scope) after "
+             "optional type/bitwidth prefix");
+      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[off]);
+      auto scopeStr = strToScope(parts[off + 1]);
+      assert(operands.size() == 1 && "expected load to have 1 operand");
       replacementOp = buildAtomicLoad(operands[0], memOrder, scopeStr);
     }
 
-    // store
+    // scalar store: __triton_hip_store_[<bitwidth>_]<semantic>_<scope>
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_store_")) {
       auto parts = maybeParts.value();
-      size_t idx = skipBitwidthPrefix(parts);
-      assert(parts.size() - idx == 2 &&
+      size_t off = skipTypePrefix(parts);
+      assert(parts.size() - off == 2 &&
              "expected store function to have 2 parts (memOrder, scope) after "
-             "optional bitwidth prefix");
-      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
-      auto scopeStr = strToScope(parts[idx + 1]);
+             "optional type/bitwidth prefix");
+      LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[off]);
+      auto scopeStr = strToScope(parts[off + 1]);
       assert(operands.size() == 2 && "expected store to have 2 operands");
       buildAtomicStore(operands[1], operands[0], memOrder, scopeStr);
       rewriter.eraseOp(callOp);
@@ -232,10 +273,10 @@ private:
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_atom_add_")) {
       auto parts = maybeParts.value();
-      size_t idx = skipBitwidthPrefix(parts);
+      size_t idx = skipTypePrefix(parts);
       assert(parts.size() - idx == 2 &&
              "expected atomic add function to have 2 parts (memOrder, scope) "
-             "after optional bitwidth prefix");
+             "after optional type/bitwidth prefix");
       assert(operands.size() == 2 && "expected atomic add to have 2 operands");
       LLVM::AtomicOrdering memOrder = strToMemoryOrder(parts[idx]);
       auto scopeStr = strToScope(parts[idx + 1]);
@@ -247,10 +288,10 @@ private:
     else if (auto maybeParts = matchPrefixAndSplitRemainder(
                  calleeName, "__triton_hip_atom_cas_")) {
       auto parts = maybeParts.value();
-      size_t idx = skipBitwidthPrefix(parts);
+      size_t idx = skipTypePrefix(parts);
       assert(parts.size() - idx == 3 &&
              "expected atomic cas function to have 3 parts "
-             "(successOrder, failureOrder, scope) after optional bitwidth "
+             "(successOrder, failureOrder, scope) after optional type/bitwidth "
              "prefix");
       assert(operands.size() == 3 && "expected atomic cas to have 3 operands");
       LLVM::AtomicOrdering successOrdering = strToMemoryOrder(parts[idx]);

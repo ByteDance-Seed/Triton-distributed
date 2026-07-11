@@ -26,6 +26,7 @@ import triton
 import triton.language as tl
 from triton.language import core
 from triton_dist.language import core as dist_core
+from triton_dist.language import vector, make_vector
 
 
 def _translate_scope(scope):
@@ -44,6 +45,27 @@ def _translate_semantic(semantic):
         return semantic
     else:
         raise ValueError(f"Unsupported semantic: {semantic}")
+
+
+# Keyed by Triton dtype str → LLVM type-width suffix for callee names.
+# signed/unsigned share the same suffix because LLVM does not distinguish
+# signedness in integer types (both map to iN).  Float types (fp32, fp64)
+# are absent here because scalar ld/st bitcasts them to integer equivalents.
+_DTYPE_SUFFIX = {
+    "int16": "16",
+    "uint16": "16",
+    "fp16": "fp16",
+    "bf16": "bf16",
+    "int32": "32",
+    "uint32": "32",
+    "int64": "64",
+    "uint64": "64",
+}
+
+
+def _dtype_callee_suffix(dtype):
+    """Unique LLVM function name suffix per underlying LLVM type."""
+    return _DTYPE_SUFFIX[str(dtype)]
 
 
 @core.extern
@@ -233,25 +255,27 @@ def ld(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    _sem = core._unwrap_if_constexpr(semantic)
-    _scp = core._unwrap_if_constexpr(scope)
+    elem_ty = ptr.dtype.element_ty
+    if elem_ty.is_floating():
+        int_ty = core.get_int_dtype(elem_ty.primitive_bitwidth, True)
+        ptr_int = tl.cast(ptr, core.pointer_type(int_ty), _semantic=_semantic)
+        raw = ld(ptr_int, scope=scope, semantic=semantic, _semantic=_semantic)
+        return tl.cast(raw, elem_ty, bitcast=True, _semantic=_semantic)
 
+    sem = core._unwrap_if_constexpr(semantic)
+    scp = core._unwrap_if_constexpr(scope)
     return dist_core.extern_elementwise(
         "",
         "",
         [ptr],
-        {(core.pointer_type(dtype), ): (
-             f"__triton_hip_load_{dtype.primitive_bitwidth}_{_sem}_{_scp}",
-             dtype,
-         )
+        {(core.pointer_type(dtype), ): (f"__triton_hip_load_{_dtype_callee_suffix(dtype)}_{sem}_{scp}", dtype)
          for dtype in [
+             core.dtype("int16"),
+             core.dtype("uint16"),
              core.dtype("int32"),
              core.dtype("uint32"),
              core.dtype("int64"),
              core.dtype("uint64"),
-             core.dtype("fp16"),
-             core.dtype("bf16"),
-             core.dtype("fp32"),
          ]},
         is_pure=False,
         _semantic=_semantic,
@@ -282,25 +306,27 @@ def st(
         "system",
     ], "scope should be one of ['workgroup', 'agent', 'system']"
 
-    _sem = core._unwrap_if_constexpr(semantic)
-    _scp = core._unwrap_if_constexpr(scope)
+    elem_ty = ptr.dtype.element_ty
+    if elem_ty.is_floating():
+        int_ty = core.get_int_dtype(elem_ty.primitive_bitwidth, True)
+        ptr_int = tl.cast(ptr, core.pointer_type(int_ty), _semantic=_semantic)
+        val_int = tl.cast(val, int_ty, bitcast=True, _semantic=_semantic)
+        return st(ptr_int, val_int, scope=scope, semantic=semantic, _semantic=_semantic)
 
+    sem = core._unwrap_if_constexpr(semantic)
+    scp = core._unwrap_if_constexpr(scope)
     return dist_core.extern_elementwise(
         "",
         "",
         [ptr, core.cast(val, dtype=ptr.dtype.element_ty, _semantic=_semantic)],
-        {(core.pointer_type(dtype), dtype): (
-             f"__triton_hip_store_{dtype.primitive_bitwidth}_{_sem}_{_scp}",
-             dtype,
-         )
+        {(core.pointer_type(dtype), dtype): (f"__triton_hip_store_{_dtype_callee_suffix(dtype)}_{sem}_{scp}", dtype)
          for dtype in [
+             core.dtype("int16"),
+             core.dtype("uint16"),
              core.dtype("int32"),
              core.dtype("uint32"),
              core.dtype("int64"),
              core.dtype("uint64"),
-             core.dtype("fp16"),
-             core.dtype("bf16"),
-             core.dtype("fp32"),
          ]},
         is_pure=False,
         _semantic=_semantic,
@@ -461,11 +487,12 @@ def fence(semantic="monotonic", scope="agent", _semantic=None):
 
 
 def _str_to_gpu_shfl_mode(mode_str):
-    # The order of shfl modes is from (llvm-project/mlir/include/mlir/Dialect/GPU/IR/GPUOps.td)
-    ALL_SHFL_MODES = ["xor", "up", "down", "idx"]
+    # Must match mlir::gpu::ShuffleMode enum order:
+    #   XOR = 0, DOWN = 1, UP = 2, IDX = 3
+    ALL_SHFL_MODES = ["xor", "down", "up", "idx"]
 
     if mode_str not in ALL_SHFL_MODES:
-        raise RuntimeError(f"unexpected gpu shuffle mode, expecte: {ALL_SHFL_MODES}, but got: {mode_str}")
+        raise RuntimeError(f"unexpected gpu shuffle mode, expected: {ALL_SHFL_MODES}, but got: {mode_str}")
 
     return ALL_SHFL_MODES.index(mode_str)
 
@@ -475,69 +502,56 @@ def laneid(_semantic=None):
     return core.tensor(_semantic.builder.create_laneid(), core.int32)
 
 
-# ---------------------------------------------------------------------------
-# Warp shuffle primitives via GCN inline assembly (ds_bpermute_b32).
-#
-# gpu.shuffle (mlir::gpu::ShuffleOp) does not reliably lower to LLVM for
-# wavefront-64 targets on the current Triton AMD backend.  We emit
-# ds_bpermute_b32 directly instead, which reads the source VGPR from an
-# arbitrary lane specified by a byte-offset (lane_id * 4).
-# ---------------------------------------------------------------------------
-
-
 @core.extern
-def _ds_bpermute_b32(value, byte_offset, _semantic=None):
-    """Low-level ds_bpermute_b32: read *value* from the lane at *byte_offset/4*."""
-    tl.static_assert(value.dtype == tl.int32 or value.dtype == tl.uint32, "_ds_bpermute_b32 only supports int32/uint32",
-                     _semantic=_semantic)
-    return tl.inline_asm_elementwise(
-        asm="ds_bpermute_b32 $0, $1, $2\ns_waitcnt lgkmcnt(0)",
-        constraints="=v,v,v",
-        args=[byte_offset, value],
-        dtype=tl.int32,
-        is_pure=True,
-        pack=1,
-        _semantic=_semantic,
-    )
+def __shfl_sync_with_mode_i32(
+    value,
+    offset,
+    mode: core.constexpr = "up",
+    width: int = 64,
+    _semantic=None,
+):
+    shfl_mode = _str_to_gpu_shfl_mode(mode.value)
+    if isinstance(offset, core.constexpr):
+        offset = core.to_tensor(offset, _semantic=_semantic)
+
+    return core.tensor(
+        _semantic.builder.create_warp_shuffle(
+            value.handle,
+            offset.handle,
+            core.to_tensor(width, _semantic=_semantic).handle,
+            shfl_mode,
+        ), value.dtype)
 
 
 @triton.jit
-def __shfl_sync_i32(value, lane):
-    """Shuffle idx: read *value* from *lane* (broadcast if lane is constant)."""
-    byte_offset = tl.cast(lane, tl.int32) * 4
-    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
+def __shfl_sync_i32(value, laneid):
+    return __shfl_sync_with_mode_i32(value, laneid, "idx", 64)
 
 
 @triton.jit
-def __shfl_up_sync_i32(value, delta):
-    """Shuffle up: each lane reads from (laneid - delta), clamped to 0."""
-    _lid = laneid()
-    src_lane = _lid - tl.cast(delta, tl.int32)
-    if src_lane < 0:
-        src_lane = _lid
-    byte_offset = src_lane * 4
-    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
+def __shfl_up_sync_i32(value, offset):
+    # CUDA semantics: lane i reads from lane (i - offset) if i >= offset,
+    # else returns its own value (clamp).
+
+    lid = laneid()
+    src = lid - offset
+    clamped = tl.where(src >= 0, src, lid)
+    return __shfl_sync_with_mode_i32(value, clamped, "idx", 64)
 
 
 @triton.jit
-def __shfl_down_sync_i32(value, delta):
-    """Shuffle down: each lane reads from (laneid + delta), clamped to 63."""
-    WARP_SIZE: tl.constexpr = 64
-    _lid = laneid()
-    src_lane = _lid + tl.cast(delta, tl.int32)
-    if src_lane >= WARP_SIZE:
-        src_lane = _lid
-    byte_offset = src_lane * 4
-    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
+def __shfl_down_sync_i32(value, offset):
+    # CUDA semantics: lane i reads from lane (i + offset) if (i + offset) < warp_size,
+    # else returns its own value (clamp).
+    lid = laneid()
+    src = lid + offset
+    clamped = tl.where(src < 64, src, lid)
+    return __shfl_sync_with_mode_i32(value, clamped, "idx", 64)
 
 
 @triton.jit
-def __shfl_xor_sync_i32(value, mask):
-    """Shuffle xor (butterfly): each lane reads from (laneid ^ mask)."""
-    _lid = laneid()
-    src_lane = _lid ^ tl.cast(mask, tl.int32)
-    byte_offset = src_lane * 4
-    return _ds_bpermute_b32(tl.cast(value, tl.int32), byte_offset)
+def __shfl_xor_sync_i32(value, offset):
+    return __shfl_sync_with_mode_i32(value, offset, "xor", 64)
 
 
 @triton.jit
@@ -562,6 +576,140 @@ def atomic_add_per_warp(barrier_ptr, value, scope: core.constexpr, semantic: cor
     return __shfl_sync_i32(x, 0)
 
 
+@core.extern
+def load_v4_b32(ptr, _semantic=None):
+
+    i32_ir = tl.int32.to_ir(_semantic.builder)
+    ptr_val = _semantic.to_tensor(ptr)
+    op = _semantic.builder.create_extern_call("", "", "__triton_hip_load_v4_b32", [ptr_val.handle], [i32_ir] * 4, False)
+    return (
+        tl.tensor(op.get_result(0), tl.int32),
+        tl.tensor(op.get_result(1), tl.int32),
+        tl.tensor(op.get_result(2), tl.int32),
+        tl.tensor(op.get_result(3), tl.int32),
+    )
+
+
+@core.extern
+def st_v4_b32(ptr, val0, val1, val2, val3, _semantic=None):
+
+    return dist_core.extern_elementwise(
+        "",
+        "",
+        [
+            ptr,
+            tl.cast(val0, tl.int32, _semantic=_semantic),
+            tl.cast(val1, tl.int32, _semantic=_semantic),
+            tl.cast(val2, tl.int32, _semantic=_semantic),
+            tl.cast(val3, tl.int32, _semantic=_semantic)
+        ],
+        {(core.pointer_type(core.dtype("int32")), core.dtype("int32"), core.dtype("int32"), core.dtype("int32"),
+          core.dtype("int32")): ("__triton_hip_store_v4_b32", core.dtype("int32"))},
+        is_pure=False,
+        _semantic=_semantic,
+    )
+
+
+@core.extern
+def ld_vector(
+    ptr,
+    vec_size: core.constexpr = 1,
+    scope: core.constexpr = "agent",
+    semantic: core.constexpr = "monotonic",
+    _semantic=None,
+):
+    assert isinstance(vec_size, tl.constexpr)
+    elems_bits = ptr.dtype.element_ty.primitive_bitwidth
+    total_bits = elems_bits * vec_size
+    if total_bits % 128 == 0:
+        assert scope is None or core._unwrap_if_constexpr(scope) in (None, "agent"), \
+            f"ld_vector v4 path: AMDGPU vector load is non-atomic, scope must be None or 'agent', got {scope}"
+        assert semantic is None or core._unwrap_if_constexpr(semantic) in (None, "monotonic", "relaxed"), \
+            f"ld_vector v4 path: AMDGPU vector load is non-atomic, semantic must be None/'monotonic'/'relaxed', got {semantic}"
+        ptr_i32 = tl.cast(ptr, tl.pi32_t, _semantic=_semantic)
+        vals_i32 = []
+        num_iters = total_bits // 128
+        for idx in range(num_iters):
+            v0, v1, v2, v3 = load_v4_b32(tl.add(ptr_i32, idx * 4, _semantic=_semantic), _semantic=_semantic)
+            vals_i32 += [v0, v1, v2, v3]
+        return make_vector(vals_i32, _semantic=_semantic).recast(ptr.dtype.element_ty, _semantic=_semantic)
+    else:
+        ret = []
+        for i in range(vec_size):
+            ret.append(ld(tl.add(ptr, i, _semantic=_semantic), scope=scope, semantic=semantic, _semantic=_semantic))
+        return make_vector(ret, _semantic=_semantic)
+
+
+@core.extern
+def st_vector(
+    ptr,
+    vec,
+    scope: core.constexpr = "agent",
+    semantic: core.constexpr = "monotonic",
+    _semantic=None,
+):
+    assert isinstance(vec, vector), "st_vector: vec must be a vector"
+    total_bits = vec.type.vector_nbits
+    if total_bits % 128 == 0:
+        assert scope is None or core._unwrap_if_constexpr(scope) in (None, "agent"), \
+            f"st_vector v4 path: AMDGPU vector store is non-atomic, scope must be None or 'agent', got {scope}"
+        assert semantic is None or core._unwrap_if_constexpr(semantic) in (None, "monotonic", "relaxed"), \
+            f"st_vector v4 path: AMDGPU vector store is non-atomic, semantic must be None/'monotonic'/'relaxed', got {semantic}"
+        vec_i32 = vec.recast(tl.int32, _semantic=_semantic)
+        ptr_i32 = tl.cast(ptr, tl.pi32_t, _semantic=_semantic)
+        vals_i32 = [tl.cast(val, tl.int32, _semantic=_semantic) for val in vec_i32]
+        num_iters = total_bits // 128
+        for idx in range(num_iters):
+            st_v4_b32(tl.add(ptr_i32, idx * 4, _semantic=_semantic), *vals_i32[idx * 4:(idx + 1) * 4],
+                      _semantic=_semantic)
+    else:
+        for idx, v in enumerate(vec):
+            st(tl.add(ptr, idx, _semantic=_semantic), v, scope=scope, semantic=semantic, _semantic=_semantic)
+
+
+@core.extern
+def pack(src: vector, dst_type, _semantic=None):
+    """Pack a vector of smaller-bitwidth elements into one larger scalar.
+    E.g. vector([i32_lo, i32_hi]) -> i64 via shift+or (no PTX needed)."""
+    assert isinstance(src, vector)
+    dst_nbits = dst_type.primitive_bitwidth
+    src_elem_dtype = src.type.elem_type
+    assert src.type.vector_nbits == dst_nbits, (f"src.type.vector_nbits {src.type.vector_nbits} != "
+                                                f"dst_type.primitive_bitwidth {dst_nbits}")
+    src_nbits = src_elem_dtype.primitive_bitwidth
+    src_int_ty = core.get_int_dtype(src_nbits, False)
+    dst_int_ty = core.get_int_dtype(dst_nbits, False)
+    combined = tl.cast(tl.constexpr(0), dst_int_ty, _semantic=_semantic)
+    for j in range(src.type.vec_size):
+        bits = tl.cast(src.values[j], src_int_ty, bitcast=True, _semantic=_semantic)
+        bits = tl.cast(bits, dst_int_ty, _semantic=_semantic)
+        shifted = bits.__lshift__(j * src_nbits, _semantic=_semantic)
+        combined = combined.__or__(shifted, _semantic=_semantic)
+    return tl.cast(combined, dst_type, bitcast=True, _semantic=_semantic)
+
+
+@core.extern
+def unpack(src, dst_type, _semantic=None):
+    """Unpack a larger scalar into multiple smaller-bitwidth elements.
+    E.g. i64 -> (i32_lo, i32_hi) via shift+mask."""
+    src_nbits = src.dtype.primitive_bitwidth
+    dst_nbits = dst_type.primitive_bitwidth
+    assert src_nbits % dst_nbits == 0
+    ratio = src_nbits // dst_nbits
+    src_int_ty = core.get_int_dtype(src_nbits, False)
+    dst_int_ty = core.get_int_dtype(dst_nbits, False)
+    int_val = tl.cast(src, src_int_ty, bitcast=True, _semantic=_semantic)
+    mask_val = (1 << dst_nbits) - 1
+    results = []
+    for j in range(ratio):
+        shifted = int_val.__rshift__(j * dst_nbits, _semantic=_semantic)
+        masked = shifted.__and__(mask_val, _semantic=_semantic)
+        elem = tl.cast(masked, dst_int_ty, _semantic=_semantic)
+        elem = tl.cast(elem, dst_type, bitcast=True, _semantic=_semantic)
+        results.append(elem)
+    return results
+
+
 __all__ = [
     "__syncthreads",
     "tid",
@@ -577,6 +725,12 @@ __all__ = [
     "__shfl_xor_sync_i32",
     "load",
     "store",
+    "load_v4_b32",
+    "st_v4_b32",
+    "ld_vector",
+    "st_vector",
+    "pack",
+    "unpack",
     "sync_grid",
     "smid",
     "sync_grid",

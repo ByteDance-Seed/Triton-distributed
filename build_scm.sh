@@ -1,8 +1,31 @@
 #!/bin/bash
 
+# Control which packages to build (both enabled by default)
+# Set BUILD_TRITON_DIST=0 to skip triton_dist, BUILD_FLASHCOMM=0 to skip FlashComm
+BUILD_TRITON_DIST="${BUILD_TRITON_DIST:-1}"
+BUILD_FLASHCOMM="${BUILD_FLASHCOMM:-1}"
+
+if [ "$BUILD_TRITON_DIST" -eq 0 ] && [ "$BUILD_FLASHCOMM" -eq 0 ]; then
+    echo "ERROR: Both BUILD_TRITON_DIST and BUILD_FLASHCOMM are disabled. Nothing to build."
+    exit 1
+fi
+
+echo "BUILD_TRITON_DIST=$BUILD_TRITON_DIST, BUILD_FLASHCOMM=$BUILD_FLASHCOMM"
+
 # set cuda env for scm
 export PATH=/usr/local/cuda/bin:$PATH
-export LIBRARY_PATH=/usr/local/cuda/lib64/:/usr/local/cuda/targets/x86_64-linux/lib/stubs/:$LIBRARY_PATH
+
+ARCH="$(uname -m)"
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+  if [ -d /usr/local/cuda/targets/sbsa-linux ]; then
+    CUDA_TARGET="sbsa-linux"
+  else
+    CUDA_TARGET="aarch64-linux"
+  fi
+else
+  CUDA_TARGET="x86_64-linux"
+fi
+export LIBRARY_PATH="/usr/local/cuda/lib64/:/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/:${LIBRARY_PATH}"
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -39,16 +62,39 @@ pip3 install cuda-python==12.4
 pip3 install setuptools==69.0.0 
 curl -IivvL https://oaitriton.blob.core.windows.net/public/llvm-builds/
 pip3 install ninja cmake wheel pybind11
-pip3 uninstall triton -y
-export USE_TRITON_DISTRIBUTED_AOT=0
-echo 'numpy<2' > /tmp/pip_install_constraint.txt
-MAX_JOBS=40 pip3 install -c /tmp/pip_install_constraint.txt -e python[build,tests,tutorials] --verbose --no-build-isolation --use-pep517
-# bash ./scripts/gen_aot_code.sh
-# export USE_TRITON_DISTRIBUTED_AOT=1
-# MAX_JOBS=40 pip3 install -e python --verbose --no-build-isolation --use-pep517
-cd python
-python3 setup.py bdist_wheel
 
-cd $SCRIPT_DIR
 mkdir -p output/python
-unzip python/dist/*.whl -d output/python
+
+# ============ Build triton_dist ============
+if [ "$BUILD_TRITON_DIST" -eq 1 ]; then
+    echo "========== Building triton_dist =========="
+    cd $SCRIPT_DIR
+    pip3 uninstall triton -y
+    export USE_TRITON_DISTRIBUTED_AOT=0
+    echo 'numpy<2' > /tmp/pip_install_constraint.txt
+    MAX_JOBS=40 pip3 install -c /tmp/pip_install_constraint.txt -e python[build,tests,tutorials] --verbose --no-build-isolation --use-pep517
+    # bash ./scripts/gen_aot_code.sh
+    # export USE_TRITON_DISTRIBUTED_AOT=1
+    # MAX_JOBS=40 pip3 install -e python --verbose --no-build-isolation --use-pep517
+    cd python
+    python3 setup.py bdist_wheel
+    cd $SCRIPT_DIR
+    unzip python/dist/*.whl -d output/python
+    echo "========== triton_dist build done =========="
+else
+    echo "========== Skipping triton_dist (BUILD_TRITON_DIST=0) =========="
+fi
+
+# ============ Build FlashComm ============
+if [ "$BUILD_FLASHCOMM" -eq 1 ]; then
+    echo "========== Building FlashComm =========="
+    cd $SCRIPT_DIR/FlashComm
+    python3 setup.py bdist_wheel
+    cd $SCRIPT_DIR
+    unzip FlashComm/dist/*.whl -d output/python
+    echo "========== FlashComm build done =========="
+else
+    echo "========== Skipping FlashComm (BUILD_FLASHCOMM=0) =========="
+fi
+
+echo "All done. Output packages are in output/python/"

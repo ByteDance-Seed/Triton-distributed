@@ -106,39 +106,53 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op->getLoc();
 
-    if (op->getNumResults() > 1) {
-      llvm::errs() << "ExternCallConversion does not support multi outs.";
-      return failure();
-    }
-
-    LLVM::LLVMVoidType voidTy = void_ty(op->getContext());
-    auto newOperands = adaptor.getOperands();
-    Type retType =
-        op->getNumResults() == 0
-            ? voidTy
-            : this->getTypeConverter()->convertType(op->getResult(0).getType());
     std::string funcName = op.getSymbol().str();
-
     StringRef libname = op.getLibname();
     StringRef libpath = op.getLibpath();
+    auto newOperands = adaptor.getOperands();
 
-    // TODO: refactor below
-    // CreateROCSHMEMOp(rewriter, op, funcName, libname, libpath, newOperands,
-    // retType);
     SmallVector<Value> llvmOperands;
-
     for (auto val : newOperands) {
       if (auto ptrTy = llvm::dyn_cast<LLVM::LLVMPointerType>(val.getType())) {
         assert((ptrTy.getAddressSpace() == 0 || ptrTy.getAddressSpace() == 1) &&
                "wrong address space.");
-        Value ptrAfterCast = val;
-        ptrAfterCast = rewriter.create<LLVM::AddrSpaceCastOp>(
-            loc, LLVM::LLVMPointerType::get(rewriter.getContext()), val);
-        llvmOperands.push_back(ptrAfterCast);
+        llvmOperands.push_back(rewriter.create<LLVM::AddrSpaceCastOp>(
+            loc, LLVM::LLVMPointerType::get(rewriter.getContext()), val));
       } else {
         llvmOperands.push_back(val);
       }
     }
+
+    LLVM::LLVMVoidType voidTy = void_ty(op->getContext());
+
+    if (op->getNumResults() > 1) {
+      SmallVector<Type> retTypes;
+      for (unsigned i = 0; i < op->getNumResults(); ++i)
+        retTypes.push_back(
+            this->getTypeConverter()->convertType(op->getResult(i).getType()));
+      auto structTy =
+          LLVM::LLVMStructType::getLiteral(op->getContext(), retTypes);
+
+      Type funcType =
+          mlir::triton::gpu::getFunctionType(structTy, llvmOperands);
+      LLVM::LLVMFuncOp funcOp = mlir::triton::gpu::appendOrGetExternFuncOp(
+          rewriter, op, funcName, funcType, libname, libpath);
+      auto callResult =
+          LLVM::createLLVMCallOp(rewriter, loc, funcOp, llvmOperands)
+              .getResult();
+
+      SmallVector<Value> results;
+      for (unsigned i = 0; i < retTypes.size(); ++i)
+        results.push_back(
+            rewriter.create<LLVM::ExtractValueOp>(loc, callResult, i));
+      rewriter.replaceOp(op, results);
+      return success();
+    }
+
+    Type retType =
+        op->getNumResults() == 0
+            ? voidTy
+            : this->getTypeConverter()->convertType(op->getResult(0).getType());
 
     Type llvmRetType = retType;
     if (auto retPtrType = llvm::dyn_cast<LLVM::LLVMPointerType>(retType)) {
@@ -160,8 +174,7 @@ public:
       rewriter.eraseOp(op);
     } else {
       if (retType == llvmRetType) {
-        auto newResult = externCallOp.getResult();
-        rewriter.replaceOp(op, newResult);
+        rewriter.replaceOp(op, externCallOp.getResult());
       } else {
         auto castOp = rewriter.create<LLVM::AddrSpaceCastOp>(
             loc, retType, externCallOp.getResult());
@@ -326,7 +339,6 @@ void mlir::triton::AMD::populateDistributedOpToLLVMPatterns(
     std::string SHMEMLibname, std::string SHMEMLibpath) {
   patterns.add<WaitOpConversion, ConsumeTokenOpConversion>(typeConverter,
                                                            benefit);
-
   bool useMoriShmem = useMORISHMEMLibrary(SHMEMLibname);
 
   std::string myPeWrapper =

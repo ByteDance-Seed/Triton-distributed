@@ -78,11 +78,14 @@ def nvsmi(attrs, device_id=0, dtype: type = int):
 # this is much a copy of https://github.com/triton-lang/kernels/blob/main/kernels/matmul_perf_model.py
 @functools.lru_cache()
 def get_max_gpu_clock_rate_in_khz(device_id=0):
+    if device_id is None:
+        device_id = torch.cuda.current_device()
+    device_id = _get_pynvml_device_id(device_id)
     if with_pynvml():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         return pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM) * 1e3
 
-    return nvsmi(["clocks.max.sm"])[0] * 1e3
+    return nvsmi(["clocks.max.sm"], device_id)[0] * 1e3
 
 
 def get_nvlink_adjacency_matrix():
