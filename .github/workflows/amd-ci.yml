@@ -47,6 +47,8 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_distributed-notify-wait.py
           # ag gemm
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
+          # ar gemm
+          bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_ar_intra_node.py 8192 11008 4096
           # gemm rs
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
           # mori shmem api tests
