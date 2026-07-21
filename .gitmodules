@@ -13,5 +13,5 @@
 	update = none
 [submodule "3rdparty/triton-ascend"]
 	path = 3rdparty/triton-ascend
-	url = https://gitcode.com/Ascend/triton-ascend.git
+	url = https://github.com/triton-lang/triton-ascend.git
 	update = none
