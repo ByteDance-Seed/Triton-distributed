@@ -32,6 +32,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -200,6 +201,21 @@ public:
     if (!hasSideEffect) {
       customOp->setAttr("no_side_effect", rewriter.getUnitAttr());
     }
+    llvm::SmallVector<int> gmAddrArgsIndices;
+    auto funcOp = customOp->template getParentOfType<triton::FuncOp>();
+    assert(funcOp && "custom op should be in tt.func op");
+    for (auto &&[idx, operand] : llvm::enumerate(customOp->getOperands())) {
+      if (!llvm::isa<triton::PointerType>(operand.getType())) {
+        continue;
+      }
+      if (auto arg = llvm::dyn_cast<BlockArgument>(operand)) {
+        if (arg.getOwner() == &funcOp.getFunctionBody().front()) {
+          gmAddrArgsIndices.emplace_back(idx);
+        }
+      }
+    }
+    customOp->setAttr("gm_addr_args_indices",
+                      rewriter.getDenseI32ArrayAttr(gmAddrArgsIndices));
     // Replace the original op with the custom op
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
