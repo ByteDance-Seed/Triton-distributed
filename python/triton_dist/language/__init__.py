@@ -38,7 +38,13 @@ from .smem_ops import (
     get_smem_shared_address_u32,
     smem_dealloc,
 )
-from . import tma
+
+# TMA (Tensor Memory Accelerator) is NVIDIA/CUDA-specific
+from triton_dist.utils import is_cuda
+if is_cuda():
+    from . import tma
+else:
+    tma = None
 
 __all__ = [
     # distributed ops
