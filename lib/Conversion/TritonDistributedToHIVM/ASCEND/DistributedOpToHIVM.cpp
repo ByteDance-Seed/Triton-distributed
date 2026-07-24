@@ -31,6 +31,8 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -123,7 +125,7 @@ public:
     if (auto sym = op->template getAttrOfType<StringAttr>("symbol")) {
       symbolName = sym.str();
     }
-    bool hasSideEffect = true;
+    bool hasSideEffect = !mlir::isMemoryEffectFree(op.getOperation());
 
     llvm::TypeSwitch<Operation *, void>(op)
         .Case([&](distributed::SymmAtOp) {
@@ -159,9 +161,6 @@ public:
     if (symbolName.empty()) {
       symbolName = op->getName().getStringRef().drop_front(
           ASCEND::distributedDialectPrefixLen);
-    }
-    if (!llvm::is_contained(ASCEND::sideEffectSymbols, symbolName)) {
-      hasSideEffect = false;
     }
     std::string customName = customPrefix + "." + symbolName;
     ValueRange operands = op->getOperands();
@@ -202,6 +201,21 @@ public:
     if (!hasSideEffect) {
       customOp->setAttr("no_side_effect", rewriter.getUnitAttr());
     }
+    llvm::SmallVector<int> gmAddrArgsIndices;
+    auto funcOp = customOp->template getParentOfType<triton::FuncOp>();
+    assert(funcOp && "custom op should be in tt.func op");
+    for (auto &&[idx, operand] : llvm::enumerate(customOp->getOperands())) {
+      if (!llvm::isa<triton::PointerType>(operand.getType())) {
+        continue;
+      }
+      if (auto arg = llvm::dyn_cast<BlockArgument>(operand)) {
+        if (arg.getOwner() == &funcOp.getFunctionBody().front()) {
+          gmAddrArgsIndices.emplace_back(idx);
+        }
+      }
+    }
+    customOp->setAttr("gm_addr_args_indices",
+                      rewriter.getDenseI32ArrayAttr(gmAddrArgsIndices));
     // Replace the original op with the custom op
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);

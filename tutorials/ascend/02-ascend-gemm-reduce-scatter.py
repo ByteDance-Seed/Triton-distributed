@@ -347,7 +347,7 @@ def run_test_distributed():
             raise AssertionError(error_msg)
 
     ash.aclshmem_free_tensor(peer_mem)
-    _ = ash.aclshmem_finialize()
+    _ = ash.aclshmem_finalize()
 
 
 if __name__ == "__main__":

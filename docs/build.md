@@ -141,7 +141,7 @@ See examples in the `tutorials` directory at the project root.
 ## To use Triton-distributed with the AMD backend:
 Starting from the rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1 Docker container
 #### AMD Build Steps
-0. Detect your GPU architecture and export it. 
+0. Detect your GPU architecture and export it.
 ```sh
 # e.g. gfx950 for MI350, gfx942 for MI300
 python3 -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(':')[0])"
@@ -201,8 +201,8 @@ git clone https://github.com/ByteDance-Seed/Triton-distributed.git
 ```sh
 cd Triton-distributed/
 git submodule update --init --depth=1
-# 3rdparty/triton-ascend and 3rdparty/shmem are hosted on gitcode.com and are
-# marked `update = none` in .gitmodules, so the command above skips them (this
+# 3rdparty/shmem and 3rdparty/triton-ascend's submodules are hosted on gitcode.com and
+# are marked `update = none` in .gitmodules, so the command above skips them (this
 # keeps CI environments that cannot reach gitcode.com from failing at submodule
 # init). Fetch them explicitly for an Ascend build (--checkout overrides `none`):
 git submodule update --init --checkout --depth=1 3rdparty/triton-ascend 3rdparty/shmem
@@ -266,8 +266,8 @@ triton-ascend depends on specified LLVM version
   ```
 4. Build Triton-distributed
 ```sh
-cd {PATH_TO}/Triton-distributed/python
-LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} TRITON_BUILD_WITH_CLANG_LLD=ON TRITON_BUILD_PROTON=OFF TRITON_BUILD_LITTLE_KERNEL=OFF TRITON_USE_ASCEND=ON TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" python setup.py install
+cd {PATH_TO}/Triton-distributed
+LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} TRITON_BUILD_WITH_CLANG_LLD=ON TRITON_BUILD_PROTON=OFF TRITON_BUILD_LITTLE_KERNEL=OFF TRITON_USE_ASCEND=ON TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" pip install ./python
 ```
 
 5. Build and Install shmem
