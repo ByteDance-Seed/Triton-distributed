@@ -283,6 +283,7 @@ def _putmem_signal_impl(
     op: core.constexpr,
     _semantic=None,
 ):
+    tl.static_assert(sig_addr.dtype == pi_i32_t, "sig_addr should be a pointer of pi_i32_t", _semantic=_semantic)
     return extern_call(
         "libshmem_device",
         "",
@@ -290,7 +291,7 @@ def _putmem_signal_impl(
             dest,
             source,
             tl.cast(nbytes, tl.uint32, _semantic=_semantic),
-            sig_addr,
+            tl.cast(sig_addr, pi_i32_t, _semantic=_semantic),
             tl.cast(signal, tl.int32, _semantic=_semantic),
             tl.cast(sig_op, tl.int32, _semantic=_semantic),
             tl.cast(pe, tl.int32, _semantic=_semantic),
@@ -299,7 +300,7 @@ def _putmem_signal_impl(
             core.pointer_type(core.dtype(core_dtype)),
             core.pointer_type(core.dtype(core_dtype)),
             tl.uint32,
-            core.pointer_type(core.dtype("int32")),
+            pi_i32_t,
             tl.int32,
             tl.int32,
             tl.int32,
@@ -345,11 +346,12 @@ def putmem_signal_nbi(dest, source, nbytes, sig_addr, signal, sig_op, pe, _seman
 
 @core.extern
 def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
+    tl.static_assert(sig_addr.dtype == pi_i32_t, "sig_addr should be a pointer of pi_i32_t", _semantic=_semantic)
     return extern_call(
         "libshmem_device",
         "",
         [
-            sig_addr,
+            tl.cast(sig_addr, pi_i32_t, _semantic=_semantic),
             tl.cast(signal, tl.int32, _semantic=_semantic),
             tl.cast(sig_op, tl.int32, _semantic=_semantic),
             tl.cast(pe, tl.int32, _semantic=_semantic),
@@ -367,11 +369,12 @@ def signal_op(sig_addr, signal, sig_op, pe, _semantic=None):
 
 @core.extern
 def signal_wait_until(sig_addr, cmp_, cmp_val, _semantic=None):
+    tl.static_assert(sig_addr.dtype == pi_i32_t, "sig_addr should be a pointer of pi_i32_t", _semantic=_semantic)
     return extern_call(
         "libshmem_device",
         "",
         [
-            sig_addr,
+            tl.cast(sig_addr, pi_i32_t, _semantic=_semantic),
             tl.cast(cmp_, tl.int32, _semantic=_semantic),
             tl.cast(cmp_val, tl.int32, _semantic=_semantic),
         ],
