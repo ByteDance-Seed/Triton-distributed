@@ -46,7 +46,7 @@ except ImportError:
 
 def is_git_repo():
     """Return True if this file resides in a git repository"""
-    return (Path(__file__).parent / ".git").is_dir()
+    return (Path(__file__).parent.parent / ".git").exists()
 
 
 # --- Hardware Detection Functions (using subprocess) ---
