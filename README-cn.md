@@ -33,7 +33,7 @@
     <img src="https://img.shields.io/badge/License-MIT-blue"></a>
 </p> -->
 
-[原始Triton README](upstream-README.md) | [英文README](README.md)
+[原始Triton README](https://github.com/triton-lang/triton/blob/main/README.md) | [英文README](README.md)
 
 Triton-distributed是基于OpenAI Triton构建的分布式编译器，专为计算-通信重叠优化设计。
 
@@ -61,7 +61,7 @@ Triton-distributed 提供了一套易于使用的原语，用于支持开发计�
 
 使用这些原语，用户可以轻松编写通信kernel。例如，以下展示了一个低延迟的AllToAll通信操作（在推理场景下，其延迟表现优于[DeepEP](https://github.com/deepseek-ai/DeepEP)）。这个例子在32卡H800集群中性能是137微秒（每个卡128 token, topk=8, hidden_size=7168, 数据类型是fp8），DeepEP是182微秒（DeepEP推理不用NVLink）
 ```py
-@triton.jit
+@triton_dist.jit
 def all_to_all_kernel(
     data_src,
     data_dst,
