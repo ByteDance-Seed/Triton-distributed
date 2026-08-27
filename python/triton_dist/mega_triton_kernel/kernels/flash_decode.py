@@ -103,7 +103,7 @@ def attn_gqa_fwd_batch_decode_split_kv_task_compute(
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_HEAD_DIM + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < K_HEAD_DIM
-        offs_qpe = bid * stride_q_bs + cur_head[:, None] * stride_q_h + offs_dpe[:, None] * 1  # stride_q_d
+        offs_qpe = bid * stride_q_bs + cur_head[:, None] * stride_q_h + offs_dpe[None, :] * 1  # stride_q_d
         qpe = tl.load(q_ptr + offs_qpe, mask=mask_h[:, None] & mask_dpe[None, :], other=0.0)
 
     kv_len_per_split = tl.cdiv(cur_kv_seq_len, NUM_KV_SPLITS)

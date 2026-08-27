@@ -55,7 +55,7 @@ if __name__ == "__main__":
     tp_size = 8
     num_q_heads = 64 // tp_size
     num_kv_heads = 8 // tp_size
-    q_head_dim, v_head_dim = 128, 128
+    q_head_dim, v_head_dim = 96, 96
 
     key_cache = torch.randn(MAX_NUM_KV_BLOCKS, PAGE_SIZE, num_kv_heads, q_head_dim, dtype=dtype).cuda()
     value_cache = torch.randn(MAX_NUM_KV_BLOCKS, PAGE_SIZE, num_kv_heads, v_head_dim, dtype=dtype).cuda()
