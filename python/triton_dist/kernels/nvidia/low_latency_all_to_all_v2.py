@@ -268,7 +268,8 @@ def dispatch_kernel_v2(
             dst_slot = atomic_add_per_warp(recv_slot_counter + dst_expert, 1, scope="gpu", semantic="relaxed")
             dst_rank = dst_expert // NUM_EXPERTS_PER_RANK
             dst_expert_local_idx = dst_expert % NUM_EXPERTS_PER_RANK
-            dst_recv_buffer_off = (dst_expert_local_idx * world_size * MAX_M + rank * MAX_M + dst_slot) * ELE_PER_MSG
+            dst_recv_buffer_off = (dst_expert_local_idx.to(tl.int64) * world_size * MAX_M + rank * MAX_M +
+                                   dst_slot) * ELE_PER_MSG
 
             libshmem_device.putmem_nbi_warp(
                 recv_token_buffer_base + dst_recv_buffer_off,
@@ -412,8 +413,10 @@ def combine_kernel_v2(
         dispatch_count_and_start = ld(dispatch_recv_token_source_count_and_start + local_expert_idx * world_size +
                                       dst_rank)
         dispatch_count, dispatch_start = unpack_b32_v2(dispatch_count_and_start)
-        send_token_base = send_tokens + local_expert_idx * world_size * MAX_M * HIDDEN + dispatch_start * HIDDEN
-        send_tokens_comm_buf_base = send_tokens_comm_buf + local_expert_idx * world_size * MAX_M * HIDDEN + dispatch_start * HIDDEN
+        send_token_base = send_tokens + local_expert_idx.to(
+            tl.int64) * world_size * MAX_M * HIDDEN + dispatch_start * HIDDEN
+        send_tokens_comm_buf_base = send_tokens_comm_buf + local_expert_idx.to(
+            tl.int64) * world_size * MAX_M * HIDDEN + dispatch_start * HIDDEN
         dispatch_recv_token_source_indices_base = dispatch_recv_token_source_indices + local_expert_idx * world_size * MAX_M + dispatch_start
         num_iters = tl.cdiv(dispatch_count, BM)
         for j in range(num_iters):
@@ -432,8 +435,8 @@ def combine_kernel_v2(
             for token_id in range(warp_id, num_tokens_tile, NUM_WARPS):
                 # apply scatter according to the `dispatch_recv_token_source_indices`
                 dispatch_src_idx = ld(dispatch_recv_token_source_indices_base + j * BM + token_id)
-                dst_ptr = recv_token_buffer + (rank * NUM_EXPERTS_PER_RANK +
-                                               local_expert_idx) * MAX_M * HIDDEN + dispatch_src_idx * HIDDEN
+                dst_ptr = recv_token_buffer + (rank * NUM_EXPERTS_PER_RANK + local_expert_idx).to(
+                    tl.int64) * MAX_M * HIDDEN + dispatch_src_idx * HIDDEN
                 if not is_intra_node:
                     src_ptr = send_tokens_comm_buf_base + (j * BM + token_id) * HIDDEN
                     libshmem_device.putmem_nbi_warp(dst_ptr, src_ptr, nbytes, dst_rank)
@@ -477,7 +480,7 @@ def combine_kernel_v2(
                                      other=0)  # [PADDED_TOPK, ]
         token_topk_weights = tl.load(topk_weights + token_id * TOPK + offs_topk, mask=offs_topk < TOPK,
                                      other=0)  # [PADDED_TOPK, ]
-        token_topk_ptrs = recv_token_buffer + (token_topk_indices[:, None] * MAX_M +
+        token_topk_ptrs = recv_token_buffer + (token_topk_indices[:, None].to(tl.int64) * MAX_M +
                                                token_id) * HIDDEN + offs_hidden[None, :]
         token_topk_data = tl.load(token_topk_ptrs, mask=mask_topk[:, None] & mask_hidden[None, :],
                                   other=0.0).to(topk_weights.dtype.element_ty)  # [PADDED_TOPK, BN]
