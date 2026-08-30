@@ -71,8 +71,6 @@ function check_nvshmem_bootstrap_uid_sock() {
   local RESET='\033[0m'
   local WARN_ICON='⚠️'
 
-  local HAS_IPV4=0
-
   # check NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME: better matches the NCCL
   if [ -n "${NCCL_SOCKET_IFNAME}" ]; then
     echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
@@ -89,15 +87,13 @@ function check_nvshmem_bootstrap_uid_sock() {
     fi
   fi
 
-  if [ -n "${NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY}" ]; then
-    if command -v ip >/dev/null 2>&1; then
-      ip -4 addr show dev "${NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME}" 2>/dev/null | grep -q 'inet' && HAS_IPV4=1
+  if [ "${NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY}" = "AF_INET" ]; then
+    if ! command -v ip >/dev/null 2>&1; then
+      echo -e "${YELLOW}${BOLD}${WARN_ICON} WARNING: ${RESET}${BOLD}${RESET} cannot verify IPv4 because the ip command is unavailable; keep NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY=AF_INET..."
+    elif ! ip -4 addr show dev "${NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME}" 2>/dev/null | grep -q 'inet '; then
+      echo -e "${YELLOW}${BOLD}${WARN_ICON} WARNING: ${RESET}${BOLD}${RESET} NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=${NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME} does not support IPv4, force set NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY to AF_INET6..."
+      export NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY=AF_INET6
     fi
-  fi
-
-  if [ ${HAS_IPV4} -eq 0 ]; then
-    echo -e "${YELLOW}${BOLD}${WARN_ICON} WARNING: ${RESET}${BOLD}${RESET} NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY=${NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY} does not support IPv4, force set NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY to AF_INET6..."
-    export NVSHMEM_BOOTSTRAP_UID_SOCK_FAMILY=AF_INET6
   fi
 }
 
