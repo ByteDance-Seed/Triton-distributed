@@ -160,7 +160,7 @@ additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
 # If you want to use compute-sanitizer, please set TORCHRUN="/usr/local/cuda/bin/compute-sanitizer --tool memcheck torchrun"
 # export PYTORCH_NO_CUDA_MEMORY_CACHING=1
 # TORCHRUN="/usr/local/cuda/bin/compute-sanitizer --tool memcheck torchrun"
-TORCHRUN=torchrun
+TORCHRUN="${TORCHRUN:-torchrun}"
 CMD="${TORCHRUN} \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
