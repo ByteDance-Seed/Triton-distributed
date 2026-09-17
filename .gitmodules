@@ -1,6 +1,7 @@
 [submodule "3rdparty/triton"]
 	path = 3rdparty/triton
 	url = https://github.com/triton-lang/triton.git
+	shallow = true
 [submodule "3rdparty/mori"]
 	path = 3rdparty/mori
 	url = https://github.com/ROCm/mori.git

@@ -35,21 +35,34 @@ fi
 
 rocm_systems_tag=hip-version_7.12.60610
 
+clone_rocm_systems() {
+  local dest="$1"
+  local tag="$2"
+  local attempt
+  local clone_cmd=(git clone "https://github.com/ROCm/rocm-systems.git" -b "${tag}" --depth 1 --filter=blob:none --sparse "${dest}")
+  # A hung GitHub fetch previously burned 23+ minutes. Kill idle/slow clones
+  # quickly and retry instead of holding the whole AMD job.
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_HTTP_LOW_SPEED_LIMIT=1024
+  export GIT_HTTP_LOW_SPEED_TIME=30
+  for attempt in 1 2 3; do
+    rm -rf "${dest}"
+    if command -v timeout >/dev/null 2>&1; then
+      if timeout 90 "${clone_cmd[@]}"; then
+        return 0
+      fi
+    elif "${clone_cmd[@]}"; then
+      return 0
+    fi
+    echo "rocm-systems clone attempt ${attempt} failed or timed out, retrying"
+  done
+  return 1
+}
+
 if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   echo "Creating sparse checkout"
   pushd "${PROJECT_ROOT}/../.."
-  clone_ok=0
-  for attempt in 1 2 3; do
-    rm -rf "${sys_path}"
-    if git clone "https://github.com/ROCm/rocm-systems.git" \
-        -b "${rocm_systems_tag}" --depth 1 --filter=blob:none --sparse "${sys_path}"; then
-      clone_ok=1
-      break
-    fi
-    echo "rocm-systems clone attempt ${attempt} failed, retrying"
-    sleep 5
-  done
-  if [ "${clone_ok}" != 1 ]; then
+  if ! clone_rocm_systems "${sys_path}" "${rocm_systems_tag}"; then
     echo "error: failed to clone rocm-systems" >&2
     exit 1
   fi
