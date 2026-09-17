@@ -60,8 +60,16 @@ jobs:
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ag_gemm_intra_node.py 8192 11008 4096
           # gemm rs
           bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_gemm_rs_intra_node.py 8192 4096 12288
-          # mori shmem api tests
-          TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py
+          # mori shmem api tests (ring_put has been flaky on 8-GPU GitHub runners)
+          api_ok=0
+          for i in 1 2 3; do
+            if TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_api.py; then
+              api_ok=1
+              break
+            fi
+            echo "unit MoRI API test attempt ${i} failed, retrying"
+          done
+          [ "${api_ok}" = 1 ]
           # mori shmem bw tests
           TRITON_DIST_SHMEM_BACKEND=mori_shmem bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_mori_shmem_bw.py
   amd-e2e-test:

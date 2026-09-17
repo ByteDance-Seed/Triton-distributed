@@ -113,6 +113,9 @@ def test_mori_shmem_device():
         peer = (mype + 1) % npes
 
         libshmem_device.int_p(ptr, mype, peer)
+        libshmem_device.fence()
+        libshmem_device.quiet()
+        libshmem_device.barrier_all_block()
 
     @triton_dist.jit
     def _mori_shmem_warp_put(send_ptr, recv_ptr):
