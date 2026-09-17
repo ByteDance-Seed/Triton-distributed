@@ -70,36 +70,56 @@ cp -f "${MORI_BC}" "${STAGED_BC}"
 #     shmem_module_init(). If the symbol is missing that init has nowhere to land;
 #     it must also be a strong definition (not weak/declared) or the host state
 #     lands on the wrong instance and device reads see garbage peer pointers.
-# ROCm 7.1 images ship llvm-dis under llvm/bin, not lib/llvm/bin. Walk the
-# common prefixes (and PATH) so a missing default path does not fail the job.
-resolve_llvm_dis() {
-    local cand
+# ROCm 7.1 images may omit llvm-dis next to clang++, and apt `llvm` is LLVM 18
+# which cannot read the LLVM 20 bitcode HIP produces. Prefer ROCm copies, then
+# versioned llvm-dis-2x, and only keep a candidate that can actually disassemble.
+# If none can, fall back to strings on the .bc (symbol names are still present).
+collect_llvm_dis_candidates() {
+    local cand hip_bin hip_dir
+    [ -n "${LLVM_DIS:-}" ] && printf '%s\n' "${LLVM_DIS}"
     for cand in \
-        "${LLVM_DIS:-}" \
         "${ROCM_PATH}/lib/llvm/bin/llvm-dis" \
         "${ROCM_PATH}/llvm/bin/llvm-dis" \
         /opt/rocm/lib/llvm/bin/llvm-dis \
-        /opt/rocm/llvm/bin/llvm-dis \
-        "$(command -v llvm-dis 2>/dev/null || true)"
+        /opt/rocm/llvm/bin/llvm-dis
     do
-        if [ -n "${cand}" ] && [ -x "${cand}" ]; then
-            printf '%s\n' "${cand}"
-            return 0
-        fi
+        printf '%s\n' "${cand}"
     done
-    return 1
+    if hip_bin="$(command -v hipcc 2>/dev/null)"; then
+        hip_dir="$(cd "$(dirname "${hip_bin}")/.." && pwd)"
+        printf '%s\n' "${hip_dir}/lib/llvm/bin/llvm-dis" "${hip_dir}/llvm/bin/llvm-dis"
+    fi
+    if [ -d "${ROCM_PATH}" ]; then
+        find "${ROCM_PATH}" /opt/rocm -name 'llvm-dis' -type f 2>/dev/null || true
+    fi
+    for cand in llvm-dis-21 llvm-dis-20 llvm-dis; do
+        command -v "${cand}" 2>/dev/null || true
+    done
 }
-LLVM_DIS="$(resolve_llvm_dis)" || {
-    echo "Error: llvm-dis not found under ${ROCM_PATH} or PATH" >&2
-    exit 1
-}
-echo "Using llvm-dis: ${LLVM_DIS}"
+
 STAGED_LL=$(mktemp)
 trap 'rm -f "${STAGED_LL}"' EXIT
-"${LLVM_DIS}" "${STAGED_BC}" -o "${STAGED_LL}"
-grep -q '@mori_shmem_putmem_nbi_signal_block' "${STAGED_LL}" \
-    || { echo "Error: MORI bitcode missing cooperative APIs (mori_shmem_putmem_nbi_signal_block)" >&2; exit 1; }
-grep -q '@_ZN4mori5shmem15globalGpuStatesE' "${STAGED_LL}" \
-    || { echo "Error: MORI bitcode missing globalGpuStates" >&2; exit 1; }
+LLVM_DIS=""
+while read -r cand; do
+    [ -n "${cand}" ] && [ -x "${cand}" ] || continue
+    if "${cand}" "${STAGED_BC}" -o "${STAGED_LL}" >/dev/null 2>&1; then
+        LLVM_DIS="${cand}"
+        break
+    fi
+done < <(collect_llvm_dis_candidates | awk 'NF && !seen[$0]++')
+
+if [ -n "${LLVM_DIS}" ]; then
+    echo "Using llvm-dis: ${LLVM_DIS}"
+    grep -q '@mori_shmem_putmem_nbi_signal_block' "${STAGED_LL}" \
+        || { echo "Error: MORI bitcode missing cooperative APIs (mori_shmem_putmem_nbi_signal_block)" >&2; exit 1; }
+    grep -q '@_ZN4mori5shmem15globalGpuStatesE' "${STAGED_LL}" \
+        || { echo "Error: MORI bitcode missing globalGpuStates" >&2; exit 1; }
+else
+    echo "Warning: no llvm-dis could read ${STAGED_BC}; checking symbols via strings"
+    strings "${STAGED_BC}" | grep -q 'mori_shmem_putmem_nbi_signal_block' \
+        || { echo "Error: MORI bitcode missing cooperative APIs (mori_shmem_putmem_nbi_signal_block)" >&2; exit 1; }
+    strings "${STAGED_BC}" | grep -q '_ZN4mori5shmem15globalGpuStatesE' \
+        || { echo "Error: MORI bitcode missing globalGpuStates" >&2; exit 1; }
+fi
 
 echo "✓ MORI bitcode staged at: ${STAGED_BC}"

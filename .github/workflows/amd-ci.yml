@@ -118,7 +118,7 @@ jobs:
       - name: Install dependencies
         run: |
           rm -f /usr/local/bin/cmake
-          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake ninja-build clang lld llvm
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake ninja-build clang lld
           pip3 install -i https://test.pypi.org/simple hip-python>=7.1
           pip3 install pybind11
       - name: Checkout
