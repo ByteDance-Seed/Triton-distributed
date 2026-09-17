@@ -21,41 +21,35 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
-// Forward declarations
-void bind_intranode_ops(py::module &m);
-void bind_ep_chunk_plan_ops(py::module &m);
-void bind_symmetric_memory(py::module &m);
+#include "flash_comm/quantization/mxfp8.h"
+#include "flash_comm/torch_utils.h"
 
 namespace flash_comm {
 namespace quantization {
-void bind_quantization_ops(py::module &m);
-} // namespace quantization
-namespace ep {
-namespace internode {
-void bind_internode_ops(py::module &m);
-} // namespace internode
-} // namespace ep
-} // namespace flash_comm
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  auto quantization =
-      m.def_submodule("quantization", "Standalone quantization operations");
-  flash_comm::quantization::bind_quantization_ops(quantization);
-
-  auto ep_intranode =
-      m.def_submodule("ep_intranode", "Expert Parallel intranode operations");
-  bind_intranode_ops(ep_intranode);
-
-  auto ep_internode =
-      m.def_submodule("ep_internode", "Expert Parallel internode (NCCL GIN)");
-  flash_comm::ep::internode::bind_internode_ops(ep_internode);
-
-  auto ep_chunk_plan =
-      m.def_submodule("ep_chunk_plan", "Expert Parallel chunk planning");
-  bind_ep_chunk_plan_ops(ep_chunk_plan);
-
-  auto buffer = m.def_submodule("buffer", "Buffer operations");
-  bind_symmetric_memory(buffer);
+void mxfp8_quantize(torch::Tensor x, torch::Tensor packed, int32_t num_sm) {
+  check_tensor_common(x, "x", true, torch::kBFloat16, 2);
+  check_tensor_common(packed, "packed", true, torch::kBFloat16, 2);
+  int32_t num_token = x.size(0);
+  int32_t hidden_size = x.size(1);
+  int32_t packed_row_bytes = mxfp8_packed_row_bytes(hidden_size);
+  check_tensor_shape(packed, "packed", {num_token, packed_row_bytes / 2});
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  mxfp8_quantize_cuda(x.data_ptr(), packed.data_ptr(), num_token, hidden_size,
+                      packed_row_bytes, num_sm, stream);
 }
+
+void bind_quantization_ops(py::module &m) {
+  m.def("mxfp8_packed_row_bytes", &mxfp8_packed_row_bytes,
+        py::arg("hidden_size"),
+        "Packed MXFP8 row size in bytes (block-32 E4M3 + E8M0, transport "
+        "aligned)");
+  m.def("mxfp8_quantize", &mxfp8_quantize, py::arg("x"), py::arg("packed"),
+        py::arg("num_sm") = 0, "Quantize BF16 rows to packed block-32 MXFP8");
+}
+
+} // namespace quantization
+} // namespace flash_comm

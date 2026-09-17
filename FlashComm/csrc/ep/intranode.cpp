@@ -29,11 +29,16 @@
 
 #include "flash_comm/common.h"
 #include "flash_comm/ep/intranode.h"
+#include "flash_comm/quantization/mxfp8.h"
 #include "flash_comm/torch_utils.h"
 
 namespace flash_comm {
 namespace ep {
 namespace intranode {
+
+using flash_comm::quantization::kMXFP8BlockSize;
+using flash_comm::quantization::kMXFP8MaxIntranodeRanks;
+using flash_comm::quantization::mxfp8_packed_row_bytes;
 
 #define WARP_SIZE 32
 
@@ -57,6 +62,35 @@ static inline void check_uva_enabled_for_current_device() {
 static inline void check_topk_indices(const torch::Tensor &topk_indices) {
   check_tensor_common(topk_indices, "topk_indices", /*expect_cuda=*/true,
                       torch::kInt32, /*expect_dim=*/2);
+}
+
+static inline void check_mxfp8_dispatch_args(int32_t rank, int32_t num_ranks,
+                                             int32_t num_experts_per_rank,
+                                             int32_t num_sm) {
+  FLASH_CHECK(num_ranks > 0 && num_ranks <= kMXFP8MaxIntranodeRanks)
+      << "MXFP8 intranode dispatch supports 1.." << kMXFP8MaxIntranodeRanks
+      << " ranks";
+  FLASH_CHECK(rank >= 0 && rank < num_ranks)
+      << "rank must be between 0 and num_ranks - 1, " << rank << " not in [0, "
+      << num_ranks << ")";
+  FLASH_CHECK(num_experts_per_rank > 0)
+      << "num_experts_per_rank must be positive";
+  FLASH_CHECK(num_sm > 0) << "num_sm must be positive for MXFP8 dispatch";
+}
+
+static inline int32_t check_mxfp8_dispatch_layout_tensors(
+    const torch::Tensor &topk_send_mask, const torch::Tensor &topk_indices,
+    const torch::Tensor &token_dst_scatter_indices, int32_t num_token) {
+  check_tensor_common(topk_send_mask, "topk_send_mask", true, torch::kInt32, 2);
+  check_topk_indices(topk_indices);
+  check_tensor_common(token_dst_scatter_indices, "token_dst_scatter_indices",
+                      true, torch::kInt32, 2);
+  int32_t topk = topk_indices.size(1);
+  check_tensor_shape(topk_send_mask, "topk_send_mask", {num_token, topk});
+  check_tensor_shape(topk_indices, "topk_indices", {num_token, topk});
+  check_tensor_shape(token_dst_scatter_indices, "token_dst_scatter_indices",
+                     {num_token, topk});
+  return topk;
 }
 
 static inline void check_expert_counts(const torch::Tensor &expert_counts,
@@ -374,6 +408,96 @@ void dispatch_intranode_range(
                           logical_token_range);
 }
 
+void dispatch_mxfp8_quant_fused_intranode(
+    torch::Tensor x, torch::Tensor topk_send_mask,
+    c10::optional<torch::Tensor> optional_topk_weights,
+    torch::Tensor topk_indices, torch::Tensor token_dst_scatter_indices,
+    torch::Tensor recv_x_ptrs, torch::Tensor recv_weights_ptrs,
+    torch::Tensor recv_topk_scatter_indices_ptrs, int32_t rank,
+    int32_t num_ranks, int32_t num_experts_per_rank, int32_t num_sm) {
+  check_mxfp8_dispatch_args(rank, num_ranks, num_experts_per_rank, num_sm);
+  check_tensor_common(x, "x", true, torch::kBFloat16, 2);
+  int32_t num_token = x.size(0);
+  int32_t hidden_size = x.size(1);
+  FLASH_CHECK(hidden_size % kMXFP8BlockSize == 0)
+      << "hidden_size must be divisible by " << kMXFP8BlockSize;
+  int32_t topk = check_mxfp8_dispatch_layout_tensors(
+      topk_send_mask, topk_indices, token_dst_scatter_indices, num_token);
+  check_ptrs_tensor_i64(recv_x_ptrs, num_ranks, "recv_x_ptrs");
+  check_ptrs_tensor_i64(recv_weights_ptrs, num_ranks, "recv_weights_ptrs");
+  check_ptrs_tensor_i64(recv_topk_scatter_indices_ptrs, num_ranks,
+                        "recv_topk_scatter_indices_ptrs");
+  void *topk_weights = nullptr;
+  auto weight_dtype = FlashCommDType::Float32;
+  if (optional_topk_weights.has_value() &&
+      optional_topk_weights.value().defined()) {
+    check_tensor_common(optional_topk_weights.value(), "topk_weights", true,
+                        torch::kFloat32, 2);
+    check_tensor_shape(optional_topk_weights.value(), "topk_weights",
+                       {num_token, topk});
+    topk_weights = optional_topk_weights.value().data_ptr();
+  }
+  auto offset_dtype = get_flash_comm_dtype(topk_indices.scalar_type());
+  FLASH_CHECK(offset_dtype == FlashCommDType::Int32)
+      << "Only Int32 offset type is currently supported";
+  FLASH_CHECK(topk * 2 <= WARP_SIZE);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  dispatch_mxfp8_quant_fused_intranode_cuda(
+      x.data_ptr(), topk_send_mask.data_ptr(), topk_weights,
+      topk_indices.data_ptr(), token_dst_scatter_indices.data_ptr(),
+      recv_x_ptrs.data_ptr(),
+      reinterpret_cast<void **>(recv_weights_ptrs.data_ptr()),
+      reinterpret_cast<void **>(recv_topk_scatter_indices_ptrs.data_ptr()),
+      num_token, hidden_size, num_experts_per_rank, rank, num_ranks, num_sm,
+      weight_dtype, offset_dtype, topk, stream);
+}
+
+void dispatch_mxfp8_prequantized_intranode(
+    torch::Tensor x, torch::Tensor topk_send_mask,
+    c10::optional<torch::Tensor> optional_topk_weights,
+    torch::Tensor topk_indices, torch::Tensor token_dst_scatter_indices,
+    torch::Tensor recv_x_ptrs, torch::Tensor recv_weights_ptrs,
+    torch::Tensor recv_topk_scatter_indices_ptrs, int32_t hidden_size,
+    int32_t rank, int32_t num_ranks, int32_t num_experts_per_rank,
+    int32_t num_sm) {
+  check_mxfp8_dispatch_args(rank, num_ranks, num_experts_per_rank, num_sm);
+  check_tensor_common(x, "x", true, torch::kBFloat16, 2);
+  int32_t num_token = x.size(0);
+  // The caller states the logical hidden size and the packed row length is
+  // derived from it, so a mis-sized packed buffer is rejected here instead of
+  // silently selecting a differently shaped kernel.
+  int32_t packed_row_bytes = mxfp8_packed_row_bytes(hidden_size);
+  check_tensor_shape(x, "x", {num_token, packed_row_bytes / 2});
+  int32_t topk = check_mxfp8_dispatch_layout_tensors(
+      topk_send_mask, topk_indices, token_dst_scatter_indices, num_token);
+  check_ptrs_tensor_i64(recv_x_ptrs, num_ranks, "recv_x_ptrs");
+  check_ptrs_tensor_i64(recv_weights_ptrs, num_ranks, "recv_weights_ptrs");
+  check_ptrs_tensor_i64(recv_topk_scatter_indices_ptrs, num_ranks,
+                        "recv_topk_scatter_indices_ptrs");
+  void *topk_weights = nullptr;
+  auto weight_dtype = FlashCommDType::Float32;
+  if (optional_topk_weights.has_value() &&
+      optional_topk_weights.value().defined()) {
+    check_tensor_common(optional_topk_weights.value(), "topk_weights", true,
+                        torch::kFloat32, 2);
+    check_tensor_shape(optional_topk_weights.value(), "topk_weights",
+                       {num_token, topk});
+    topk_weights = optional_topk_weights.value().data_ptr();
+  }
+  auto offset_dtype = get_flash_comm_dtype(topk_indices.scalar_type());
+  FLASH_CHECK(offset_dtype == FlashCommDType::Int32)
+      << "Only Int32 offset type is currently supported";
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  dispatch_mxfp8_prequantized_intranode_cuda(
+      x.data_ptr(), topk_send_mask.data_ptr(), topk_weights,
+      topk_indices.data_ptr(), token_dst_scatter_indices.data_ptr(),
+      recv_x_ptrs.data_ptr(),
+      reinterpret_cast<void **>(recv_weights_ptrs.data_ptr()),
+      reinterpret_cast<void **>(recv_topk_scatter_indices_ptrs.data_ptr()),
+      num_token, hidden_size, num_experts_per_rank, rank, num_ranks, num_sm,
+      weight_dtype, offset_dtype, topk, stream);
+}
+
 // dispatch_postprocess host function:
 //  1.inplace update the recv_x with the local dispatch
 //  2.reset the recv_topk_scatter_indices to -1 (in comm buffer)
@@ -470,6 +594,80 @@ void dispatch_postprocess(
       dispatch_weights_ptr, recv_topk_scatter_indices.data_ptr(),
       num_worst_recv_token, hidden_size, topk, rank, num_ranks, num_sm, dtype,
       weight_dtype, offset_dtype, stream);
+}
+
+void dispatch_mxfp8_postprocess_unpack(
+    torch::Tensor recv_packed,
+    torch::Tensor recv_topk_scatter_indices_comm_buffer,
+    c10::optional<torch::Tensor> optional_recv_topk_weights,
+    torch::Tensor recv_token_count, torch::Tensor dispatch_data,
+    torch::Tensor dispatch_scales,
+    c10::optional<torch::Tensor> optional_dispatch_weights,
+    torch::Tensor recv_topk_scatter_indices, int32_t hidden_size, int32_t topk,
+    int32_t rank, int32_t num_ranks, int32_t num_sm) {
+  FLASH_CHECK(num_ranks > 0 && num_ranks <= kMXFP8MaxIntranodeRanks)
+      << "MXFP8 intranode postprocess supports 1.." << kMXFP8MaxIntranodeRanks
+      << " ranks";
+  FLASH_CHECK(rank >= 0 && rank < num_ranks)
+      << "rank must be between 0 and num_ranks - 1, " << rank << " not in [0, "
+      << num_ranks << ")";
+  FLASH_CHECK(hidden_size > 0 && hidden_size % kMXFP8BlockSize == 0)
+      << "hidden_size must be positive and divisible by " << kMXFP8BlockSize;
+  check_tensor_common(recv_packed, "recv_packed", true, torch::kBFloat16, 2);
+  int32_t num_token = recv_packed.size(0);
+  int32_t packed_row_bytes = mxfp8_packed_row_bytes(hidden_size);
+  check_tensor_shape(recv_packed, "recv_packed",
+                     {num_token, packed_row_bytes / 2});
+  check_tensor_common(recv_topk_scatter_indices_comm_buffer,
+                      "recv_topk_scatter_indices_comm_buffer", true,
+                      torch::kInt32, 2);
+  check_tensor_shape(recv_topk_scatter_indices_comm_buffer,
+                     "recv_topk_scatter_indices_comm_buffer",
+                     {num_token, topk});
+  check_tensor_common(recv_token_count, "recv_token_count", true, torch::kInt32,
+                      1);
+  check_tensor_shape(recv_token_count, "recv_token_count", {num_ranks});
+  FLASH_CHECK(dispatch_data.is_cuda() && dispatch_data.is_contiguous() &&
+              dispatch_data.scalar_type() == torch::ScalarType::Float8_e4m3fn)
+      << "dispatch_data must be a contiguous CUDA float8_e4m3fn tensor";
+  check_tensor_shape(dispatch_data, "dispatch_data", {num_token, hidden_size});
+  check_tensor_common(dispatch_scales, "dispatch_scales", true, torch::kUInt8,
+                      2);
+  check_tensor_shape(dispatch_scales, "dispatch_scales",
+                     {num_token, hidden_size / kMXFP8BlockSize});
+  check_tensor_common(recv_topk_scatter_indices, "recv_topk_scatter_indices",
+                      true, torch::kInt32, 2);
+  check_tensor_shape(recv_topk_scatter_indices, "recv_topk_scatter_indices",
+                     {num_token, topk});
+
+  bool has_weight = optional_recv_topk_weights.has_value() &&
+                    optional_recv_topk_weights.value().defined();
+  bool has_dispatch_weight = optional_dispatch_weights.has_value() &&
+                             optional_dispatch_weights.value().defined();
+  FLASH_CHECK(has_weight == has_dispatch_weight)
+      << "recv weights and dispatch weights must both be provided or omitted";
+  void *recv_weights = nullptr;
+  void *dispatch_weights = nullptr;
+  if (has_weight) {
+    check_tensor_common(optional_recv_topk_weights.value(), "recv_topk_weights",
+                        true, torch::kFloat32, 2);
+    check_tensor_shape(optional_recv_topk_weights.value(), "recv_topk_weights",
+                       {num_token, topk});
+    check_tensor_common(optional_dispatch_weights.value(), "dispatch_weights",
+                        true, torch::kFloat32, 1);
+    check_tensor_shape(optional_dispatch_weights.value(), "dispatch_weights",
+                       {num_token});
+    recv_weights = optional_recv_topk_weights.value().data_ptr();
+    dispatch_weights = optional_dispatch_weights.value().data_ptr();
+  }
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  dispatch_mxfp8_postprocess_unpack_cuda(
+      recv_packed.data_ptr(), recv_topk_scatter_indices_comm_buffer.data_ptr(),
+      recv_weights, recv_token_count.data_ptr<int32_t>(),
+      dispatch_data.data_ptr(), dispatch_scales.data_ptr(), dispatch_weights,
+      recv_topk_scatter_indices.data_ptr(), num_token, hidden_size, topk, rank,
+      num_ranks, num_sm, FlashCommDType::Float32, FlashCommDType::Int32,
+      stream);
 }
 
 static void combine_intranode_impl(
@@ -753,6 +951,23 @@ void bind_intranode_ops(py::module &m) {
         py::arg("rank"), py::arg("num_ranks"), py::arg("num_experts_per_rank"),
         py::arg("num_sm"),
         "Intranode dispatch for one device-selected token range.");
+  m.def("dispatch_mxfp8_quant_fused_intranode",
+        &flash_comm::ep::intranode::dispatch_mxfp8_quant_fused_intranode,
+        py::arg("x"), py::arg("topk_send_mask"),
+        py::arg("optional_topk_weights"), py::arg("topk_indices"),
+        py::arg("token_dst_scatter_indices"), py::arg("recv_x_ptrs"),
+        py::arg("recv_weights_ptrs"), py::arg("recv_topk_scatter_indices_ptrs"),
+        py::arg("rank"), py::arg("num_ranks"), py::arg("num_experts_per_rank"),
+        py::arg("num_sm"), "fused BF16-to-MXFP8 intranode dispatch");
+  m.def("dispatch_mxfp8_prequantized_intranode",
+        &flash_comm::ep::intranode::dispatch_mxfp8_prequantized_intranode,
+        py::arg("x"), py::arg("topk_send_mask"),
+        py::arg("optional_topk_weights"), py::arg("topk_indices"),
+        py::arg("token_dst_scatter_indices"), py::arg("recv_x_ptrs"),
+        py::arg("recv_weights_ptrs"), py::arg("recv_topk_scatter_indices_ptrs"),
+        py::arg("hidden_size"), py::arg("rank"), py::arg("num_ranks"),
+        py::arg("num_experts_per_rank"), py::arg("num_sm"),
+        "dispatch a pre-quantized packed MXFP8 row");
   m.def("dispatch_postprocess",
         &flash_comm::ep::intranode::dispatch_postprocess, py::arg("recv_x"),
         py::arg("recv_topk_scatter_indices_comm_buffer"),
@@ -761,6 +976,16 @@ void bind_intranode_ops(py::module &m) {
         py::arg("recv_topk_scatter_indices"), py::arg("hidden_size"),
         py::arg("topk"), py::arg("rank"), py::arg("num_ranks"),
         py::arg("num_sm"), "intranode dispatch postprocess for ep");
+  m.def("dispatch_mxfp8_postprocess_unpack",
+        &flash_comm::ep::intranode::dispatch_mxfp8_postprocess_unpack,
+        py::arg("recv_packed"),
+        py::arg("recv_topk_scatter_indices_comm_buffer"),
+        py::arg("optional_recv_topk_weights"), py::arg("recv_token_count"),
+        py::arg("dispatch_data"), py::arg("dispatch_scales"),
+        py::arg("optional_dispatch_weights"),
+        py::arg("recv_topk_scatter_indices"), py::arg("hidden_size"),
+        py::arg("topk"), py::arg("rank"), py::arg("num_ranks"),
+        py::arg("num_sm"), "Fused MXFP8 scatter and data/scale separation");
   m.def("combine_preprocess_inplace",
         &flash_comm::ep::intranode::combine_preprocess_inplace, py::arg("x"),
         py::arg("recv_token_count"), py::arg("recv_topk_scatter_indices"),

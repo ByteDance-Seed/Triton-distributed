@@ -32,6 +32,7 @@ import torch
 import flash_comm._C.ep_chunk_plan as _chunk_plan
 import flash_comm._C.ep_internode as _ep_inter
 import flash_comm._C.ep_intranode as _ep
+import flash_comm._C.quantization as _quantization
 
 from .chunk_plan import EPChunkPlan
 from .ep_context import EPContext
@@ -349,20 +350,14 @@ class EPKernels:
 
         return cur_output_token_num, max_output_token_num
 
-    def dispatch_intranode(self, input: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor | None,
-                           layout_desc: EPCommLayoutDesc):
+    def _prepare_intranode_dispatch(self, topk_indices: torch.Tensor, layout_desc: EPCommLayoutDesc,
+                                    num_tokens: int) -> int:
         self.ep_group_barrier()
-        # recompute if not provided
         if layout_desc.need_recompute_token_within_expert_offset_and_expert_counts(topk_indices):
             layout_desc.token_within_expert_offset, layout_desc.expert_counts = \
                 self.compute_stable_local_token_within_expert_offset_and_expert_counts(topk_indices, self.num_sm)
 
-        num_token = input.shape[0]
-        recompute = layout_desc.need_recompute_dispatch_layout(self.expert_alignment, num_token)
-        if recompute:
-            # compute_dispatch_layout allocates the recv-count buffers fresh and
-            # hands ownership to the layout (nothing shared through ep_context), so
-            # a later dispatch cannot clobber this layout's counts.
+        if layout_desc.need_recompute_dispatch_layout(self.expert_alignment, num_tokens):
             (
                 layout_desc.recv_base_offset,
                 layout_desc.token_dst_scatter_indices,
@@ -386,7 +381,7 @@ class EPKernels:
                 expert_alignment=self.expert_alignment,
             )
             layout_desc.expert_alignment = self.expert_alignment
-            layout_desc.num_tokens = num_token
+            layout_desc.num_tokens = num_tokens
 
         self.ep_group_barrier()
         if layout_desc.expert_alignment > 1:
@@ -398,6 +393,21 @@ class EPKernels:
             buf_count_cpu = layout_desc.recv_token_count_cpu
             buf_count_gpu = layout_desc.recv_token_count
         dispatch_recv_token_count, _ = self._realloc_dispatch_output_buf(buf_count_cpu, buf_count_gpu)
+        return dispatch_recv_token_count
+
+    def _finish_intranode_dispatch(self, topk_indices: torch.Tensor, topk_weights: torch.Tensor | None,
+                                   layout_desc: EPCommLayoutDesc, dispatch_recv_token_count: int):
+        self.ep_group_barrier()
+        layout_desc.topk_indices = topk_indices
+        layout_desc.recv_topk_scatter_indices = self.ep_context.dispatch_topk_scatter_indices_buf[:
+                                                                                                  dispatch_recv_token_count]
+        if topk_weights is None:
+            return None
+        return self.ep_context.dispatch_topk_weights_buf[:dispatch_recv_token_count]
+
+    def dispatch_intranode(self, input: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor | None,
+                           layout_desc: EPCommLayoutDesc):
+        dispatch_recv_token_count = self._prepare_intranode_dispatch(topk_indices, layout_desc, input.shape[0])
 
         num_experts_per_rank = self.ep_context.config.num_experts // self.ep_context.config.world_size
         # dispatch
@@ -408,16 +418,118 @@ class EPKernels:
                                self.ep_context.dispatch_topk_scatter_indices_buf_ptrs, self.rank, self.world_size,
                                num_experts_per_rank, self.num_sm)
 
-        # push mode, need barrier on ep group, wait ep ranks to finish dispatch
-        self.ep_group_barrier()
-        layout_desc.topk_indices = topk_indices
-        layout_desc.recv_topk_scatter_indices = self.ep_context.dispatch_topk_scatter_indices_buf[:
-                                                                                                  dispatch_recv_token_count]
-        # directly return the symm tensors to avoid extra copy
-        dispatch_weights = None
-        if topk_weights is not None:
-            dispatch_weights = self.ep_context.dispatch_topk_weights_buf[:dispatch_recv_token_count]
+        dispatch_weights = self._finish_intranode_dispatch(topk_indices, topk_weights, layout_desc,
+                                                           dispatch_recv_token_count)
         return (self.ep_context.dispatch_output_buf[:dispatch_recv_token_count], dispatch_weights, layout_desc)
+
+    def _dispatch_mxfp8_intranode(self, input: torch.Tensor, topk_indices: torch.Tensor,
+                                  topk_weights: torch.Tensor | None, layout_desc: EPCommLayoutDesc, prequantized: bool):
+        if input.ndim != 2 or not input.is_cuda or not input.is_contiguous():
+            raise ValueError("MXFP8 dispatch input must be a contiguous CUDA 2D tensor")
+        if topk_indices.ndim != 2 or topk_indices.shape[0] != input.shape[0]:
+            raise ValueError("topk_indices must be 2D with the same number of rows as input")
+        if topk_weights is not None and tuple(topk_weights.shape) != tuple(topk_indices.shape):
+            raise ValueError("topk_weights must have the same shape as topk_indices")
+        if input.dtype != torch.bfloat16:
+            raise ValueError(f"MXFP8 dispatch requires BF16 input, got {input.dtype}")
+        hidden = self.ep_context.config.hidden
+        if hidden % 32 != 0:
+            raise ValueError(f"MXFP8 hidden size must be divisible by 32, got {hidden}")
+
+        packed_row_bytes = int(_quantization.mxfp8_packed_row_bytes(hidden))
+        expected_width = packed_row_bytes // 2 if prequantized else hidden
+        if input.shape[1] != expected_width:
+            raise ValueError(f"MXFP8 dispatch input width mismatch, got {input.shape[1]}, expected {expected_width}")
+
+        dispatch_recv_token_count = self._prepare_intranode_dispatch(topk_indices, layout_desc, input.shape[0])
+        num_experts_per_rank = self.ep_context.config.num_experts // self.ep_context.config.world_size
+        if prequantized:
+            _ep.dispatch_mxfp8_prequantized_intranode(
+                input,
+                layout_desc.token_topk_send_mask,
+                topk_weights,
+                topk_indices,
+                layout_desc.token_dst_scatter_indices,
+                self.ep_context.dispatch_output_buf_ptrs,
+                self.ep_context.dispatch_topk_weights_buf_ptrs,
+                self.ep_context.dispatch_topk_scatter_indices_buf_ptrs,
+                hidden,
+                self.rank,
+                self.world_size,
+                num_experts_per_rank,
+                self.num_sm,
+            )
+        else:
+            _ep.dispatch_mxfp8_quant_fused_intranode(
+                input,
+                layout_desc.token_topk_send_mask,
+                topk_weights,
+                topk_indices,
+                layout_desc.token_dst_scatter_indices,
+                self.ep_context.dispatch_output_buf_ptrs,
+                self.ep_context.dispatch_topk_weights_buf_ptrs,
+                self.ep_context.dispatch_topk_scatter_indices_buf_ptrs,
+                self.rank,
+                self.world_size,
+                num_experts_per_rank,
+                self.num_sm,
+            )
+
+        dispatch_weights = self._finish_intranode_dispatch(topk_indices, topk_weights, layout_desc,
+                                                           dispatch_recv_token_count)
+
+        packed_storage = self.ep_context.dispatch_output_buf.view(torch.uint8).reshape(-1)
+        packed_num_bytes = dispatch_recv_token_count * packed_row_bytes
+        if packed_num_bytes > packed_storage.numel():
+            raise RuntimeError("BF16 dispatch context is too small for the packed MXFP8 receive rows")
+        packed_out = packed_storage[:packed_num_bytes].view(torch.bfloat16).reshape(dispatch_recv_token_count,
+                                                                                    packed_row_bytes // 2)
+        return packed_out, dispatch_weights, layout_desc
+
+    def dispatch_mxfp8_intranode_postprocess(self, packed_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
+                                             layout_desc: EPCommLayoutDesc, num_sm: int = 0):
+        if layout_desc.recv_topk_scatter_indices is None:
+            raise ValueError("layout_desc.recv_topk_scatter_indices is required for MXFP8 postprocess")
+        hidden = self.ep_context.config.hidden
+        topk = self.ep_context.config.topk
+        packed_row_bytes = int(_quantization.mxfp8_packed_row_bytes(hidden))
+        if tuple(packed_out.shape) != (layout_desc.recv_topk_scatter_indices.shape[0], packed_row_bytes // 2):
+            raise ValueError(f"packed_out has invalid shape {tuple(packed_out.shape)}")
+
+        buffer_size = packed_out.shape[0]
+        dispatch_data = torch.empty((buffer_size, hidden), dtype=torch.float8_e4m3fn, device=packed_out.device)
+        dispatch_scales = torch.empty((buffer_size, hidden // 32), dtype=torch.uint8, device=packed_out.device)
+        recv_topk_scatter_indices = torch.empty((buffer_size, topk), dtype=torch.int32, device=packed_out.device)
+        dispatch_weights = None
+        if dispatch_topk_weights is not None:
+            dispatch_weights = torch.empty((buffer_size, ), dtype=dispatch_topk_weights.dtype, device=packed_out.device)
+        if layout_desc.expert_alignment > 1:
+            if layout_desc.recv_aligned_token_count is None:
+                raise ValueError("expert_alignment > 1 requires aligned receive token counts")
+            postprocess_token_count = layout_desc.recv_aligned_token_count
+        else:
+            if layout_desc.recv_token_count is None:
+                raise ValueError("layout_desc.recv_token_count is required for MXFP8 postprocess")
+            postprocess_token_count = layout_desc.recv_token_count
+
+        _ep.dispatch_mxfp8_postprocess_unpack(
+            packed_out,
+            layout_desc.recv_topk_scatter_indices,
+            dispatch_topk_weights,
+            postprocess_token_count,
+            dispatch_data,
+            dispatch_scales,
+            dispatch_weights,
+            recv_topk_scatter_indices,
+            hidden,
+            topk,
+            self.rank,
+            self.world_size,
+            num_sm,
+        )
+
+        layout_desc.recv_topk_scatter_indices = recv_topk_scatter_indices
+        return dispatch_data, dispatch_scales, dispatch_weights, layout_desc
 
     def dispatch_intranode_postprocess(self, dispatch_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
                                        layout_desc: EPCommLayoutDesc, num_sm: int = 0,
@@ -1055,6 +1167,36 @@ class EPKernels:
         else:
             return self.dispatch_internode(input, topk_indices, topk_weights, layout_desc, num_qps=num_qps)
 
+    def dispatch_mxfp8(self, input: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor | None,
+                       layout_desc: EPCommLayoutDesc = None):
+        """Quantize BF16 input inside intranode MXFP8 dispatch."""
+        if self.ep_context.config.nnodes != 1:
+            raise NotImplementedError("MXFP8 dispatch currently supports intranode EP only")
+        if layout_desc is None:
+            layout_desc = EPCommLayoutDesc()
+        else:
+            layout_desc.check_layout_desc(num_tokens=topk_indices.shape[0], topk=topk_indices.shape[1],
+                                          num_experts=self.ep_context.config.num_experts,
+                                          world_size=self.ep_context.config.world_size,
+                                          local_world_size=self.ep_context.config.local_world_size,
+                                          max_slot_num_token=self.ep_context.config.max_m)
+        return self._dispatch_mxfp8_intranode(input, topk_indices, topk_weights, layout_desc, prequantized=False)
+
+    def dispatch_mxfp8_prequantized(self, input: torch.Tensor, topk_indices: torch.Tensor,
+                                    topk_weights: torch.Tensor | None, layout_desc: EPCommLayoutDesc = None):
+        """Dispatch transport-packed MXFP8 input without quantization."""
+        if self.ep_context.config.nnodes != 1:
+            raise NotImplementedError("MXFP8 dispatch currently supports intranode EP only")
+        if layout_desc is None:
+            layout_desc = EPCommLayoutDesc()
+        else:
+            layout_desc.check_layout_desc(num_tokens=topk_indices.shape[0], topk=topk_indices.shape[1],
+                                          num_experts=self.ep_context.config.num_experts,
+                                          world_size=self.ep_context.config.world_size,
+                                          local_world_size=self.ep_context.config.local_world_size,
+                                          max_slot_num_token=self.ep_context.config.max_m)
+        return self._dispatch_mxfp8_intranode(input, topk_indices, topk_weights, layout_desc, prequantized=True)
+
     def dispatch_postprocess(self, dispatch_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
                              layout_desc: EPCommLayoutDesc, num_sm: int = 0,
                              recv_topk_scatter_indices_out: torch.Tensor | None = None,
@@ -1067,6 +1209,10 @@ class EPKernels:
             recv_topk_scatter_indices_out,
             dispatch_weights_out,
         )
+
+    def dispatch_mxfp8_postprocess_unpack(self, packed_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
+                                          layout_desc: EPCommLayoutDesc, num_sm: int = 0):
+        return self.dispatch_mxfp8_intranode_postprocess(packed_out, dispatch_topk_weights, layout_desc, num_sm)
 
     def combine_preprocess(self, input: torch.Tensor, layout_desc: EPCommLayoutDesc, weight: torch.Tensor | None = None,
                            zero_copy: bool = False, num_sm: int = 0):

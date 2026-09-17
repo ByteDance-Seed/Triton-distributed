@@ -212,6 +212,8 @@ def get_extension():
 
     cur_dir = Path(__file__).resolve().parent
     sources = [
+        os.path.join("csrc", "quantization", "kernels", "mxfp8_cuda.cu"),
+        os.path.join("csrc", "quantization", "mxfp8.cpp"),
         os.path.join("csrc", "ep", "kernels", "intranode_cuda.cu"),
         os.path.join("csrc", "ep", "kernels", "internode_cuda.cu"),
         os.path.join("csrc", "ep", "kernels", "chunk_plan_cuda.cu"),
@@ -322,7 +324,9 @@ def get_extension():
         print(f"Using NVCC fatbinary compression: {compress_flag}")
     num_archs = len(_split_cuda_arch_list(cuda_arch))
     available_cpus = _available_cpu_count()
-    cuda_tu_count = len(_internode_hidden_sizes(cur_dir)) + 2  # generated instances plus main/intranode
+    # Generated internode instances plus internode, intranode, and standalone
+    # quantization CUDA translation units.
+    cuda_tu_count = len(_internode_hidden_sizes(cur_dir)) + 3
     threads_per_tu = max(1, (available_cpus + cuda_tu_count - 1) // cuda_tu_count)
     arch_threads = min(num_archs, threads_per_tu)
     arch_compile_flag = _nvcc_parallel_flag(cuda_home, "FLASH_COMM_NVCC_THREADS", "--threads", arch_threads)
