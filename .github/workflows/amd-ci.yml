@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           rm -f /usr/local/bin/cmake
-          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake miopen-hip autoconf libtool flex ninja-build clang lld
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake miopen-hip autoconf libtool flex bison ninja-build clang lld
           pip3 install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
           pip3 install pybind11
       - name: Checkout
@@ -72,7 +72,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update -y && apt install -y libopenmpi-dev cmake miopen-hip autoconf libtool flex ninja-build clang lld
+          apt-get update -y && apt install -y libopenmpi-dev cmake miopen-hip autoconf libtool flex bison ninja-build clang lld
           pip3 install -i https://test.pypi.org/simple hip-python>=7.1 # (or whatever Rocm version you have)
           pip3 install pybind11 psutil
       - name: Checkout
@@ -118,7 +118,7 @@ jobs:
       - name: Install dependencies
         run: |
           rm -f /usr/local/bin/cmake
-          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake ninja-build clang lld
+          apt-get update -y && apt install -y libopenmpi-dev git cython3 ibverbs-utils openmpi-bin libopenmpi-dev libpci-dev libdw1 locales cmake ninja-build clang lld llvm
           pip3 install -i https://test.pypi.org/simple hip-python>=7.1
           pip3 install pybind11
       - name: Checkout

@@ -70,7 +70,30 @@ cp -f "${MORI_BC}" "${STAGED_BC}"
 #     shmem_module_init(). If the symbol is missing that init has nowhere to land;
 #     it must also be a strong definition (not weak/declared) or the host state
 #     lands on the wrong instance and device reads see garbage peer pointers.
-LLVM_DIS=${ROCM_PATH}/lib/llvm/bin/llvm-dis
+# ROCm 7.1 images ship llvm-dis under llvm/bin, not lib/llvm/bin. Walk the
+# common prefixes (and PATH) so a missing default path does not fail the job.
+resolve_llvm_dis() {
+    local cand
+    for cand in \
+        "${LLVM_DIS:-}" \
+        "${ROCM_PATH}/lib/llvm/bin/llvm-dis" \
+        "${ROCM_PATH}/llvm/bin/llvm-dis" \
+        /opt/rocm/lib/llvm/bin/llvm-dis \
+        /opt/rocm/llvm/bin/llvm-dis \
+        "$(command -v llvm-dis 2>/dev/null || true)"
+    do
+        if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+LLVM_DIS="$(resolve_llvm_dis)" || {
+    echo "Error: llvm-dis not found under ${ROCM_PATH} or PATH" >&2
+    exit 1
+}
+echo "Using llvm-dis: ${LLVM_DIS}"
 STAGED_LL=$(mktemp)
 trap 'rm -f "${STAGED_LL}"' EXIT
 "${LLVM_DIS}" "${STAGED_BC}" -o "${STAGED_LL}"

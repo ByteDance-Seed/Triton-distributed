@@ -42,6 +42,7 @@ CLANG_FLAGS=(
     -I${ROCSHMEM_INSTALL_DIR}/../
     -I${ROCSHMEM_SRC}/src
     -I${OMPI_DIR}/include
+    -DOMPI_SKIP_MPICXX
 )
 
 LINKER="${ROCM_LD:-${ROCM_PATH}/lib/llvm/bin/llvm-link}"
