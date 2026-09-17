@@ -147,24 +147,34 @@ for arg in "$@"; do
 done
 
 if [ "$download_model" = true ] && [ "$skip_model_download" = false ]; then
-    # --- Loop through each model and download it ---
+    # GitHub AMD e2e only needs the 0.6B checkpoint. The default list used
+    # to include 8B/32B/MoE and retried forever, so one timed-out 32B fetch
+    # could hold the job until the workflow cap.
+    if [ -n "${E2E_MODELS:-}" ]; then
+        read -r -a MODELS <<< "${E2E_MODELS}"
+    fi
+    max_attempts="${E2E_DOWNLOAD_ATTEMPTS:-3}"
     for MODEL_NAME in "${MODELS[@]}"; do
-    while true; do
-        echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
-        # Use timeout to prevent the script from hanging indefinitely.
+    attempt=1
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        echo "Attempting to download model: $MODEL_NAME (timeout: 120s, attempt ${attempt}/${max_attempts})..."
         timeout 120s huggingface-cli download "$MODEL_NAME"
 
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then
         echo "Model '$MODEL_NAME' downloaded successfully! 🎉"
-        break # Exit the while loop and move to the next model
+        break
         elif [ $EXIT_CODE -eq 124 ]; then
-        echo "Download timed out for '$MODEL_NAME'. Retrying in 5 seconds... ⏳"
+        echo "Download timed out for '$MODEL_NAME'."
         else
-        echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE. Retrying in 5 seconds... 🔁"
+        echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE."
         fi
-
+        if [ "${attempt}" -eq "${max_attempts}" ]; then
+            echo "error: giving up on '$MODEL_NAME' after ${max_attempts} attempts" >&2
+            exit 1
+        fi
+        attempt=$((attempt + 1))
         sleep 5
     done
     done
