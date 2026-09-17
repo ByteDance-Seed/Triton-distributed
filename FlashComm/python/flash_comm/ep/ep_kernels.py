@@ -487,7 +487,8 @@ class EPKernels:
         return packed_out, dispatch_weights, layout_desc
 
     def dispatch_mxfp8_intranode_postprocess(self, packed_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
-                                             layout_desc: EPCommLayoutDesc, num_sm: int = 0):
+                                             layout_desc: EPCommLayoutDesc, num_sm: int = 0, *,
+                                             dispatch_weights_out: torch.Tensor | None = None):
         if layout_desc.recv_topk_scatter_indices is None:
             raise ValueError("layout_desc.recv_topk_scatter_indices is required for MXFP8 postprocess")
         hidden = self.ep_context.config.hidden
@@ -500,9 +501,21 @@ class EPKernels:
         dispatch_data = torch.empty((buffer_size, hidden), dtype=torch.float8_e4m3fn, device=packed_out.device)
         dispatch_scales = torch.empty((buffer_size, hidden // 32), dtype=torch.uint8, device=packed_out.device)
         recv_topk_scatter_indices = torch.empty((buffer_size, topk), dtype=torch.int32, device=packed_out.device)
-        dispatch_weights = None
+        dispatch_weights_result = None
         if dispatch_topk_weights is not None:
-            dispatch_weights = torch.empty((buffer_size, ), dtype=dispatch_topk_weights.dtype, device=packed_out.device)
+            if dispatch_weights_out is None:
+                dispatch_weights_result = torch.empty((buffer_size, ), dtype=dispatch_topk_weights.dtype,
+                                                      device=packed_out.device)
+            else:
+                dispatch_weights_result = dispatch_weights_out
+                if (tuple(dispatch_weights_result.shape) != (buffer_size, )
+                        or dispatch_weights_result.dtype != dispatch_topk_weights.dtype
+                        or dispatch_weights_result.device != dispatch_topk_weights.device
+                        or not dispatch_weights_result.is_contiguous()):
+                    raise ValueError(
+                        "dispatch_weights_out must match the MXFP8 dispatch buffer shape, dtype, and device")
+        elif dispatch_weights_out is not None:
+            raise ValueError("dispatch_weights_out requires dispatch_topk_weights")
         if layout_desc.expert_alignment > 1:
             if layout_desc.recv_aligned_token_count is None:
                 raise ValueError("expert_alignment > 1 requires aligned receive token counts")
@@ -519,7 +532,7 @@ class EPKernels:
             postprocess_token_count,
             dispatch_data,
             dispatch_scales,
-            dispatch_weights,
+            dispatch_weights_result,
             recv_topk_scatter_indices,
             hidden,
             topk,
@@ -529,7 +542,7 @@ class EPKernels:
         )
 
         layout_desc.recv_topk_scatter_indices = recv_topk_scatter_indices
-        return dispatch_data, dispatch_scales, dispatch_weights, layout_desc
+        return dispatch_data, dispatch_scales, dispatch_weights_result, layout_desc
 
     def dispatch_intranode_postprocess(self, dispatch_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
                                        layout_desc: EPCommLayoutDesc, num_sm: int = 0,
@@ -568,20 +581,20 @@ class EPKernels:
                     or not recv_topk_scatter_indices.is_contiguous()):
                 raise ValueError(
                     "recv_topk_scatter_indices_out must match the dispatch buffer shape, dtype, and device")
-        dispatch_weights = None
+        dispatch_weights_result = None
         if dispatch_topk_weights is not None:
             if dispatch_weights_out is None:
-                dispatch_weights = torch.empty(
+                dispatch_weights_result = torch.empty(
                     (buffer_size, ),
                     dtype=dispatch_topk_weights.dtype,
                     device=dispatch_topk_weights.device,
                 )
             else:
-                dispatch_weights = dispatch_weights_out
-                if (tuple(dispatch_weights.shape) != (buffer_size, )
-                        or dispatch_weights.dtype != dispatch_topk_weights.dtype
-                        or dispatch_weights.device != dispatch_topk_weights.device
-                        or not dispatch_weights.is_contiguous()):
+                dispatch_weights_result = dispatch_weights_out
+                if (tuple(dispatch_weights_result.shape) != (buffer_size, )
+                        or dispatch_weights_result.dtype != dispatch_topk_weights.dtype
+                        or dispatch_weights_result.device != dispatch_topk_weights.device
+                        or not dispatch_weights_result.is_contiguous()):
                     raise ValueError("dispatch_weights_out must match the dispatch buffer shape, dtype, and device")
         elif dispatch_weights_out is not None:
             raise ValueError("dispatch_weights_out requires dispatch_topk_weights")
@@ -597,7 +610,7 @@ class EPKernels:
             layout_desc.recv_topk_scatter_indices,  # comm buffer
             dispatch_topk_weights,
             postprocess_token_count,
-            dispatch_weights,
+            dispatch_weights_result,
             recv_topk_scatter_indices,  # torch tensor
             hidden,
             topk,
@@ -608,7 +621,7 @@ class EPKernels:
 
         # update layout desc
         layout_desc.recv_topk_scatter_indices = recv_topk_scatter_indices
-        return dispatch_out, dispatch_weights, layout_desc
+        return dispatch_out, dispatch_weights_result, layout_desc
 
     def ep_group_barrier(self):
         if self.ep_context.config.nnodes == 1:
@@ -754,10 +767,10 @@ class EPKernels:
         self._validate_range_layout(topk_indices, layout)
         logical_token_range = layout.logical_token_range
         experts_per_rank = self.ep_context.config.num_experts // self.world_size
-        if self.is_internode:
-            if (layout.num_tokens_per_rank is None or layout.node_topk_indices is None
-                    or layout.node_topk_send_mask is None or layout.node_token_dst_scatter_indices is None):
-                raise ValueError("prepared internode range layout is incomplete")
+        if (self.is_internode
+                and (layout.num_tokens_per_rank is None or layout.node_topk_indices is None
+                     or layout.node_topk_send_mask is None or layout.node_token_dst_scatter_indices is None)):
+            raise ValueError("prepared internode range layout is incomplete")
         # Retire consumers of the previous range's symmetric dispatch output
         # before this rank starts the next range dispatch.  The final dispatch
         # signal reset protects the GIN protocol, but it does not cover a
@@ -945,7 +958,8 @@ class EPKernels:
         return combine_input_buf, combine_input_weight_buf
 
     def combine_intranode(self, input_preprocessed: torch.Tensor, layout_desc: EPCommLayoutDesc,
-                          weight_preprocessed: torch.Tensor | None = None):
+                          weight_preprocessed: torch.Tensor | None = None, *, combine_out: torch.Tensor | None = None,
+                          combine_out_weight: torch.Tensor | None = None):
         layout_desc.check_combine_required_inputs()
         assert self._validate_combine_input_buffer(input_preprocessed)
         has_weight = weight_preprocessed is not None
@@ -957,14 +971,33 @@ class EPKernels:
         hidden = self.ep_context.config.hidden
         num_experts_per_rank = self.ep_context.config.num_experts // self.ep_context.config.world_size
         topk = self.ep_context.config.topk
-        combine_intranode_out_buf = torch.empty((layout_desc.token_dst_scatter_indices.shape[0], hidden),
-                                                dtype=input_preprocessed.dtype, device=input_preprocessed.device)
+        num_token = layout_desc.token_dst_scatter_indices.shape[0]
+        if combine_out is None:
+            combine_intranode_out_buf = torch.empty((num_token, hidden), dtype=input_preprocessed.dtype,
+                                                    device=input_preprocessed.device)
+        else:
+            combine_intranode_out_buf = combine_out
+            if (tuple(combine_out.shape) != (num_token, hidden) or combine_out.dtype != input_preprocessed.dtype
+                    or combine_out.device != input_preprocessed.device or not combine_out.is_contiguous()):
+                raise ValueError("combine_out must match the combine output shape, dtype, and device")
         if has_weight:
             combine_intranode_input_weight_ptrs = self.ep_context.combine_topk_weights_buf_ptrs
-            combine_intranode_out_weight_buf = torch.empty((layout_desc.token_dst_scatter_indices.shape[0], topk),
-                                                           dtype=self.ep_context.config.weight_dtype,
-                                                           device=input_preprocessed.device)
+            if combine_out_weight is None:
+                combine_intranode_out_weight_buf = torch.empty(
+                    (num_token, topk),
+                    dtype=self.ep_context.config.weight_dtype,
+                    device=input_preprocessed.device,
+                )
+            else:
+                combine_intranode_out_weight_buf = combine_out_weight
+                if (tuple(combine_out_weight.shape) != (num_token, topk)
+                        or combine_out_weight.dtype != self.ep_context.config.weight_dtype
+                        or combine_out_weight.device != input_preprocessed.device
+                        or not combine_out_weight.is_contiguous()):
+                    raise ValueError("combine_out_weight must match the combine weight output shape, dtype, and device")
         else:
+            if combine_out_weight is not None:
+                raise ValueError("combine_out_weight requires weight_preprocessed")
             combine_intranode_input_weight_ptrs = None
             combine_intranode_out_weight_buf = None
         _ep.combine_intranode(
@@ -1097,7 +1130,8 @@ class EPKernels:
         return (self.ep_context.dispatch_output_buf[:dispatch_recv_token_count], dispatch_weights, layout_desc)
 
     def combine_internode(self, input_preprocessed: torch.Tensor, layout_desc: EPCommLayoutDesc,
-                          weight_preprocessed: torch.Tensor | None = None, num_qps: int | None = None):
+                          weight_preprocessed: torch.Tensor | None = None, num_qps: int | None = None, *,
+                          combine_out: torch.Tensor | None = None, combine_out_weight: torch.Tensor | None = None):
         layout_desc.check_internode_combine_required_inputs()
         assert self._validate_combine_input_buffer(input_preprocessed)
         has_weight = weight_preprocessed is not None
@@ -1111,7 +1145,14 @@ class EPKernels:
         if layout_desc.token_within_expert_offset is None:
             raise ValueError("layout_desc.token_within_expert_offset is required for internode combine")
         num_token = layout_desc.token_within_expert_offset.shape[0]
-        combine_out = torch.empty((num_token, hidden), dtype=input_preprocessed.dtype, device=input_preprocessed.device)
+        if combine_out is None:
+            combine_out_tensor = torch.empty((num_token, hidden), dtype=input_preprocessed.dtype,
+                                             device=input_preprocessed.device)
+        else:
+            combine_out_tensor = combine_out
+            if (tuple(combine_out.shape) != (num_token, hidden) or combine_out.dtype != input_preprocessed.dtype
+                    or combine_out.device != input_preprocessed.device or not combine_out.is_contiguous()):
+                raise ValueError("combine_out must match the combine output shape, dtype, and device")
         kernel_combine_weight = None
         weight_ptrs = None
         if layout_desc.num_tokens_per_rank is None:
@@ -1122,15 +1163,25 @@ class EPKernels:
                              "node_topk_indices/node_topk_send_mask/node_token_dst_scatter_indices")
         if has_weight:
             weight_ptrs = self.ep_context.combine_topk_weights_buf_ptrs
-            kernel_combine_weight = torch.empty((num_token, topk), dtype=self.ep_context.config.weight_dtype,
-                                                device=input_preprocessed.device)
+            if combine_out_weight is None:
+                kernel_combine_weight = torch.empty((num_token, topk), dtype=self.ep_context.config.weight_dtype,
+                                                    device=input_preprocessed.device)
+            else:
+                kernel_combine_weight = combine_out_weight
+                if (tuple(combine_out_weight.shape) != (num_token, topk)
+                        or combine_out_weight.dtype != self.ep_context.config.weight_dtype
+                        or combine_out_weight.device != input_preprocessed.device
+                        or not combine_out_weight.is_contiguous()):
+                    raise ValueError("combine_out_weight must match the combine weight output shape, dtype, and device")
+        elif combine_out_weight is not None:
+            raise ValueError("combine_out_weight requires weight_preprocessed")
         _ep_inter.combine_internode(
             self.ep_context.combine_input_buf_ptrs,
             weight_ptrs,
             self.ep_context.rdma_rail_send_buf,
             self.ep_context.rdma_rail_send_win_handle,
             layout_desc.num_tokens_per_rank,
-            combine_out,
+            combine_out_tensor,
             layout_desc.node_topk_indices,
             layout_desc.node_topk_send_mask,
             layout_desc.node_token_dst_scatter_indices,
@@ -1142,7 +1193,7 @@ class EPKernels:
         )
         # Fused reset+barrier for the combine signal range (see dispatch).
         _ep_inter.reset_signals_barrier_all_on_stream(*self._combine_signal_range)
-        return combine_out, kernel_combine_weight
+        return combine_out_tensor, kernel_combine_weight
 
     def dispatch(self, input: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor | None,
                  layout_desc: EPCommLayoutDesc = None, num_qps: int | None = None):
@@ -1211,8 +1262,15 @@ class EPKernels:
         )
 
     def dispatch_mxfp8_postprocess_unpack(self, packed_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
-                                          layout_desc: EPCommLayoutDesc, num_sm: int = 0):
-        return self.dispatch_mxfp8_intranode_postprocess(packed_out, dispatch_topk_weights, layout_desc, num_sm)
+                                          layout_desc: EPCommLayoutDesc, num_sm: int = 0, *,
+                                          dispatch_weights_out: torch.Tensor | None = None):
+        return self.dispatch_mxfp8_intranode_postprocess(
+            packed_out,
+            dispatch_topk_weights,
+            layout_desc,
+            num_sm,
+            dispatch_weights_out=dispatch_weights_out,
+        )
 
     def combine_preprocess(self, input: torch.Tensor, layout_desc: EPCommLayoutDesc, weight: torch.Tensor | None = None,
                            zero_copy: bool = False, num_sm: int = 0):
@@ -1220,18 +1278,28 @@ class EPKernels:
 
     def combine(self, input_preprocessed: torch.Tensor, layout_desc: EPCommLayoutDesc,
                 weight_preprocessed: torch.Tensor | None = None, num_qps: int | None = None, *,
-                output: torch.Tensor | None = None, output_weight: torch.Tensor | None = None):
+                output: torch.Tensor | None = None, output_weight: torch.Tensor | None = None,
+                combine_out: torch.Tensor | None = None, combine_out_weight: torch.Tensor | None = None):
         if layout_desc.logical_token_range is not None:
-            if output is None:
+            if output is not None and combine_out is not None and output is not combine_out:
+                raise ValueError("output and combine_out must refer to the same tensor")
+            if output_weight is not None and combine_out_weight is not None and output_weight is not combine_out_weight:
+                raise ValueError("output_weight and combine_out_weight must refer to the same tensor")
+            range_output = output if output is not None else combine_out
+            range_output_weight = output_weight if output_weight is not None else combine_out_weight
+            if range_output is None:
                 raise ValueError("range combine requires the caller-owned full output tensor")
-            return self._combine_range(input_preprocessed, layout_desc, output, weight_preprocessed=weight_preprocessed,
-                                       output_weight=output_weight, num_qps=num_qps)
+            return self._combine_range(input_preprocessed, layout_desc, range_output,
+                                       weight_preprocessed=weight_preprocessed, output_weight=range_output_weight,
+                                       num_qps=num_qps)
         if output is not None or output_weight is not None:
             raise ValueError("output/output_weight are only valid for range combine")
         if self.ep_context.config.nnodes == 1:
             # num_qps ignored intranode (see dispatch).
             return self.combine_intranode(input_preprocessed, layout_desc=layout_desc,
-                                          weight_preprocessed=weight_preprocessed)
+                                          weight_preprocessed=weight_preprocessed, combine_out=combine_out,
+                                          combine_out_weight=combine_out_weight)
         else:
             return self.combine_internode(input_preprocessed, layout_desc=layout_desc,
-                                          weight_preprocessed=weight_preprocessed, num_qps=num_qps)
+                                          weight_preprocessed=weight_preprocessed, num_qps=num_qps,
+                                          combine_out=combine_out, combine_out_weight=combine_out_weight)

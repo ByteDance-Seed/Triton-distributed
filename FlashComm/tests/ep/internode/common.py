@@ -32,7 +32,7 @@ import flash_comm._C.buffer as _buffer
 import flash_comm._C.ep_internode as _ep_inter
 # Reuse the production env parsing so tests cannot drift from the runtime
 # validation rules.
-from flash_comm.ep.ep_kernels import _optional_positive_int_env
+from flash_comm.ep.nccl_gin import _optional_positive_int_env
 
 
 def _round_up(value: int, alignment: int) -> int:

@@ -217,6 +217,12 @@ def test_dispatch_layout_internode(
             print(f"  ✅ expert_alignment={ea} passed ({layout_rounds} layout rounds)")
         dist.barrier()
 
+    torch.cuda.synchronize()
+    dist.barrier()
+    full_splits_buf = None
+    full_splits_symm.free()
+    torch.cuda.synchronize()
+    dist.barrier()
     destroy_ep_nccl()
     dist.destroy_process_group()
     if rank == 0:

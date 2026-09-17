@@ -195,6 +195,17 @@ struct MaxDispatchStages {
                                       kMaxSmemSize, Lo, Mid - 1>::value);
 };
 
+// CUDA 12.9 rejects the packed-width expression when MaxDispatchStages is
+// instantiated inside the nested runtime-dispatch macros below.  Route the
+// logical hidden size through a namespace-scope type so the same recursive
+// stage calculation is instantiated entirely in type context.
+template <typename token_t, typename weight_t, typename offset_t,
+          int32_t kLogicalHiddenSize, int32_t kMaxSmemSize>
+struct MaxMXFP8PrequantizedDispatchStages
+    : MaxDispatchStages<token_t, weight_t, offset_t,
+                        mxfp8_packed_row_bf16_elems(kLogicalHiddenSize),
+                        kMaxSmemSize> {};
+
 template <typename weight_t, typename offset_t, int32_t kHiddenSize,
           int32_t kMaxSmemSize, int32_t Lo = 1, int32_t Hi = 64>
 struct MaxMXFP8DispatchStages {
@@ -2298,8 +2309,10 @@ void dispatch_mxfp8_prequantized_intranode_cuda(
         constexpr int32_t kHiddenSize =
             mxfp8_packed_row_bf16_elems(kLogicalHiddenSize);
         DISPATCH_TOPK(topk, kTopk, {
-          constexpr int32_t kMaxFitStages = kernels::smem::MaxDispatchStages<
-              token_t, weight_t, offset_t, kHiddenSize, kMaxSmemSize>::value;
+          constexpr int32_t kMaxFitStages =
+              kernels::smem::MaxMXFP8PrequantizedDispatchStages<
+                  token_t, weight_t, offset_t, kLogicalHiddenSize,
+                  kMaxSmemSize>::value;
           constexpr int32_t kCapped = kMaxFitStages < kPreferredStages
                                           ? kMaxFitStages
                                           : kPreferredStages;

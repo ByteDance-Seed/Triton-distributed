@@ -533,11 +533,12 @@ def check_pinned_buffer_lifetime(ep_kernels, exp_indices):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        # use `sleep` to defer layout kernel on compute stream.
-        torch.cuda._sleep(2_000_000_000)
         token_within_expert_offset, expert_counts = \
             ep_kernels.compute_stable_local_token_within_expert_offset_and_expert_counts(exp_indices)
         ep_kernels.ep_group_barrier()
+        # Defer layout after the stream-side group barrier. Sleeping before
+        # that barrier lets the barrier consume the delay.
+        torch.cuda._sleep(2_000_000_000)
         layout_outputs = _ep.compute_dispatch_layout(
             exp_indices,
             token_within_expert_offset,
@@ -556,14 +557,20 @@ def check_pinned_buffer_lifetime(ep_kernels, exp_indices):
     recv_count_ptrs = {tensor.data_ptr() for tensor in recv_count_tensors}
     del recv_count_tensors, layout_outputs
 
-    replacement_tensors = [torch.empty((WORLD_SIZE, ), dtype=torch.int32, pin_memory=True) for _ in range(128)]
-    reused_ptrs = recv_count_ptrs.intersection(tensor.data_ptr() for tensor in replacement_tensors)
+    assert not stream.query(), "pinned-buffer lifetime test did not leave pending CUDA work"
+    replacement_tensors = []
+    unsafe_reused_ptrs = set()
+    for _ in range(128):
+        tensor = torch.empty((WORLD_SIZE, ), dtype=torch.int32, pin_memory=True)
+        replacement_tensors.append(tensor)
+        if tensor.data_ptr() in recv_count_ptrs and not stream.query():
+            unsafe_reused_ptrs.add(tensor.data_ptr())
 
     stream.synchronize()
     torch.distributed.barrier(group=EP_GROUP)
-    assert not reused_ptrs, (
+    assert not unsafe_reused_ptrs, (
         "dispatch layout pinned recv-count buffers were reused before their CUDA stream completed: "
-        f"{sorted(reused_ptrs)}")
+        f"{sorted(unsafe_reused_ptrs)}")
 
 
 if __name__ == "__main__":

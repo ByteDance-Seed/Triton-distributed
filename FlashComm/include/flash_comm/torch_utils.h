@@ -131,12 +131,13 @@ inline void record_pinned_tensor(const torch::Tensor &t,
   const auto &data_ptr = t.storage().data_ptr();
 #if TORCH_VERSION_MAJOR > 2 ||                                                 \
     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
-  at::getHostAllocator(at::kCUDA)->record_event(
+  const bool recorded = at::getHostAllocator(at::kCUDA)->record_event(
       data_ptr.get(), data_ptr.get_context(), stream.unwrap());
 #else
-  at::cuda::CachingHostAllocator_recordEvent(data_ptr.get(),
-                                             data_ptr.get_context(), stream);
+  const bool recorded = at::cuda::CachingHostAllocator_recordEvent(
+      data_ptr.get(), data_ptr.get_context(), stream);
 #endif
+  FLASH_CHECK(recorded) << "failed to associate pinned tensor with CUDA stream";
 }
 
 } // namespace flash_comm
