@@ -38,7 +38,21 @@ rocm_systems_tag=hip-version_7.12.60610
 if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   echo "Creating sparse checkout"
   pushd "${PROJECT_ROOT}/../.."
-  git clone "https://github.com/ROCm/rocm-systems.git" -b "${rocm_systems_tag}" --depth 1 --sparse "${sys_path}"
+  clone_ok=0
+  for attempt in 1 2 3; do
+    rm -rf "${sys_path}"
+    if git clone "https://github.com/ROCm/rocm-systems.git" \
+        -b "${rocm_systems_tag}" --depth 1 --filter=blob:none --sparse "${sys_path}"; then
+      clone_ok=1
+      break
+    fi
+    echo "rocm-systems clone attempt ${attempt} failed, retrying"
+    sleep 5
+  done
+  if [ "${clone_ok}" != 1 ]; then
+    echo "error: failed to clone rocm-systems" >&2
+    exit 1
+  fi
   popd
   pushd "${sys_path}"
   git config core.sparseCheckoutCone true

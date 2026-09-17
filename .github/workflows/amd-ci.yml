@@ -10,7 +10,7 @@ jobs:
   amd-unit-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
-    timeout-minutes: 45
+    timeout-minutes: 90
     container:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
@@ -56,7 +56,7 @@ jobs:
   amd-e2e-test:
     name: Build and Test on AMD GPUs
     runs-on: "amd-gfx942-mi325"
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
@@ -101,7 +101,7 @@ jobs:
   amd-mori-test:
     name: Build and Test on AMD GPUs with MoRI SHMEM
     runs-on: "amd-gfx942-mi325"
-    timeout-minutes: 45
+    timeout-minutes: 90
     container:
         image: rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.7.1
         options: >-
