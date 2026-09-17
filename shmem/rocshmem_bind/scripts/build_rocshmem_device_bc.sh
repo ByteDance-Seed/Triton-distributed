@@ -44,6 +44,20 @@ CLANG_FLAGS=(
     -I${OMPI_DIR}/include
     -DOMPI_SKIP_MPICXX
 )
+# Distro Open MPI on Ubuntu may leave mpi.h only in the multiarch tree.
+# Keep those as extra -I so device bitcode still compiles if staging missed them.
+for _mpi_inc in \
+    /usr/lib/x86_64-linux-gnu/openmpi/include \
+    /usr/lib/aarch64-linux-gnu/openmpi/include \
+    /usr/include; do
+    if [ -f "${_mpi_inc}/mpi.h" ]; then
+        CLANG_FLAGS+=("-I${_mpi_inc}")
+    fi
+done
+if [ ! -f "${OMPI_DIR}/include/mpi.h" ] && [ ! -f /usr/lib/x86_64-linux-gnu/openmpi/include/mpi.h ] && [ ! -f /usr/include/mpi.h ]; then
+    echo "error: mpi.h not found under ${OMPI_DIR}/include or distro Open MPI paths" >&2
+    exit 1
+fi
 
 LINKER="${ROCM_LD:-${ROCM_PATH}/lib/llvm/bin/llvm-link}"
 OUTPUT_DIR="${ROCSHMEM_INSTALL_DIR}/lib"
