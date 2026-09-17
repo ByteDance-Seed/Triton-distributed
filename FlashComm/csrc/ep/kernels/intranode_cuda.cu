@@ -843,6 +843,12 @@ __launch_bounds__(4 * WARP_SIZE, 1) kernel_dispatch_postprocess_tma(
   const int warp_id = thread_id / WARP_SIZE;
   const int lane_id = thread_id % WARP_SIZE;
   const int32_t num_recv_token = recv_token_count[rank];
+  // A fixed-Q chunk plan represents trailing inactive steps with zero receive
+  // counts.  Return before initializing the TMA pipeline so those steps pay
+  // only the kernel-launch cost.  The predicate is uniform for the whole grid.
+  if (num_recv_token <= 0) {
+    return;
+  }
 
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
   using smem_t =
@@ -965,6 +971,13 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   // const int warp_id = thread_id / WARP_SIZE;
   constexpr int32_t kElemsPerInt4 = sizeof(int4) / sizeof(token_t);
   constexpr int32_t kNumThreadsPerBlock = kNumWarps * WARP_SIZE;
+  const int32_t num_recv_token = recv_token_count[rank];
+  // Skip accumulator setup and block synchronization for rank-local empty
+  // steps.  All threads observe the same receive count, so this early return
+  // is uniform and leaves active-step arithmetic and reduction order intact.
+  if (num_recv_token <= 0) {
+    return;
+  }
 
   constexpr int32_t kHiddenSizeInt4 = kHiddenSize / kElemsPerInt4;
   constexpr int32_t kInt4PerThread =
@@ -982,7 +995,6 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   }
 
   __syncthreads();
-  int32_t num_recv_token = recv_token_count[rank];
 
   for (int32_t i = block_id; i < num_recv_token; i += num_block) {
     int32_t is_valid_lane = 0;

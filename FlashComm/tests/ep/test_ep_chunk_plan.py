@@ -62,6 +62,8 @@ def parse_args():
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--local-world-size", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--launch-num-sm", type=int, default=0,
+                        help="SM budget for chunk-plan cooperative launch; 0 keeps the current full-device behavior")
     parser.add_argument("--kernel-limit-us", type=float, default=120.0)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     return parser.parse_args()
@@ -298,6 +300,7 @@ def main():
             routing,
             recv_capacity_tokens=capacity,
             expert_alignment=args.expert_alignment,
+            launch_num_sms=args.launch_num_sm or None,
         )
         local_reference_prefixes.append(reference_prefix)
         pending.append((
@@ -362,7 +365,12 @@ def main():
 
     perf_routing = make_routing("hot_rank", rank, world, args.max_token_per_rank, args.topk, num_experts, 99173).cuda()
     for _ in range(args.warmup):
-        planner.build(perf_routing, recv_capacity_tokens=capacity, expert_alignment=args.expert_alignment)
+        planner.build(
+            perf_routing,
+            recv_capacity_tokens=capacity,
+            expert_alignment=args.expert_alignment,
+            launch_num_sms=args.launch_num_sm or None,
+        )
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -370,7 +378,12 @@ def main():
         torch.cuda.nvtx.range_push("ep_chunk_plan_profile")
     start.record()
     for _ in range(args.iters):
-        planner.build(perf_routing, recv_capacity_tokens=capacity, expert_alignment=args.expert_alignment)
+        planner.build(
+            perf_routing,
+            recv_capacity_tokens=capacity,
+            expert_alignment=args.expert_alignment,
+            launch_num_sms=args.launch_num_sm or None,
+        )
     end.record()
     if args.profile:
         torch.cuda.nvtx.range_pop()

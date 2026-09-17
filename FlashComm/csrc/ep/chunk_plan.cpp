@@ -56,7 +56,8 @@ void check_topk_indices(const torch::Tensor &topk_indices) {
 void build_ep_chunk_plan_out(torch::Tensor topk_indices, int32_t num_experts,
                              int32_t chunk_size, int32_t max_num_tokens,
                              int32_t recv_capacity_tokens,
-                             int32_t expert_alignment, torch::Tensor workspace,
+                             int32_t expert_alignment, int32_t launch_num_sms,
+                             torch::Tensor workspace,
                              uintptr_t workspace_win_handle,
                              torch::Tensor logical_token_ranges,
                              torch::Tensor rank_chunk_prefix) {
@@ -74,6 +75,7 @@ void build_ep_chunk_plan_out(torch::Tensor topk_indices, int32_t num_experts,
   FLASH_CHECK(num_ranks > 0 && num_ranks <= 32);
   FLASH_CHECK(num_experts % num_ranks == 0);
   FLASH_CHECK(recv_capacity_tokens > 0 && expert_alignment > 0);
+  FLASH_CHECK(launch_num_sms >= 0) << "launch_num_sms must be non-negative";
   const int64_t routes_per_token = static_cast<int64_t>(num_ranks) * topk;
   FLASH_CHECK(routes_per_token > 0 &&
               max_num_tokens <=
@@ -129,8 +131,9 @@ void build_ep_chunk_plan_out(torch::Tensor topk_indices, int32_t num_experts,
 
   build_ep_chunk_plan_cuda(
       topk_indices.data_ptr<int32_t>(), num_token, topk, num_experts,
-      chunk_size, max_num_tokens, recv_capacity_tokens, expert_alignment, rank,
-      num_ranks, gin.lsa_size, gin.ep_num_qps, workspace_win_handle,
+      chunk_size, max_num_tokens, recv_capacity_tokens, expert_alignment,
+      launch_num_sms, rank, num_ranks, gin.lsa_size, gin.ep_num_qps,
+      workspace_win_handle,
       static_cast<const void *>(buffer::nccl_gin_dev_comm()),
       logical_token_ranges.data_ptr<int32_t>(),
       rank_chunk_prefix.data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream());
@@ -237,9 +240,9 @@ void bind_ep_chunk_plan_ops(py::module &m) {
         &flash_comm::ep::chunk_plan::build_ep_chunk_plan_out,
         py::arg("topk_indices"), py::arg("num_experts"), py::arg("chunk_size"),
         py::arg("max_num_tokens"), py::arg("recv_capacity_tokens"),
-        py::arg("expert_alignment"), py::arg("workspace"),
-        py::arg("workspace_win_handle"), py::arg("logical_token_ranges"),
-        py::arg("rank_chunk_prefix"),
+        py::arg("expert_alignment"), py::arg("launch_num_sms") = 0,
+        py::arg("workspace"), py::arg("workspace_win_handle"),
+        py::arg("logical_token_ranges"), py::arg("rank_chunk_prefix"),
         "Build a caller-owned EP chunk plan with one NCCL device kernel.");
   m.def("build_ep_chunk_layouts_out",
         &flash_comm::ep::chunk_plan::build_ep_chunk_layouts_out,

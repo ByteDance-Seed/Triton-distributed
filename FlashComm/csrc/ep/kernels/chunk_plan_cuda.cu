@@ -188,7 +188,8 @@ __device__ void build_schedule(const int32_t *global_prefix, int32_t num_chunks,
                                int32_t *control) {
   const int32_t tid = static_cast<int32_t>(threadIdx.x);
   const int32_t lane = tid & (kWarpSize - 1);
-  const int32_t target_rank = tid / kWarpSize;
+  const int32_t warp_id = tid / kWarpSize;
+  const int32_t num_warps = blockDim.x / kWarpSize;
   int32_t *rank_max_end = control;
   int32_t *common_end = control + num_ranks;
 
@@ -214,7 +215,10 @@ __device__ void build_schedule(const int32_t *global_prefix, int32_t num_chunks,
   int32_t step = 0;
   int32_t previous_step_chunks = 0;
   while (begin < schedule_num_chunks) {
-    if (target_rank < num_ranks) {
+    // A 512-thread CTA has fewer warps than the maximum EP size.  Process
+    // target ranks in round-robin order so every rank contributes its bound.
+    for (int32_t target_rank = warp_id; target_rank < num_ranks;
+         target_rank += num_warps) {
       const int32_t end = uniform_range_max_end(
           global_prefix, begin, schedule_num_chunks, num_experts, num_ranks,
           target_rank, recv_capacity_tokens, expert_alignment,
@@ -249,7 +253,7 @@ __device__ void build_schedule(const int32_t *global_prefix, int32_t num_chunks,
   }
 }
 
-__global__ void kernel_build_ep_chunk_plan(
+__global__ __launch_bounds__(512, 1) void kernel_build_ep_chunk_plan(
     const int32_t *topk_indices, int32_t num_token, int32_t topk,
     int32_t num_experts, int32_t chunk_size, int32_t max_num_tokens,
     int32_t recv_capacity_tokens, int32_t expert_alignment, int32_t rank,
@@ -718,15 +722,16 @@ size_t workspace_numel(int32_t num_chunks, int32_t num_experts,
 void build_ep_chunk_plan_cuda(
     const int32_t *topk_indices, int32_t num_token, int32_t topk,
     int32_t num_experts, int32_t chunk_size, int32_t max_num_tokens,
-    int32_t recv_capacity_tokens, int32_t expert_alignment, int32_t rank,
-    int32_t num_ranks, int32_t lsa_world_size, int32_t gin_context,
-    uintptr_t workspace_win_handle, const void *dev_comm_host,
-    int32_t *logical_token_ranges, int32_t *rank_chunk_prefix,
-    cudaStream_t stream) {
+    int32_t recv_capacity_tokens, int32_t expert_alignment,
+    int32_t launch_num_sms, int32_t rank, int32_t num_ranks,
+    int32_t lsa_world_size, int32_t gin_context, uintptr_t workspace_win_handle,
+    const void *dev_comm_host, int32_t *logical_token_ranges,
+    int32_t *rank_chunk_prefix, cudaStream_t stream) {
   FLASH_CHECK(topk_indices != nullptr || num_token == 0);
   FLASH_CHECK(dev_comm_host != nullptr);
+  FLASH_CHECK(launch_num_sms >= 0) << "launch_num_sms must be non-negative";
   FLASH_CHECK(rank >= 0 && rank < num_ranks);
-  const int32_t threads = std::max(256, num_ranks * kWarpSize);
+  constexpr int32_t threads = 512;
   const int32_t num_chunks = 1 + (max_num_tokens - 1) / chunk_size;
   const size_t shared_bytes =
       static_cast<size_t>(num_ranks + 1) * sizeof(int32_t);
@@ -736,21 +741,29 @@ void build_ep_chunk_plan_cuda(
   static thread_local int32_t cached_device = -1;
   static thread_local int32_t cached_threads = 0;
   static thread_local size_t cached_shared_bytes = 0;
-  static thread_local int32_t cached_cooperative_limit = 0;
+  static thread_local int32_t cached_sm_count = 0;
+  static thread_local int32_t cached_blocks_per_sm = 0;
   if (cached_device != device || cached_threads != threads ||
       cached_shared_bytes != shared_bytes) {
-    int32_t sm_count = 0;
-    int32_t blocks_per_sm = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount,
-                                      device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&cached_sm_count,
+                                      cudaDevAttrMultiProcessorCount, device));
     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &blocks_per_sm, kernel_build_ep_chunk_plan, threads, shared_bytes));
+        &cached_blocks_per_sm, kernel_build_ep_chunk_plan, threads,
+        shared_bytes));
     cached_device = device;
     cached_threads = threads;
     cached_shared_bytes = shared_bytes;
-    cached_cooperative_limit = sm_count * blocks_per_sm;
   }
-  const int32_t cooperative_limit = cached_cooperative_limit;
+  FLASH_CHECK(cached_sm_count > 0);
+  FLASH_CHECK(cached_blocks_per_sm > 0);
+  if (launch_num_sms > 0) {
+    FLASH_CHECK(launch_num_sms <= cached_sm_count)
+        << "launch_num_sms exceeds device SM count: got " << launch_num_sms
+        << ", device has " << cached_sm_count;
+  }
+  const int32_t effective_sm_count =
+      (launch_num_sms > 0) ? launch_num_sms : cached_sm_count;
+  const int32_t cooperative_limit = effective_sm_count * cached_blocks_per_sm;
   FLASH_CHECK(cooperative_limit > 0);
   constexpr int32_t kRoutesPerThread = 8;
   const int64_t local_routes = static_cast<int64_t>(num_token) * topk;

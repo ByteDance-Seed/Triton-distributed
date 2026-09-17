@@ -420,7 +420,9 @@ class EPKernels:
         return (self.ep_context.dispatch_output_buf[:dispatch_recv_token_count], dispatch_weights, layout_desc)
 
     def dispatch_intranode_postprocess(self, dispatch_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
-                                       layout_desc: EPCommLayoutDesc, num_sm: int = 0):
+                                       layout_desc: EPCommLayoutDesc, num_sm: int = 0,
+                                       recv_topk_scatter_indices_out: torch.Tensor | None = None,
+                                       dispatch_weights_out: torch.Tensor | None = None):
         if num_sm <= 0:
             num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count * 8
 
@@ -440,12 +442,37 @@ class EPKernels:
         # 2. copy recv_topk_scatter_indices from symm tensor to torch tensor
         # 3. get dispatch weights
         buffer_size = dispatch_out.shape[0]
-        recv_topk_scatter_indices = torch.empty((buffer_size, topk), dtype=layout_desc.recv_topk_scatter_indices.dtype,
-                                                device=layout_desc.recv_topk_scatter_indices.device)
+        if recv_topk_scatter_indices_out is None:
+            recv_topk_scatter_indices = torch.empty(
+                (buffer_size, topk),
+                dtype=layout_desc.recv_topk_scatter_indices.dtype,
+                device=layout_desc.recv_topk_scatter_indices.device,
+            )
+        else:
+            recv_topk_scatter_indices = recv_topk_scatter_indices_out
+            if (tuple(recv_topk_scatter_indices.shape) != (buffer_size, topk)
+                    or recv_topk_scatter_indices.dtype != layout_desc.recv_topk_scatter_indices.dtype
+                    or recv_topk_scatter_indices.device != layout_desc.recv_topk_scatter_indices.device
+                    or not recv_topk_scatter_indices.is_contiguous()):
+                raise ValueError(
+                    "recv_topk_scatter_indices_out must match the dispatch buffer shape, dtype, and device")
         dispatch_weights = None
         if dispatch_topk_weights is not None:
-            dispatch_weights = torch.empty((buffer_size, ), dtype=dispatch_topk_weights.dtype,
-                                           device=dispatch_topk_weights.device)
+            if dispatch_weights_out is None:
+                dispatch_weights = torch.empty(
+                    (buffer_size, ),
+                    dtype=dispatch_topk_weights.dtype,
+                    device=dispatch_topk_weights.device,
+                )
+            else:
+                dispatch_weights = dispatch_weights_out
+                if (tuple(dispatch_weights.shape) != (buffer_size, )
+                        or dispatch_weights.dtype != dispatch_topk_weights.dtype
+                        or dispatch_weights.device != dispatch_topk_weights.device
+                        or not dispatch_weights.is_contiguous()):
+                    raise ValueError("dispatch_weights_out must match the dispatch buffer shape, dtype, and device")
+        elif dispatch_weights_out is not None:
+            raise ValueError("dispatch_weights_out requires dispatch_topk_weights")
         self._buffer_in_range(layout_desc.recv_topk_scatter_indices, self.ep_context.dispatch_topk_scatter_indices_buf)
         if layout_desc.expert_alignment > 1:
             assert layout_desc.recv_aligned_token_count is not None, \
@@ -1029,8 +1056,17 @@ class EPKernels:
             return self.dispatch_internode(input, topk_indices, topk_weights, layout_desc, num_qps=num_qps)
 
     def dispatch_postprocess(self, dispatch_out: torch.Tensor, dispatch_topk_weights: torch.Tensor | None,
-                             layout_desc: EPCommLayoutDesc, num_sm: int = 0):
-        return self.dispatch_intranode_postprocess(dispatch_out, dispatch_topk_weights, layout_desc, num_sm)
+                             layout_desc: EPCommLayoutDesc, num_sm: int = 0,
+                             recv_topk_scatter_indices_out: torch.Tensor | None = None,
+                             dispatch_weights_out: torch.Tensor | None = None):
+        return self.dispatch_intranode_postprocess(
+            dispatch_out,
+            dispatch_topk_weights,
+            layout_desc,
+            num_sm,
+            recv_topk_scatter_indices_out,
+            dispatch_weights_out,
+        )
 
     def combine_preprocess(self, input: torch.Tensor, layout_desc: EPCommLayoutDesc, weight: torch.Tensor | None = None,
                            zero_copy: bool = False, num_sm: int = 0):

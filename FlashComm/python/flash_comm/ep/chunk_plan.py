@@ -113,6 +113,24 @@ def _validate_build_inputs(topk_indices: torch.Tensor, *, max_num_tokens: int, c
     return num_chunks, topk
 
 
+def _resolve_launch_num_sms(launch_num_sms: int | None, *, device: torch.device) -> int:
+    if launch_num_sms is None:
+        env_value = os.environ.get("FLASH_COMM_CHUNK_PLAN_NUM_SMS")
+        if env_value:
+            try:
+                launch_num_sms = int(env_value)
+            except ValueError as exc:
+                raise ValueError("FLASH_COMM_CHUNK_PLAN_NUM_SMS must be an integer when set") from exc
+    if launch_num_sms is None:
+        return 0
+    if launch_num_sms <= 0:
+        raise ValueError("launch_num_sms must be positive when specified")
+    device_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    if launch_num_sms > device_sms:
+        raise ValueError(f"launch_num_sms exceeds device SM count: got {launch_num_sms}, device has {device_sms}")
+    return int(launch_num_sms)
+
+
 class EPChunkPlanner:
     """Reusable NCCL communication workspace for stateless chunk-plan builds.
 
@@ -191,7 +209,8 @@ class EPChunkPlanner:
                 raise init_error
             raise RuntimeError("EPChunkPlanner workspace initialization failed on another rank")
 
-    def build(self, topk_indices: torch.Tensor, *, recv_capacity_tokens: int, expert_alignment: int = 1) -> EPChunkPlan:
+    def build(self, topk_indices: torch.Tensor, *, recv_capacity_tokens: int, expert_alignment: int = 1,
+              launch_num_sms: int | None = None) -> EPChunkPlan:
         """Build one newly allocated plan from the current rank's routing."""
         if self._finalized or self._workspace_tensor is None:
             raise RuntimeError("EPChunkPlanner has been finalized")
@@ -207,12 +226,15 @@ class EPChunkPlanner:
             world_size=self.world_size,
         )
 
+        launch_num_sms = _resolve_launch_num_sms(launch_num_sms, device=self.device)
+
         logical_token_ranges = torch.empty((num_chunks, 2), dtype=torch.int32, device=self.device)
         rank_chunk_prefix = torch.empty((self.world_size, num_chunks + 1, self.num_experts + 1), dtype=torch.int32,
                                         device=self.device)
         _chunk_plan.build_ep_chunk_plan_out(topk_indices, self.num_experts, self.chunk_size, self.max_num_tokens,
-                                            recv_capacity_tokens, expert_alignment, self._workspace_tensor,
-                                            self._workspace_win_handle, logical_token_ranges, rank_chunk_prefix)
+                                            recv_capacity_tokens, expert_alignment, launch_num_sms,
+                                            self._workspace_tensor, self._workspace_win_handle, logical_token_ranges,
+                                            rank_chunk_prefix)
 
         return EPChunkPlan(
             logical_token_ranges=logical_token_ranges,
@@ -252,10 +274,11 @@ class EPChunkPlanner:
 
 
 def build_ep_chunk_plan(planner: EPChunkPlanner, topk_indices: torch.Tensor, *, recv_capacity_tokens: int,
-                        expert_alignment: int = 1) -> EPChunkPlan:
+                        expert_alignment: int = 1, launch_num_sms: int | None = None) -> EPChunkPlan:
     """Functional spelling of :meth:`EPChunkPlanner.build`."""
     return planner.build(
         topk_indices,
         recv_capacity_tokens=recv_capacity_tokens,
         expert_alignment=expert_alignment,
+        launch_num_sms=launch_num_sms,
     )

@@ -42,11 +42,11 @@ size_t workspace_numel(int32_t num_chunks, int32_t num_experts,
 void build_ep_chunk_plan_cuda(
     const int32_t *topk_indices, int32_t num_token, int32_t topk,
     int32_t num_experts, int32_t chunk_size, int32_t max_num_tokens,
-    int32_t recv_capacity_tokens, int32_t expert_alignment, int32_t rank,
-    int32_t num_ranks, int32_t lsa_world_size, int32_t gin_context,
-    uintptr_t workspace_win_handle, const void *dev_comm_host,
-    int32_t *logical_token_ranges, int32_t *rank_chunk_prefix,
-    cudaStream_t stream);
+    int32_t recv_capacity_tokens, int32_t expert_alignment,
+    int32_t launch_num_sms, int32_t rank, int32_t num_ranks,
+    int32_t lsa_world_size, int32_t gin_context, uintptr_t workspace_win_handle,
+    const void *dev_comm_host, int32_t *logical_token_ranges,
+    int32_t *rank_chunk_prefix, cudaStream_t stream);
 
 void build_ep_chunk_layouts_cuda(
     const int32_t *topk_indices, const int32_t *token_within_expert_offset,
