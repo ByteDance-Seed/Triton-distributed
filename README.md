@@ -44,6 +44,7 @@ Feel free to contact us if you want to use Triton-distributed on your own hardwa
 The default branch tracks **Triton 3.7**. The previous Triton 3.4 line is kept on the [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4) branch. Ascend is not on the 3.7 plugin build path yet (`triton-ascend` has not rebased onto 3.7); use `triton-v3.4` for a working Ascend build. The 3.4-era Ascend sources are parked under [`ascend/`](ascend/README.md) on this branch until a plugin-based port exists.
 
 ## News
+- 09/17/2026 ✨✨✨: FlashComm fused MXFP8 intra-node dispatch: expert-parallel traffic can send packed FP8 instead of BF16, with bitwise checks against fused and prequantized paths. MXFP8 launch templates, caller-owned EP output buffers, and pinned-buffer lifetime checks are also tightened.
 - 09/01/2026 ✨✨✨: FlashComm fixed-buffer chunked EP: dispatch and combine run in chunks over a fixed-size buffer, so peak EP memory no longer scales with the worst-case token count. EP overlap buffers are also sized on demand, and the EP kernels cover a wider range of hidden sizes.
 - 08/17/2026 🚀🚀🚀: Upgraded to Triton 3.7. Triton-distributed now builds as an out-of-tree plugin against stock upstream Triton. The Triton 3.4 line is kept on [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4).
 - 08/10/2026 ✨✨✨: AMD MORI backend update restoring fused-MoE cooperative SHMEM APIs.

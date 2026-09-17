@@ -47,6 +47,7 @@ Triton-distributed是基于OpenAI Triton构建的分布式编译器，专为计�
 [安装指导](docs/build.md)
 
 ### 最近更新
+- 09/17/2026 ✨✨✨: FlashComm 融合 MXFP8 intra-node dispatch：expert-parallel 通信可以发送 packed FP8 而不是 BF16，并对 fused / prequantized 路径做 bitwise 对照。同时修复 MXFP8 launch template，支持调用者提供 EP 输出 buffer，并收紧 pinned-buffer 生命周期检查。
 - 09/01/2026 ✨✨✨: FlashComm 固定缓冲区分块 EP：dispatch 与 combine 在固定大小的缓冲区上分块执行，EP 峰值显存不再随最坏情况的 token 数增长。EP overlap 缓冲区改为按需分配，EP kernel 覆盖的 hidden size 范围也进一步扩大。
 - 08/17/2026 🚀🚀🚀: 升级到 Triton 3.7。Triton-distributed 现在作为 out-of-tree plugin 构建在上游 Triton 上。Triton 3.4 线路保留在 [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4)。
 - 08/10/2026 ✨✨✨: 更新 AMD MORI 后端，恢复 fused-MoE 所需的 cooperative SHMEM API。
