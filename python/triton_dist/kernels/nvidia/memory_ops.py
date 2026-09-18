@@ -729,7 +729,8 @@ def reduce_tensor(tensor: torch.Tensor, num_sms: int, dim=0, acc_dtype=torch.flo
     if tensor.ndim == 1:
         reduce_dim = tensor.shape[dim]
         stride_reduce = tensor.stride(dim)
-        output = torch.empty([1], dtype=tensor.dtype, device=tensor.device)
+        # zeros, not empty: the kernel folds the per-CTA partials in with tl.atomic_add
+        output = torch.zeros([1], dtype=tensor.dtype, device=tensor.device)
         BLOCK_SIZE = 1024
         reduce_1d_persistent_kernel[(num_sms, )](tensor, output, reduce_dim, stride_reduce, BLOCK_SIZE)
     elif tensor.ndim == 2:
