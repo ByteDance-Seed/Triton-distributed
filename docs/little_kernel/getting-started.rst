@@ -104,8 +104,8 @@ Running Tests
 
 Unit tests (no GPU required for most)::
 
-    pytest test/little_kernel/unit/ -v
+    pytest python/little_kernel/tests/unit/ -v
 
 Integration tests (requires GPU)::
 
-    pytest test/little_kernel/integration/ -v
+    pytest python/little_kernel/tests/integration/ -v
