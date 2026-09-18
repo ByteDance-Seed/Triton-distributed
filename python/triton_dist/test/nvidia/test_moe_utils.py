@@ -58,6 +58,7 @@ def test_calc_gather_scatter_index(ntokens, topk, nexperts, block_size=1):
     chosen_experts = _generate_random_choosed_experts(ntokens, topk, nexperts)
     ntokens_by_expert, scatter_index, gather_index, expert_index, M_pad = calc_gather_scatter_index_v2_triton(
         chosen_experts, nexperts, block_size)
+    torch.testing.assert_close(ntokens_by_expert, histogram_by_expert_torch(chosen_experts, nexperts))
     torch.testing.assert_close(
         scatter_index.flatten().sort()[0],
         torch.arange(ntokens * topk, device="cuda", dtype=torch.int32),
@@ -131,7 +132,7 @@ def _triton_warmup():
 if __name__ == "__main__":
     _triton_warmup()
     test_histogram(1024, 5, 32)
-    for ntokens in [1024, 2048, 4096, 8192]:
+    for ntokens in [1024, 2047, 2048, 4096, 8192]:  # 2047: ntokens * topk is not a multiple of BLOCK_SIZE
         for topk in [2, 4, 8, 5]:
             for nexperts in [32, 64, 128]:
                 test_calc_gather_scatter_index(ntokens, topk, nexperts)
