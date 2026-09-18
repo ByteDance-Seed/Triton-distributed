@@ -34,19 +34,19 @@ Type System
 Scalar Types
 ~~~~~~~~~~~~
 
-=========== ================== =========
-LK Type     C++ Type           Bytes
-=========== ================== =========
-``int32``   ``int``            4
-``uint32``  ``unsigned int``   4
-``int64``   ``long long``      8
-``uint64``  ``unsigned long long`` 8
-``float16`` ``__half``         2
-``bfloat16`` ``__nv_bfloat16`` 2
-``float32`` ``float``          4
-``float64`` ``double``         8
-``void``    ``void``           0
-=========== ================== =========
+============ ====================== =========
+LK Type      C++ Type               Bytes
+============ ====================== =========
+``int32``    ``int``                4
+``uint32``   ``unsigned int``       4
+``int64``    ``long long``          8
+``uint64``   ``unsigned long long`` 8
+``float16``  ``__half``             2
+``bfloat16`` ``__nv_bfloat16``      2
+``float32``  ``float``              4
+``float64``  ``double``             8
+``void``     ``void``               0
+============ ====================== =========
 
 Tensor Types
 ~~~~~~~~~~~~
