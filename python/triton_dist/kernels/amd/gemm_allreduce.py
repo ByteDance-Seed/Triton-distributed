@@ -159,6 +159,14 @@ def kernel_persistent_gemm_notify_ar(
         c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         tl.store(c_ptrs, c, mask=c_mask)
+        # The tile store above is divergent (each thread writes its own rows/cols),
+        # but the completion signal below is a single per-tile flag. Without a
+        # workgroup barrier, a fast wave can raise the signal (release only orders
+        # *its own* prior stores) before slower waves finish storing their part of
+        # the tile; the remote consumer then reads a partially-written tile and gets
+        # a stale sub-block (deterministic on gfx950 due to fixed wave scheduling).
+        # Barrier so all waves finish the store before any thread signals.
+        tl.debug_barrier()
         signal_offset = tile_id * world_size + rank
         for remote in range(world_size):
             remote_signal_ptr = dl.symm_at(tile_signal_ptr, remote)

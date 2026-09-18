@@ -178,7 +178,8 @@ def run_perf(dtype: torch.dtype, method: AllReduceMethod, warmup=5, iters=10):
 
 
 def _triton_warmup():
-    triton.compiler.compiler.triton_key()  # warmup. don't include this into torch.profiler.
+    from triton.runtime.cache import triton_key
+    triton_key()  # warmup. don't include this into torch.profiler.
 
 
 def _parse_args():

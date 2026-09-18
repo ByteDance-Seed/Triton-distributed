@@ -28,8 +28,6 @@ import subprocess
 import json
 import warnings
 import re
-import os
-import sys
 from threading import Lock
 from hip import hip
 
@@ -208,23 +206,7 @@ def _get_gpu_uuid_by_physical_device_id(device_id: int):
     _ensure_amdsmi_initialized()
     devices = amdsmi.amdsmi_get_processor_handles()
     handle = devices[device_id]
-    major_version = int(torch.version.hip.split('.')[0])
-    if major_version >= 7:
-        # Due to a change in how UUIDs are generated for CPX mode, amdsmi no longer reports any uuid value that
-        # matches HIP/pytorch. HIP gets the value from sysfs, and we can also get the value there by getting
-        # the KFD info from amdsmi and then probing the sysfs directly.
-        kfd_info = amdsmi.amdsmi_get_gpu_kfd_info(handle)
-        node_id = kfd_info["node_id"]
-        kfd_path = os.path.join("/sys/devices/virtual/kfd/kfd/topology/nodes", str(node_id), "properties")
-        key = "unique_id"
-        with open(kfd_path, "r") as fd:
-            for line in fd:
-                if line.startswith(key):
-                    uuid_str = line[len(key)+1:]
-        uuid_str = hex(int(uuid_str))
-        return uuid_str
-    else:
-        return amdsmi.amdsmi_get_gpu_device_uuid(handle)
+    return amdsmi.amdsmi_get_gpu_device_uuid(handle)
 
 
 def torch_uuid_to_unique_id(torch_uuid: str) -> str:
@@ -250,8 +232,7 @@ def get_uuid_by_physical_device_id(device_id: int | None = None):
     try:
         if has_amdsmi():
             return _get_gpu_uuid_by_physical_device_id(device_id)
-    except Exception as e:
-        print(e, file=sys.stderr)
+    except Exception:
         warnings.warn("get_uuid_by_physical_device_id failed with amdsmi, try using rocm-smi")
 
     return _get_physical_gpu_uuid_rocm(device_id)
@@ -276,14 +257,17 @@ def _get_amdsmi_device_index(device_id: int | None):
     uuid = _get_gpu_uuid(device_id)
 
     uuid_map = {get_uuid_by_physical_device_id(i)[-12:]: i for i in range(get_physical_device_count())}
-    # TODO-rocm fix error
-    uuid_tail = uuid[-12:]
-    if uuid_tail not in uuid_map:
-        warnings.warn(f"UUID mapping miss in _get_amdsmi_device_index: device_id={device_id}, "
-                      f"uuid_tail={uuid_tail}, available_tails={sorted(uuid_map.keys())}. "
-                      f"Fallback to logical device_id.")
-        return device_id
-    return uuid_map[uuid_tail]
+    key = uuid[-12:]
+    if key in uuid_map:
+        return uuid_map[key]
+    # On some ROCm versions torch's device UUID uses an encoding that cannot be
+    # correlated with the amdsmi/rocm-smi physical UUID, so the lookup misses. When
+    # the visible-device ordering is identity (the common case, e.g. unset or
+    # 0..N-1 CUDA_VISIBLE_DEVICES) the torch index already equals the physical
+    # index, so fall back to it instead of failing this best-effort mapping.
+    warnings.warn(f"Cannot map torch device {device_id} (uuid ...{key}) to a physical amdsmi "
+                  f"index via UUID; falling back to identity mapping. Available: {list(uuid_map)}")
+    return device_id
 
 
 def get_physical_device_count():

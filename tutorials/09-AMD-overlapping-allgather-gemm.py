@@ -396,11 +396,12 @@ class triton_ag_gemm_intra_node(torch.nn.Module):
         NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
         NUM_XCDS = 4
 
-        grid = lambda META: (min(
-            NUM_SMS,
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(
-                N_PER_RANK, META["BLOCK_SIZE_N"]),
-        ), )
+        # consumer_gemm_persistent_kernel remaps program ids across XCDs assuming
+        # exactly NUM_SMS programs launch (pid = (pid%NUM_XCDS)*(NUM_SMS//NUM_XCDS)
+        # + pid//NUM_XCDS). Launching min(NUM_SMS, total_tiles) for small shapes
+        # makes that remap non-bijective and silently skips output tiles. Launch the
+        # full NUM_SMS; surplus programs fall through the persistent tile loop.
+        grid = lambda META: (NUM_SMS, )
 
         full_input = ctx.workspace_tensors[ctx.rank][:M]
         local_input = input

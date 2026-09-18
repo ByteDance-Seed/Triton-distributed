@@ -46,32 +46,63 @@ stays inside the fused kernels.
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
-
 import triton_dist
 import triton_dist.language as dl
+from triton_dist.kernels.amd.common_ops import barrier_on_this_grid
 from triton_dist.language.extra import libshmem_device
 from triton_dist.language.extra.hip.language_extra import (
-    tid,
     __syncthreads,
-    ld,
-    st,
     atomic_add,
     atomic_add_per_warp,
+    ld,
+    st,
+    tid,
 )
 from triton_dist.language.extra.language_extra import threads_per_warp
-from triton_dist.kernels.amd.ep_a2a import bincount
-from triton_dist.kernels.amd.common_ops import barrier_on_this_grid
 from triton_dist.utils import (
     MORI_SHMEM_SIGNAL_DTYPE,
+    mori_shmem_barrier_all_on_stream,
     mori_shmem_create_tensor,
     mori_shmem_free_tensor_sync,
-    mori_shmem_barrier_all_on_stream,
 )
+
+
+# ---------------------------------------------------------------------------
+#  bincount (device histogram)
+# ---------------------------------------------------------------------------
+# Backend-agnostic Triton histogram used by the device dispatch-metadata path to
+# write per-expert token counts straight into the symmetric all-gather buffer
+# (something torch.bincount cannot target). Upstream only shipped the NVIDIA
+# kernels/nvidia/ep_a2a.py; the AMD fused-MoE path is the sole user, so it lives
+# here rather than in a standalone module.
+@triton.jit
+def kernel_bincount(n, input, output, length, num_sms, BLOCK: tl.constexpr):
+    # Each program processes a strided set of BLOCK-sized chunks and atomically
+    # bumps output[val]. Avoids dl.simt_exec_region (whose AMD lowering mishandles
+    # a for-loop body -> "block with no terminator, simt.block_yield").
+    pid = tl.program_id(0)
+    num_pid = tl.num_programs(0)
+    for base in range(pid * BLOCK, n, num_pid * BLOCK):
+        offs = base + tl.arange(0, BLOCK)
+        mask = offs < n
+        vals = tl.load(input + offs, mask=mask, other=length)
+        in_range = mask & (vals < length) & (vals >= 0)
+        tl.atomic_add(output + vals, 1, mask=in_range, sem="relaxed")
+
+
+def bincount(input, length, output=None, output_dtype=torch.int32, num_sm=16, use_aot=False):
+    if output is None:
+        output = torch.zeros(length, dtype=output_dtype, device=input.device)
+    assert input.dim() == 1
+    assert output.size(0) >= length
+    assert input.is_contiguous()
+    n = input.size(0)
+    kernel_bincount[(num_sm, )](n, input, output, length, num_sm, BLOCK=1024, num_warps=8)
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +128,7 @@ def dot_k_const(
     Plain ``tl.dot`` accumulation in fp32.
     """
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
         if need_mask:
             a = tl.load(
                 a_ptrs, mask=((tl.arange(0, BLOCK_SIZE_M) < M)[:, None] &
@@ -480,7 +511,7 @@ def create_ep_a2a_fused_context(
     assert num_tot_experts % world_size == 0, "num_tot_experts must be divisible by world_size"
     experts_per_rank = num_tot_experts // world_size
     # Upper bound on tokens a single rank can receive (all replicas may land here).
-    cap_tokens = max(int(math.ceil(max_tokens * topk * capacity)), max_tokens)
+    cap_tokens = max(math.ceil(max_tokens * topk * capacity), max_tokens)
 
     send_buf = mori_shmem_create_tensor([max_tokens, hidden], dtype)
     output_buf = mori_shmem_create_tensor([cap_tokens, hidden], dtype)
@@ -504,13 +535,14 @@ def create_ep_a2a_fused_context(
     meta_grid_sync = torch.zeros([1], dtype=torch.int32, device=device)
 
     mori_shmem_barrier_all_on_stream(torch.cuda.current_stream())
-    return EpA2AFusedContext(
-        group=group, rank=rank, world_size=world_size, max_tokens=max_tokens, hidden=hidden, topk=topk,
-        num_tot_experts=num_tot_experts, experts_per_rank=experts_per_rank, dtype=dtype, weight_dtype=weight_dtype,
-        capacity=capacity, cap_tokens=cap_tokens, send_buf=send_buf, output_buf=output_buf,
-        barriers_buf=barriers_buf, combine_in_buf=combine_in_buf, local_splits_buf=local_splits_buf,
-        full_splits_buf=full_splits_buf, splits_signal_buf=splits_signal_buf, task_counter=task_counter,
-        expert_counter=expert_counter, combine_grid_sync=combine_grid_sync, meta_grid_sync=meta_grid_sync)
+    return EpA2AFusedContext(group=group, rank=rank, world_size=world_size, max_tokens=max_tokens, hidden=hidden,
+                             topk=topk, num_tot_experts=num_tot_experts, experts_per_rank=experts_per_rank, dtype=dtype,
+                             weight_dtype=weight_dtype, capacity=capacity, cap_tokens=cap_tokens, send_buf=send_buf,
+                             output_buf=output_buf, barriers_buf=barriers_buf, combine_in_buf=combine_in_buf,
+                             local_splits_buf=local_splits_buf, full_splits_buf=full_splits_buf,
+                             splits_signal_buf=splits_signal_buf, task_counter=task_counter,
+                             expert_counter=expert_counter, combine_grid_sync=combine_grid_sync,
+                             meta_grid_sync=meta_grid_sync)
 
 
 def _build_gemm_tiling(split_size: torch.Tensor, block_m: int, device):
@@ -545,14 +577,14 @@ def _build_gemm_tiling(split_size: torch.Tensor, block_m: int, device):
             return torch.zeros([1], dtype=torch.int32, device=device)
         return torch.tensor(lst, dtype=torch.int32, device=device)
 
-    return dict(
-        block_m=block_m,
-        expert_ids=_i32(expert_ids),
-        split_size_cum=_i32(split_size_cum),
-        tile_num=_i32(tile_num),
-        tile_num_cum=_i32(tile_num_cum),
-        total_tiles=torch.tensor([total_tiles], dtype=torch.int32, device=device),
-    )
+    return {
+        "block_m": block_m,
+        "expert_ids": _i32(expert_ids),
+        "split_size_cum": _i32(split_size_cum),
+        "tile_num": _i32(tile_num),
+        "tile_num_cum": _i32(tile_num_cum),
+        "total_tiles": torch.tensor([total_tiles], dtype=torch.int32, device=device),
+    }
 
 
 def _build_dispatch_metadata(ctx: EpA2AFusedContext, topk_indices: torch.Tensor, block_m: int):
@@ -587,15 +619,15 @@ def _build_dispatch_metadata(ctx: EpA2AFusedContext, topk_indices: torch.Tensor,
     M_local = int(num_recv_tokens_per_rank[ctx.rank].item())
     split_size = counts[ctx.rank].sum(dim=1).to(torch.int32)  # [epr]
 
-    meta = dict(
-        local_splits=local_splits,
-        recv_buf_offset=recv_buf_offset,
-        num_input_tokens_per_rank=num_input_tokens_per_rank,
-        num_recv_tokens_per_rank=num_recv_tokens_per_rank,
-        M_local=M_local,
-        split_size=split_size,
-        metadata_backend="host",
-    )
+    meta = {
+        "local_splits": local_splits,
+        "recv_buf_offset": recv_buf_offset,
+        "num_input_tokens_per_rank": num_input_tokens_per_rank,
+        "num_recv_tokens_per_rank": num_recv_tokens_per_rank,
+        "M_local": M_local,
+        "split_size": split_size,
+        "metadata_backend": "host",
+    }
     meta.update(_build_gemm_tiling(split_size, block_m, device))
     return meta
 
@@ -747,7 +779,8 @@ def kernel_build_gemm_tiling(
             tl.store(tile_num_cum_ptr + pid, tile_cumsum)
 
 
-def _build_gemm_tiling_device(split_size: torch.Tensor, block_m: int, epr: int, device, M_local: int, num_sms: int = 64):
+def _build_gemm_tiling_device(split_size: torch.Tensor, block_m: int, epr: int, device, M_local: int,
+                              num_sms: int = 64):
     """Device-kernel version of ``_build_gemm_tiling`` (same dict layout)."""
     # An expert contributes at most cdiv(tokens, block_m) tiles; the +epr bound covers
     # the partial tile of every expert, so M_grid is a safe upper bound on total tiles.
@@ -771,14 +804,14 @@ def _build_gemm_tiling_device(split_size: torch.Tensor, block_m: int, epr: int, 
         block_m,
         num_sms,
     )
-    return dict(
-        block_m=block_m,
-        expert_ids=expert_ids,
-        split_size_cum=split_size_cum,
-        tile_num=tile_num,
-        tile_num_cum=tile_num_cum,
-        total_tiles=total_tiles,
-    )
+    return {
+        "block_m": block_m,
+        "expert_ids": expert_ids,
+        "split_size_cum": split_size_cum,
+        "tile_num": tile_num,
+        "tile_num_cum": tile_num_cum,
+        "total_tiles": total_tiles,
+    }
 
 
 def _build_dispatch_metadata_device(ctx: "EpA2AFusedContext", topk_indices: torch.Tensor, block_m: int,
@@ -833,17 +866,17 @@ def _build_dispatch_metadata_device(ctx: "EpA2AFusedContext", topk_indices: torc
     )
 
     M_local = int(num_recv_tokens_per_rank[ctx.rank].item())
-    meta = dict(
+    meta = {
         # clone: ctx.local_splits_buf is shared/overwritten by the next preprocess, so a
         # descriptor must own a stable copy (dispatch reads local_splits for signal decisions).
-        local_splits=ctx.local_splits_buf.clone(),
-        recv_buf_offset=recv_buf_offset,
-        num_input_tokens_per_rank=num_input_tokens_per_rank,
-        num_recv_tokens_per_rank=num_recv_tokens_per_rank,
-        M_local=M_local,
-        split_size=split_size,
-        metadata_backend="device",
-    )
+        "local_splits": ctx.local_splits_buf.clone(),
+        "recv_buf_offset": recv_buf_offset,
+        "num_input_tokens_per_rank": num_input_tokens_per_rank,
+        "num_recv_tokens_per_rank": num_recv_tokens_per_rank,
+        "M_local": M_local,
+        "split_size": split_size,
+        "metadata_backend": "device",
+    }
     meta.update(_build_gemm_tiling_device(split_size, block_m, epr, device, M_local, num_sms=num_sms))
     return meta
 
@@ -854,7 +887,7 @@ def fused_dispatch_token_moe_grouped_gemm(
     topk_indices: torch.Tensor,  # [num_tokens, topk] int32 (global expert ids)
     gemm_weight: torch.Tensor,  # [experts_per_rank, hidden, N]
     *,  # keyword-only below: avoids any silent positional misbind of the new `meta` arg
-    meta: Optional[dict] = None,  # precomputed layout metadata (e.g. from a layer.preprocess); built if None
+    meta: dict | None = None,  # precomputed layout metadata (e.g. from a layer.preprocess); built if None
     use_device_metadata: bool = True,  # build meta with device kernels (host torch fallback if False)
     num_sms: int = 64,
     num_dispatch_tasks: int = 20,
@@ -864,7 +897,7 @@ def fused_dispatch_token_moe_grouped_gemm(
     GROUP_SIZE_M: int = 4,
     num_warps: int = 8,
     num_stages: int = 2,
-    gemm_output: Optional[torch.Tensor] = None,
+    gemm_output: torch.Tensor | None = None,
 ):
     """Run fused dispatch + grouped GEMM. Returns ``(gemm_output[M, N], meta)``.
 
@@ -906,9 +939,8 @@ def fused_dispatch_token_moe_grouped_gemm(
     # ranks fall through into the barrier/kernel while overflowing ranks bail out -> hang.
     max_recv = int(meta["num_recv_tokens_per_rank"].max().item())
     if max_recv > ctx.cap_tokens:
-        raise RuntimeError(
-            f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
-            "increase `capacity` or `max_tokens`")
+        raise RuntimeError(f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
+                           "increase `capacity` or `max_tokens`")
     num_sms = min(num_sms, torch.cuda.get_device_properties(device).multi_processor_count)
 
     # stage this rank's tokens into the symmetric send buffer (putmem source)
@@ -1154,8 +1186,8 @@ def fused_group_gemm_combine_token(
     gemm_weight: torch.Tensor,  # [experts_per_rank, K2, N2] (N2 must == ctx.hidden)
     meta: dict,  # layout descriptor returned by fused_dispatch_token_moe_grouped_gemm
     topk_indices: torch.Tensor,  # [num_tokens, topk] int32 (same as dispatch)
-    topk_weights: Optional[torch.Tensor] = None,  # [num_tokens, topk] fp32 routing weights
-    use_device_metadata: Optional[bool] = None,  # None -> follow meta["metadata_backend"]; else override
+    topk_weights: torch.Tensor | None = None,  # [num_tokens, topk] fp32 routing weights
+    use_device_metadata: bool | None = None,  # None -> follow meta["metadata_backend"]; else override
     num_sms: int = 64,
     BLOCK_SIZE_M: int = 128,
     BLOCK_SIZE_N: int = 128,
@@ -1163,7 +1195,7 @@ def fused_group_gemm_combine_token(
     GROUP_SIZE_M: int = 4,
     num_warps: int = 8,
     num_stages: int = 2,
-    combine_output: Optional[torch.Tensor] = None,
+    combine_output: torch.Tensor | None = None,
 ):
     """Fused gemm2 + combine. Returns ``combined_out[num_tokens, N2]``."""
     M = meta["M_local"]
@@ -1182,9 +1214,8 @@ def fused_group_gemm_combine_token(
     # Global capacity check (see fused_dispatch_token_moe_grouped_gemm): raise on every rank together.
     max_recv = int(meta["num_recv_tokens_per_rank"].max().item())
     if max_recv > ctx.cap_tokens:
-        raise RuntimeError(
-            f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
-            "increase `capacity` or `max_tokens`")
+        raise RuntimeError(f"a rank would receive up to {max_recv} routed tokens > cap_tokens={ctx.cap_tokens}; "
+                           "increase `capacity` or `max_tokens`")
     num_sms = min(num_sms, torch.cuda.get_device_properties(device).multi_processor_count)
 
     has_gate = topk_weights is not None

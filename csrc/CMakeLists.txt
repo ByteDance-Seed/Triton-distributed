@@ -4,6 +4,17 @@ set(DISTRIBUTED_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# csrc is now built standalone (setup.py invokes cmake directly here), so the
+# imported targets used by both subdirectories (triton_aot_generated, lib) must
+# be resolved at this top level. find_package creates directory-scoped IMPORTED
+# targets; resolving them here makes Python3::Module / pybind11::headers visible
+# to triton_aot_generated/, which is added before lib/.
+find_package(
+  Python3
+  COMPONENTS Interpreter Development.Module
+  REQUIRED)
+find_package(pybind11 REQUIRED HINTS "${Python3_SITELIB}")
+
 # ============ Add check for includes here (for future) =============
 
 # ============ Define a GLOBAL property to store object-libraries ============

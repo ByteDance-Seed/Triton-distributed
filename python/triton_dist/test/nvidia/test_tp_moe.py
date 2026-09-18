@@ -137,7 +137,14 @@ if __name__ == "__main__":
 
     # Efficiency Test
     mempool = torch.cuda.graph_pool_handle()
-    triton_dist_graph = make_cuda_graph(mempool, partial(mlp.dist_triton_fwd, x_triton_dist))
+    # Routing (topk + cross-rank all-gather) is a host-orchestrated torch NCCL
+    # collective that cannot be captured into a CUDA graph -- capturing it deadlocks.
+    # For a fixed input it is constant, so precompute it once here (outside capture)
+    # and capture only the NVSHMEM-based dist-triton compute.
+    full_topk_ids, full_topk_weight = mlp._route(x_triton_dist.reshape(-1, K))
+    triton_dist_graph = make_cuda_graph(
+        mempool,
+        partial(mlp.dist_triton_fwd, x_triton_dist, full_topk_ids=full_topk_ids, full_topk_weight=full_topk_weight))
 
     profile = args.profile
     with group_profile("tp_moe", profile, group=TP_GROUP):

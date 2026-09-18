@@ -44,7 +44,7 @@ else:
     USE_AOT = False
 
 if USE_AOT:
-    from triton._C.libtriton_distributed import distributed
+    from triton_dist._C.libtriton_distributed import distributed
 
 
 @functools.lru_cache(maxsize=4)

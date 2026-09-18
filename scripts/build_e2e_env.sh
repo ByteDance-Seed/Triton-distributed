@@ -82,7 +82,7 @@ if command -v nvcc &> /dev/null; then
     fi
 
     echo "Installing CUDA-specific libraries..."
-    
+
     # Check for local flashinfer whl files first
     local_flashinfer_whl=$(find . -name "*flashinfer*.whl" | head -1)
     if [[ -n "$local_flashinfer_whl" ]]; then
@@ -94,14 +94,14 @@ if command -v nvcc &> /dev/null; then
         flashinfer_whl_url="https://flashinfer.ai/whl/${parsed_cuda_slug}/${parsed_pytorch_slug}/"
         pip install flashinfer-python -i "$flashinfer_whl_url"
     fi
-    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation
+    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation --no-deps
     echo "Finished installing CUDA-specific libraries."
 
 # --- AMD ROCm ---
 elif command -v hipcc &> /dev/null; then
     echo "AMD ROCm compiler (hipcc) found. Proceeding with ROCm-specific installations."
     echo "Note: flashinfer does not currently support ROCm and will be skipped."
-    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation
+    python3 -c "import flash_attn" >/dev/null 2>&1 || pip3 install flash-attn --no-build-isolation --no-deps
     echo "Finished installing ROCm-specific libraries."
 else
     echo "NVIDIA CUDA compiler (nvcc) and AMD ROCm compiler (hipcc) not found."
@@ -111,7 +111,13 @@ fi
 # --- Install common packages ---
 echo "Installing common packages: transformers and numpy..."
 pip install transformers==4.51.3 numpy==1.26.4 termcolor
-# deepspeed>=0.19.3 circular-imports with transformers==4.51.3
+# deepspeed is not imported by triton_dist itself, but transformers==4.51.3
+# auto-probes and imports it while loading models (is_deepspeed_available()).
+# deepspeed 0.19.3 eagerly imports transformers.models.opt at package init,
+# which re-enters a still-initializing transformers.modeling_utils and dies with
+# a circular import ("cannot import name 'PreTrainedModel'"). Pin to the last
+# release that imports cleanly with transformers 4.51.3 (0.19.2 verified good;
+# 0.19.3 is the first bad one) instead of always taking latest via --upgrade.
 pip install deepspeed==0.19.2
 
 # --- Define Hugging Face models to download ---
@@ -141,24 +147,34 @@ for arg in "$@"; do
 done
 
 if [ "$download_model" = true ] && [ "$skip_model_download" = false ]; then
-    # --- Loop through each model and download it ---
+    # GitHub AMD e2e only needs the 0.6B checkpoint. The default list used
+    # to include 8B/32B/MoE and retried forever, so one timed-out 32B fetch
+    # could hold the job until the workflow cap.
+    if [ -n "${E2E_MODELS:-}" ]; then
+        read -r -a MODELS <<< "${E2E_MODELS}"
+    fi
+    max_attempts="${E2E_DOWNLOAD_ATTEMPTS:-3}"
     for MODEL_NAME in "${MODELS[@]}"; do
-    while true; do
-        echo "Attempting to download model: $MODEL_NAME (timeout: 120s)..."
-        # Use timeout to prevent the script from hanging indefinitely.
+    attempt=1
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        echo "Attempting to download model: $MODEL_NAME (timeout: 120s, attempt ${attempt}/${max_attempts})..."
         timeout 120s huggingface-cli download "$MODEL_NAME"
 
         EXIT_CODE=$?
 
         if [ $EXIT_CODE -eq 0 ]; then
         echo "Model '$MODEL_NAME' downloaded successfully! 🎉"
-        break # Exit the while loop and move to the next model
+        break
         elif [ $EXIT_CODE -eq 124 ]; then
-        echo "Download timed out for '$MODEL_NAME'. Retrying in 5 seconds... ⏳"
+        echo "Download timed out for '$MODEL_NAME'."
         else
-        echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE. Retrying in 5 seconds... 🔁"
+        echo "Download failed for '$MODEL_NAME' with exit code $EXIT_CODE."
         fi
-
+        if [ "${attempt}" -eq "${max_attempts}" ]; then
+            echo "error: giving up on '$MODEL_NAME' after ${max_attempts} attempts" >&2
+            exit 1
+        fi
+        attempt=$((attempt + 1))
         sleep 5
     done
     done
@@ -172,7 +188,24 @@ else
 fi
 
 pip install accelerate
-pip uninstall triton -y
+
+# In the out-of-tree plugin model the patched, plugin-hosting Triton (built by
+# scripts/build_triton.sh and pip-installed as the `triton` dist that
+# libtriton_dist.so binds to) is a HARD dependency of triton_dist -- not a
+# vendored tree on PYTHONPATH. Never `pip uninstall triton` here: that removes the
+# very Triton the plugin loads into, so `import triton` -> `import triton_dist` ->
+# _plugin.find_plugin() all break and plugin discovery returns empty (this is what
+# `pip uninstall triton -y`, inherited from the old monolithic layout, used to do
+# and it silently broke the megakernel/e2e jobs). If an e2e dependency installed
+# above pulled a stock PyPI `triton` wheel that shadowed the patched build,
+# re-assert the patched Triton so it keeps hosting the plugin.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if python3 -c "from triton._C.libtriton import passes; assert hasattr(passes, 'plugin')" 2>/dev/null; then
+    echo "Patched plugin-hosting Triton is intact; leaving it in place."
+else
+    echo "Patched Triton missing or shadowed by a stock wheel; reinstalling the plugin-hosting Triton..."
+    bash "${SCRIPT_DIR}/build_triton.sh"
+fi
 
 # --- Final check ---
 if [[ $? -eq 0 ]]; then

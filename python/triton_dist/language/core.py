@@ -113,7 +113,19 @@ def extern_call(lib_name: str, lib_path: str, args: list, arg_type_symbol_dict: 
         raise ValueError(f"length of input args does not match."
                          f"Expect {len(args)}, got {num_args}")
 
-    func = _semantic.builder.create_extern_call
+    # `distributed.extern_call` needs string attributes (lib/path/symbol) that the
+    # OpInfo plugin ABI (Value-only) cannot carry, so it is created via the
+    # companion pybind11 module instead of a fork-patched builder method.
+    from triton_dist._plugin import load_ext_module
+    ext = load_ext_module()
+    if ext is None:
+        raise RuntimeError("extern_call requires the companion module libtriton_dist_ext; build it "
+                           "via plugin/build.sh (TRITON_DIST_BUILD_PY_EXT=ON).")
+    builder = _semantic.builder
+
+    def func(lib, path, symbol, arg_list, ret_ir_types, pure):
+        return ext.create_extern_call(builder, lib, path, symbol, arg_list, ret_ir_types, pure)
+
     return dispatch(func, lib_name, lib_path, dispatch_args, arg_type_symbol_dict, is_pure, _semantic)
 
 
@@ -133,15 +145,22 @@ def extern_elementwise(lib_name: str, lib_path: str, args: list, arg_type_symbol
     '''
     dispatch_args = args.copy()
     all_scalar = True
-    ret_shape = None
     arg_types = []
     for i in builtins.range(len(dispatch_args)):
         dispatch_args[i] = _semantic.to_tensor(dispatch_args[i])
         arg_types.append(dispatch_args[i].dtype)
         if dispatch_args[i].type.is_block():
             all_scalar = False
+    arg_types = tuple(arg_types)
+    # On Triton 3.7.1, ``tl.dispatch`` takes the *return dtype* (``ret_type``) at
+    # this position -- NOT a ``ret_shape`` as the legacy 3.4 fork did. Passing a
+    # shape (``None`` for scalar externs) here is what caused
+    # ``'NoneType' object has no attribute 'to_ir'`` deep in dispatch. Resolve the
+    # return dtype from the (arg-types -> (symbol, ret_type)) table and, for block
+    # inputs, re-shape it to the broadcast type -- mirroring upstream
+    # ``tl.extern_elementwise``.
+    ret_type = arg_type_symbol_dict[arg_types][1]
     if len(arg_types) > 0:
-        arg_types = tuple(arg_types)
         arithmetic_check = True
         # If there's a type tuple that is not supported by the library, we will do arithmetic check
         if arg_types in arg_type_symbol_dict:
@@ -166,6 +185,6 @@ def extern_elementwise(lib_name: str, lib_path: str, args: list, arg_type_symbol
                         broadcast_arg = item
                         break
             if not all_scalar:
-                ret_shape = broadcast_arg.shape
+                ret_type = broadcast_arg.type.with_element_ty(ret_type)
     func = _semantic.builder.create_extern_elementwise
-    return tl.dispatch(func, lib_name, lib_path, dispatch_args, arg_type_symbol_dict, ret_shape, is_pure, _semantic)
+    return tl.dispatch(func, lib_name, lib_path, dispatch_args, arg_type_symbol_dict, ret_type, is_pure, _semantic)

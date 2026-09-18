@@ -1,0 +1,65 @@
+diff --git a/include/triton/Analysis/AxisInfo.h b/include/triton/Analysis/AxisInfo.h
+index f252081f4..218a2c985 100644
+--- a/include/triton/Analysis/AxisInfo.h
++++ b/include/triton/Analysis/AxisInfo.h
+@@ -193,6 +193,20 @@ private:
+ 
+ namespace axisinfo {
+ using CallbackType = std::function<void(AxisInfoVisitorList &)>;
++
++// Out-of-tree extension hook (Triton-distributed patch; candidate upstream PR).
++//
++// Triton plugins (e.g. Triton-distributed) register a callback here at load time
++// to append AxisInfo visitors for their custom ops. Unlike the per-construction
++// `callback` argument of ModuleAxisInfoAnalysis -- which the built-in Coalesce /
++// load-store vectorization passes do NOT pass -- every registered callback is
++// applied to EVERY AxisInfoVisitorList built by AxisInfoAnalysis. This lets a
++// plugin keep its custom pointer-preserving ops (barrier / cast-like, which carry
++// TritonGPU-encoded pointers into TTGIR) from pessimizing downstream
++// vectorization, without the built-in passes having to know about those ops.
++// Register before analysis runs (i.e. at plugin load). Not thread-safe w.r.t.
++// concurrent registration.
++void registerExtraVisitorCallback(CallbackType callback);
+ } // namespace axisinfo
+ 
+ // Module level axis info analysis based on the call graph, assuming that we do
+diff --git a/lib/Analysis/AxisInfo.cpp b/lib/Analysis/AxisInfo.cpp
+index fb5737bda..86976e444 100644
+--- a/lib/Analysis/AxisInfo.cpp
++++ b/lib/Analysis/AxisInfo.cpp
+@@ -15,6 +15,24 @@
+ #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+ 
+ namespace mlir::triton {
++
++// Triton-distributed patch: process-wide registry of out-of-tree AxisInfo visitor
++// callbacks (see registerExtraVisitorCallback in AxisInfo.h). Defined here in the
++// real `mlir::triton::axisinfo` namespace (not the file's anonymous namespace) so
++// the AxisInfoAnalysis constructor below can apply them.
++namespace axisinfo {
++static std::vector<CallbackType> &mutableExtraVisitorCallbacks() {
++  static std::vector<CallbackType> callbacks;
++  return callbacks;
++}
++const std::vector<CallbackType> &getExtraVisitorCallbacks() {
++  return mutableExtraVisitorCallbacks();
++}
++void registerExtraVisitorCallback(CallbackType callback) {
++  mutableExtraVisitorCallbacks().push_back(std::move(callback));
++}
++} // namespace axisinfo
++
+ namespace {
+ 
+ constexpr int64_t kMaxDivisor = highestPowOf2Divisor<int64_t>(0);
+@@ -1121,6 +1139,10 @@ AxisInfoAnalysis::AxisInfoAnalysis(DataFlowSolver &solver,
+ 
+   if (callback)
+     callback(visitors);
++  // Triton-distributed patch: apply globally-registered plugin callbacks so the
++  // built-in passes (which pass no `callback`) still pick up out-of-tree visitors.
++  for (const auto &extra : axisinfo::getExtraVisitorCallbacks())
++    extra(visitors);
+ }
+ 
+ LogicalResult AxisInfoAnalysis::visitOperation(

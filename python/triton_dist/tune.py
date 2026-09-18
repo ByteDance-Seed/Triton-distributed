@@ -224,6 +224,17 @@ def get_rocm_extra_args():
     }
 
 
+def _triton_key():
+    # `triton_key` (a hash of the Triton build, used to invalidate caches across
+    # versions) moved from `triton.compiler.compiler` to `triton.runtime.cache`
+    # in Triton 3.7.1. Resolve it from wherever it currently lives.
+    try:
+        from triton.runtime.cache import triton_key
+    except ImportError:
+        from triton.compiler.compiler import triton_key
+    return triton_key()
+
+
 @functools.lru_cache()
 def get_deps():
     args = {
@@ -232,7 +243,7 @@ def get_deps():
         # software version
         "torch.version": torch.__version__,
         "triton.version": triton.__version__,
-        "triton.hash": triton.compiler.compiler.triton_key(),
+        "triton.hash": _triton_key(),
         "triton_dist.version": get_triton_dist_version(),
         "triton_dist.hash": triton_dist_key(),
     }

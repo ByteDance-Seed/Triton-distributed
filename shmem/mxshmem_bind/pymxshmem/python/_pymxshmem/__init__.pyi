@@ -1,3 +1,7 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
+
 from typing import List, Sequence
 
 import sys

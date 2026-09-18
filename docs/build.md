@@ -191,100 +191,11 @@ and see the following (reduced) output
 ✅ Triton and Torch match
 ```
 
-## To use Triton-distributed with the Ascend backend:
-#### Ascend Build from source
-1. Clone the repo
-```sh
-git clone https://github.com/ByteDance-Seed/Triton-distributed.git
-```
-2. Update submodules
-```sh
-cd Triton-distributed/
-git submodule update --init --depth=1
-# 3rdparty/shmem and 3rdparty/triton-ascend's submodules are hosted on gitcode.com and
-# are marked `update = none` in .gitmodules, so the command above skips them (this
-# keeps CI environments that cannot reach gitcode.com from failing at submodule
-# init). Fetch them explicitly for an Ascend build (--checkout overrides `none`):
-git submodule update --init --checkout --depth=1 3rdparty/triton-ascend 3rdparty/shmem
-cd 3rdparty/triton-ascend
-git submodule update --init --depth=1
-```
-3. Install dependencies
+## To use Triton-distributed with the Ascend backend
 
-triton-ascend depends on specified LLVM version
-- step 1：Build LLVM with clang and lld：
+The default (`main`) branch builds as a Triton 3.7 out-of-tree plugin and does
+**not** compile the Ascend HIVM path. `triton-ascend` has not rebased onto
+Triton 3.7 yet.
 
-  ```bash
-  apt-get install -y clang-15 lld-15 ccache
-  ```
-
-- step 2：set LLVM_INSTALL_PREFIX：
-
-   ```bash
-   export LLVM_INSTALL_PREFIX=/path/to/llvm-install
-   ```
-
-- step 3：Build and Install LLVM：
-
-  ```bash
-  git clone --no-checkout https://github.com/llvm/llvm-project.git
-  cd llvm-project
-  git checkout fad3272286528b8a491085183434c5ad4b59ab92
-  wget https://raw.gitcode.com/Ascend/triton-ascend/blobs/2b0a06eb21438359d6d0576b622e3bb5e0292d17/fad3272.patch
-  git apply fad3272.patch
-  mkdir build
-  cd build
-  cmake ../llvm \
-    -G Ninja \
-    -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
-    -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
-    -DCMAKE_LINKER=/usr/bin/lld-15 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_ENABLE_ASSERTIONS=ON \
-    -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
-    -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
-    -DLLVM_ENABLE_LLD=ON \
-    -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX}
-  ninja install
-  ```
-
-- step 4：copy FileCheck and llvm-lit to Install directory：
-
-   ```bash
-   cp  {PATH_TO}/llvm_project/build/bin/FileCheck ${LLVM_INSTALL_PREFIX}/bin/FileCheck
-   cp  {PATH_TO}/llvm_project/build/bin/llvm-lit ${LLVM_INSTALL_PREFIX}/bin/llvm-lit
-   ```
-
-- step 5：build AscendNPU-IR：
-  ```bash
-  source /usr/local/Ascend/ascend-toolkit/set_env.sh
-  git clone https://gitcode.com/Ascend/AscendNPU-IR.git
-  cd AscendNPU-IR
-  git submodule update --init --depth=1
-  mkdir build
-  ./build-tools/build.sh -o ./build -t --build-type Release --apply-patches --bisheng-compile=$ASCEND_HOME_PATH/bin --build-shmem-template
-  ```
-4. Build Triton-distributed
-```sh
-cd {PATH_TO}/Triton-distributed
-LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} TRITON_BUILD_WITH_CLANG_LLD=ON TRITON_BUILD_PROTON=OFF TRITON_BUILD_LITTLE_KERNEL=OFF TRITON_USE_ASCEND=ON TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" pip install ./python
-```
-
-5. Build and Install shmem
-```sh
-cd 3rdparty/shmem
-bash scripts/build.sh -python_extension
-pip install dist/shmem-xxx.whl
-```
-### Test Ascend Installation
-#### Allgather GEMM example on single node
-```sh
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export PATH=$HOME/AscendNPU-IR/build/bin:$PATH
-torchrun --nproc-per-node=2 tutorials/ascend/01-ascend-allgather-gemm.py
-```
-and see the following (reduced) output
-```sh
-[PASS] Rank0: C_golden and C match within tolerances (rtol=1e-3, atol=1e-3).
-[PASS] Rank1: C_golden and C match within tolerances (rtol=1e-3, atol=1e-3).
-```
+- Working Ascend build: check out [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4) and follow the Ascend section in that branch's `docs/build.md`.
+- 3.4-era sources on this branch (not wired into the plugin): [`ascend/`](../ascend/README.md).

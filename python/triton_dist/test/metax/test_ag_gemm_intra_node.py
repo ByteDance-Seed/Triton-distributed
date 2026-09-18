@@ -1,3 +1,7 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
+
 import torch
 import triton_dist
 from triton_dist.autotuner import contextual_autotune

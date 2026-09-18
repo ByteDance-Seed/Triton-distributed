@@ -62,10 +62,16 @@ public:
     addLegalDialect<LLVM::LLVMDialect>();
     addLegalDialect<NVVM::NVVMDialect>();
     addLegalDialect<mlir::triton::nvgpu::NVGPUDialect>();
-    addIllegalDialect<triton::TritonDialect>();
-    addIllegalDialect<triton::gpu::TritonGPUDialect>();
-    addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
-    addIllegalDialect<mlir::gpu::GPUDialect>();
+    // This pass runs *after* the standard ConvertTritonGPUToLLVM
+    // (add_to_llvmir): it only mops up the remaining Distributed/SIMT ops.
+    // Triton/TritonGPU/GPU ops are already lowered, except a few that are
+    // intentionally lowered later in the NVIDIA pipeline (e.g. `ttg.warp_id`,
+    // which add_nvgpu_to_llvm lowers). Keep those dialects legal so residuals
+    // survive untouched instead of failing legalization here.
+    addLegalDialect<triton::TritonDialect>();
+    addLegalDialect<triton::gpu::TritonGPUDialect>();
+    addLegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
+    addLegalDialect<mlir::gpu::GPUDialect>();
     // distributed and simt
     addIllegalDialect<triton::simt::SIMTDialect>();
     addIllegalDialect<triton::distributed::DistributedDialect>();

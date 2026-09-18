@@ -30,10 +30,14 @@ from ._base import (
     mark_dynamic,
 )
 from .combine_push import CuTeDSLCombinePushOp, CuTeDSLCombineTilePushOp
+from .combine_inter import CuTeDSLCombineInterOp
 from .dispatch import CuTeDSLDispatchOp
+from .dispatch_inter import CuTeDSLDispatchInterOp
 from .dispatch_group_gemm import CuTeDSLDispatchGroupGemmOp
+from .dispatch_group_gemm_inter import CuTeDSLDispatchGroupGemmInterOp
 from .group_gemm import CuTeDSLGroupGemmOp
 from .group_gemm_combine import CuTeDSLGroupGemmCombineOp
+from .group_gemm_combine_inter import CuTeDSLGroupGemmCombineInterOp
 from .topk_reduce import CuTeDSLTopkReduceOp
 
 __all__ = [
@@ -43,9 +47,13 @@ __all__ = [
     "cute_compile_options",
     "CuTeDSLCombinePushOp",
     "CuTeDSLCombineTilePushOp",
+    "CuTeDSLCombineInterOp",
     "CuTeDSLDispatchOp",
+    "CuTeDSLDispatchInterOp",
     "CuTeDSLDispatchGroupGemmOp",
+    "CuTeDSLDispatchGroupGemmInterOp",
     "CuTeDSLGroupGemmOp",
     "CuTeDSLGroupGemmCombineOp",
+    "CuTeDSLGroupGemmCombineInterOp",
     "CuTeDSLTopkReduceOp",
 ]

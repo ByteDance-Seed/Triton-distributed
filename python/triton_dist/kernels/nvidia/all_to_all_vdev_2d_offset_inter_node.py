@@ -66,7 +66,7 @@ def transpose_kernel(ptr_x, ptr_y, M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.cons
         tl.store(ptr_y + offs_y, val_t, mask=mask_y)
 
 
-@triton_dist.jit(do_not_specialize=["num_expert_per_rank", "stage"])
+@triton_dist.jit(do_not_specialize=["stage"])
 def all_to_all_v_2d_inter_node_kernel(
     profiler_buf,
     in_splits_offsets,  # (2, nsplits), symmetric

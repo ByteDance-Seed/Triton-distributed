@@ -262,12 +262,12 @@ def barrier_all_on_stream(ctx: BarrierAllContext, stream: Optional[torch.cuda.St
         ctx.target_value += 1
 
 
-@tl.constexpr_function
+@triton.constexpr_function
 def log2(n):
     return len(bin(n)) - 3
 
 
-@tl.constexpr_function
+@triton.constexpr_function
 def next_power_of_2(n: tl.constexpr):
     return triton.next_power_of_2(n)
 

@@ -234,26 +234,50 @@ class TP_MoE:
         return out.view(bsz, seq, hidden_dim)
 
     @torch.inference_mode()
-    def dist_triton_fwd(self, x: torch.Tensor):
-        """
-        triton_dist forward pass for TP.
-        This version uses ag_gemm and gemm_rs.
-        x: input tensor, shape [batch_size, seq_len, hidden_size]
-        """
-        assert len(x.size()) == 3
-        bsz, seq, hidden_dim = x.size()
-        x = x.view(-1, hidden_dim)
+    def _route(self, x: torch.Tensor):
+        """Compute and all-gather the MoE routing (topk ids/weights) across TP ranks.
 
+        This is host-orchestrated (torch.distributed / NCCL ``all_gather_into_tensor``)
+        and therefore MUST stay OUTSIDE any CUDA-graph capture -- capturing an NCCL
+        collective deadlocks the graph. For a fixed input the routing is constant, so
+        callers benchmarking with CUDA graphs can precompute it once and pass it into
+        ``dist_triton_fwd`` so only the (NVSHMEM-based) compute is captured.
+
+        x: 2D tensor, shape [tokens, hidden_size].
+        Returns (full_topk_ids[int32], full_topk_weight).
+        """
+        tokens = x.shape[0]
         router_logits = torch.nn.functional.linear(x, self.gate)
         routing_weights = torch.nn.functional.softmax(router_logits, dim=1, dtype=torch.float)
         local_topk_weight, local_topk_ids = torch.topk(routing_weights, self.top_k, dim=-1)
         local_topk_weight /= local_topk_weight.sum(dim=-1, keepdim=True)
 
-        full_topk_weight = torch.zeros(bsz * seq * self.world_size, self.top_k, dtype=local_topk_weight.dtype,
+        full_topk_weight = torch.zeros(tokens * self.world_size, self.top_k, dtype=local_topk_weight.dtype,
                                        device="cuda")
-        full_topk_ids = torch.zeros(bsz * seq * self.world_size, self.top_k, dtype=torch.int32, device="cuda")
+        full_topk_ids = torch.zeros(tokens * self.world_size, self.top_k, dtype=torch.int32, device="cuda")
         torch.distributed.all_gather_into_tensor(full_topk_weight, local_topk_weight, group=self.group)
         torch.distributed.all_gather_into_tensor(full_topk_ids, local_topk_ids.to(torch.int32), group=self.group)
+        return full_topk_ids, full_topk_weight
+
+    @torch.inference_mode()
+    def dist_triton_fwd(self, x: torch.Tensor, full_topk_ids: torch.Tensor = None,
+                        full_topk_weight: torch.Tensor = None):
+        """
+        triton_dist forward pass for TP.
+        This version uses ag_gemm and gemm_rs.
+        x: input tensor, shape [batch_size, seq_len, hidden_size]
+
+        ``full_topk_ids`` / ``full_topk_weight`` may be precomputed via ``_route`` and
+        passed in to keep the host-side NCCL routing all-gather out of a captured CUDA
+        graph (only the NVSHMEM-based compute below is graph-capturable). When omitted
+        they are computed here (the normal eager path).
+        """
+        assert len(x.size()) == 3
+        bsz, seq, hidden_dim = x.size()
+        x = x.view(-1, hidden_dim)
+
+        if full_topk_ids is None or full_topk_weight is None:
+            full_topk_ids, full_topk_weight = self._route(x)
 
         # ag moe
         out_fused = self.ag_group_gemm(x.contiguous(), self.gate_up_proj.contiguous(), ctx=self.ag_ctx,

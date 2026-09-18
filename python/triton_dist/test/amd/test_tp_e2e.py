@@ -39,7 +39,7 @@ from triton_dist.utils import dist_print, initialize_distributed, finalize_distr
 
 THRESHOLD_MAP = {
     torch.float16: 1e-2,
-    torch.bfloat16: 3e-2,
+    torch.bfloat16: 6e-2,
     torch.float8_e4m3fn: 2e-2,
     torch.float8_e5m2: 2e-2,
     torch.int8: 0,

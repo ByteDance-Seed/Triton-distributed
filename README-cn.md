@@ -39,12 +39,23 @@ Triton-distributed是基于OpenAI Triton构建的分布式编译器，专为计�
 
 使用Triton-distributed，开发者可以创建性能媲美优化库（如NVIDIA的[Distributed-GEMM](https://github.com/NVIDIA/cutlass/tree/main/examples/65_distributed_gemm)和字节跳动的[FLUX](https://github.com/bytedance/flux/blob/main/README.md)）的高效Kernel。当前主要支持NVIDIA GPU和AMD GPU，也可移植到其他硬件平台。如需在自定义硬件上使用，请联系我们。
 
+默认分支跟踪 **Triton 3.7**。此前的 Triton 3.4 线路保留在 [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4) 分支。Ascend 尚未接入 3.7 plugin 构建路径（`triton-ascend` 还没有 rebase 到 3.7）；可用的 Ascend 构建请使用 `triton-v3.4`。3.4 时期的 Ascend 源码停放在本分支的 [`ascend/`](ascend/README.md)，待基于 plugin 的移植就绪后再捞回。
+
 ## 快速入门
 ### 源码安装
 
 [安装指导](docs/build.md)
 
 ### 最近更新
+- 09/17/2026 ✨✨✨: FlashComm 融合 MXFP8 intra-node dispatch：expert-parallel 通信可以发送 packed FP8 而不是 BF16，并对 fused / prequantized 路径做 bitwise 对照。同时修复 MXFP8 launch template，支持调用者提供 EP 输出 buffer，并收紧 pinned-buffer 生命周期检查。
+- 09/01/2026 ✨✨✨: FlashComm 固定缓冲区分块 EP：dispatch 与 combine 在固定大小的缓冲区上分块执行，EP 峰值显存不再随最坏情况的 token 数增长。EP overlap 缓冲区改为按需分配，EP kernel 覆盖的 hidden size 范围也进一步扩大。
+- 08/17/2026 🚀🚀🚀: 升级到 Triton 3.7。Triton-distributed 现在作为 out-of-tree plugin 构建在上游 Triton 上。Triton 3.4 线路保留在 [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4)。
+- 08/10/2026 ✨✨✨: 更新 AMD MORI 后端，恢复 fused-MoE 所需的 cooperative SHMEM API。
+- 08/07/2026 ✨✨✨: Hopper / Blackwell GPU 上融合 inter-node CuTeDSL dispatch/combine。
+- 08/06/2026 ✨✨✨: 支持 Ascend RDMA（[PR #179](https://github.com/ByteDance-Seed/Triton-distributed/pull/179)）。
+- 07/21/2026 ✨✨✨: FlashComm 支持跨节点与多 NIC EP。
+- 07/12/2026 ✨✨✨: FlashComm CUDA 通信库（含 EP overlap）、TMA、`TRITON_DIST_CGA_CLUSTER_SIZE`、Triton host-overhead 优化，以及 AMD mori-shmem EP intra-node / 低延迟 kernel。
+- 06/30/2026 ✨✨✨: Hopper GPU 上融合 intra-node CuTeDSL dispatch/combine（dispatch+FC1 与 FC2+combine）。
 - 08/24/2025 ⚡⚡⚡：支持 [ByteDance-Seed/Seed-OSS-36B-Instruct](https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct) 的推理加速，实现 1.33 倍加速。
 - 08/13/2025 ✨✨✨: MegaTritonKernel 实现，以及在 H20/H800 上提供 Qwen3 TP demo，详情参见 [MegaKernel Doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/megakernel/megakernel.md)。
 - 08/06/2025 ✨✨✨: 在 H800 上支持 GEMM+AllReduce 算子，以及在 L20 上支持 MoE TP 算子, 详情参见 [GEMM+AR Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_gemm_ar.py) 和 [MOE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py)。

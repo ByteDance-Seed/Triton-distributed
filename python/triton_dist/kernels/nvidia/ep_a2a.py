@@ -35,7 +35,7 @@ from triton_dist.kernels.nvidia.common_ops import (barrier_on_this_grid)
 from triton_dist.language.extra.language_extra import threads_per_warp, num_warps
 from triton_dist.tools import aot_compile_spaces
 try:
-    from triton._C.libtriton_distributed import distributed as AOT_LIB
+    from triton_dist._C.libtriton_distributed import distributed as AOT_LIB
 except ImportError as e:
     print("AOT lib not found, please follow the doc to build")
     print(e)

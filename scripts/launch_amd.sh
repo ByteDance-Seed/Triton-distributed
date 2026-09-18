@@ -20,6 +20,21 @@ case ":${PYTHONPATH}:" in
         ;;
 esac
 
+# Export TRITON_PLUGIN_PATHS before any child imports triton: the out-of-tree
+# distributed dialects/passes/ops live in libtriton_dist.so, which Triton loads
+# exactly once at first `import triton`. Resolving it via triton_dist._plugin
+# does not import triton, so it is safe here. Mirrors the NVIDIA
+# scripts/setenv.sh::set_triton_dist_plugin (sourced by scripts/launch.sh).
+if [ -z "${TRITON_PLUGIN_PATHS}" ]; then
+    _dist_plugin="$(python3 -c 'import triton_dist._plugin as p; print(p.find_plugin() or "")' 2>/dev/null)"
+    if [ -n "${_dist_plugin}" ] && [ -f "${_dist_plugin}" ]; then
+        export TRITON_PLUGIN_PATHS="${_dist_plugin}"
+        echo "TRITON_PLUGIN_PATHS=${TRITON_PLUGIN_PATHS}"
+    else
+        echo "WARNING: libtriton_dist.so not found; build it via 'pip install ./python'"
+    fi
+fi
+
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-triton_cache}
 export ROCSHMEM_HOME=${ROCSHMEM_ROOT}
 export ROCSHMEM_BACKEND=${ROCSHMEM_BACKEND:=IPC}
@@ -45,7 +60,18 @@ else
 fi
 
 additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
-CMD="torchrun \
+# NOTE(local): mori_shmem's C++ layer reads MASTER_ADDR/MASTER_PORT directly from
+# the environment (it aborts with "requires torchrun/torch.distributed env vars"
+# otherwise). torch.distributed.run's rendezvous path does NOT export those, so
+# set them explicitly for the mori backend.
+export MASTER_ADDR="${master_addr}"
+export MASTER_PORT="${master_port}"
+# NOTE(local): use `python3 -m torch.distributed.run` instead of the `torchrun`
+# console script. torchrun's shebang pins /usr/local/bin/python (system), so its
+# rank subprocesses would run under the system interpreter and miss the venv's
+# hip-python / triton / triton_dist (ModuleNotFoundError: hip). Going through the
+# active python3 keeps every rank inside the venv.
+CMD="python3 -m torch.distributed.run \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
   --nnodes=${nnodes} \

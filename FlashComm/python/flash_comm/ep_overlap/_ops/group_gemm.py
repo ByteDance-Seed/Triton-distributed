@@ -37,36 +37,53 @@ class CuTeDSLGroupGemmOp(CuTeDSLEPOverlapOpBase):
     """Per-expert M-contiguous group-GEMM."""
 
     def _compile(self, dtype: torch.dtype, experts_per_rank: int, n_out: int, hidden_in: int, num_sm: int):
+        arch_major, arch_minor = torch.cuda.get_device_capability(torch.cuda.current_device())
         variant_args = (
             dtype,
             int(experts_per_rank),
             int(n_out),
             int(hidden_in),
             int(num_sm),
+            int(arch_major),
+            int(arch_minor),
         )
 
         def factory():
-            return self._build(dtype, experts_per_rank, n_out, hidden_in, num_sm)
+            return self._build(dtype, experts_per_rank, n_out, hidden_in, num_sm, arch_major, arch_minor)
 
         return self._get_cached_kernel(
             variant_args=variant_args,
             builder=factory,
         )
 
-    def _build(self, dtype: torch.dtype, experts_per_rank: int, n_out: int, hidden_in: int, num_sm: int):
+    def _build(self, dtype: torch.dtype, experts_per_rank: int, n_out: int, hidden_in: int, num_sm: int,
+               arch_major: int, arch_minor: int):
         import cutlass
         import cutlass.cute as cute
         import cutlass.torch as cutlass_torch
         import cutlass.utils as utils
 
-        from ..kernels.m_contiguous_cutedsl_group_gemm import (
-            MoeGroupGemmKernelMContig, )
-
         self._assert_supported_dtype(dtype, "CuTeDSL group GEMM")
 
-        mma_tiler = (256, 256)
-        cluster = (2, 2)
-        use_2cta = True
+        if arch_major >= 10:
+            from ..kernels.m_contiguous_cutedsl_group_gemm import (
+                MoeGroupGemmKernelMContig, )
+
+            mma_tiler = (256, 256)
+            cluster = (2, 2)
+            use_2cta = True
+        elif arch_major == 9:
+            from ..kernels.m_contiguous_cutedsl_group_gemm_sm90 import (
+                MoeGroupGemmKernelMContig, )
+
+            mma_tiler = (128, 256)
+            # Keep cluster_tile_M equal to GEMM_CLUSTER_TILE_M (256), which
+            # dispatch/test packing uses for per-expert padded prefixes.
+            cluster = (2, 1)
+            use_2cta = False
+        else:
+            raise RuntimeError(f"CuTeDSL group GEMM requires Hopper (sm90) or newer, got sm{arch_major}{arch_minor}")
+
         ab_dtype = cutlass.BFloat16 if dtype == torch.bfloat16 else cutlass.Float16
         hardware_info = utils.HardwareInfo()
         max_active_clusters = min(

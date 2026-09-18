@@ -23,18 +23,35 @@
 
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
+#include <algorithm>
 #include <cstdint>
 
 #include "flash_comm/common.h"
 #include "flash_comm/copy.cuh"
 #include "flash_comm/ep/intranode.h"
 #include "flash_comm/launch_utils.cuh"
+#include "flash_comm/quantization/mxfp8.cuh"
 #include "flash_comm/utils.cuh"
 
 namespace flash_comm {
 namespace ep {
 namespace intranode {
+
+using flash_comm::quantization::e8m0_reciprocal;
+using flash_comm::quantization::float_to_e8m0;
+using flash_comm::quantization::kMXFP8BlockSize;
+using flash_comm::quantization::kMXFP8BlocksPerChunk;
+using flash_comm::quantization::kMXFP8MaxIntranodeRanks;
+using flash_comm::quantization::kMXFP8PackedBlockBytes;
+using flash_comm::quantization::kMXFP8RowAlignment;
+using flash_comm::quantization::mxfp8_chunk_blocks;
+using flash_comm::quantization::mxfp8_data_offset;
+using flash_comm::quantization::mxfp8_packed_payload_bytes;
+using flash_comm::quantization::mxfp8_packed_row_bf16_elems;
+using flash_comm::quantization::mxfp8_packed_row_bytes_of;
+using flash_comm::quantization::mxfp8_scale_offset;
 
 namespace kernels {
 
@@ -48,7 +65,17 @@ __device__ __forceinline__ T *offset_ptr(T *base, int32_t index,
 }
 
 namespace smem {
+// cp.async.bulk only mandates a 16-byte stride, but a row stride that is not a
+// multiple of 128 bytes makes receive slots start mid-sector and leaves every
+// row sharing a partial 128-byte line with its neighbour, which measurably
+// costs peer-store bandwidth.  The stage stride is therefore held to 128 bytes
+// as a performance invariant, not merely a functional one.  Every supported
+// hidden size (all multiples of 64 BF16 elements) and every packed MXFP8 row
+// (padded to kMXFP8RowAlignment) satisfies it, so a failure here means a new
+// size or padding needs its bandwidth implication reviewed rather than the
+// bound loosened.
 constexpr int32_t kTMAAlignment = 128;
+constexpr int32_t kTMABulkCopyAlignment = 16;
 // Original dispatch smem (stage-per-token, no token-chunk meta prefetch).
 template <typename token_t, typename weight_t, typename offset_t,
           int32_t kHiddenSize, int32_t kNumStages>
@@ -66,6 +93,26 @@ struct DispatchIntraNodeSmem {
   alignas(kTMAAlignment) token_t tma_buffer[kNumStages][kHiddenSize];
 };
 
+template <typename weight_t, typename offset_t, int32_t kHiddenSize,
+          int32_t kNumStages>
+struct DispatchMXFP8IntraNodeSmem {
+  static_assert(
+      (kHiddenSize * sizeof(nv_bfloat16)) % kTMABulkCopyAlignment == 0,
+      "Each BF16 input stage must have a cp.async.bulk-compatible stride");
+
+  uint64_t mbar_load_full[kNumStages];
+  uint64_t mbar_packed_full[kNumStages];
+  uint64_t mbar_empty[kNumStages];
+
+  uint8_t *recv_x_ptrs[flash_comm::kMaxWorldSize];
+  weight_t *recv_weights_ptrs[flash_comm::kMaxWorldSize];
+  offset_t *recv_topk_scatter_indices_ptrs[flash_comm::kMaxWorldSize];
+
+  // Quantization compacts each BF16 row in place.  The compacted bytes are
+  // always behind the source bytes already consumed by the quantization warp.
+  alignas(kTMAAlignment) nv_bfloat16 tma_buffer[kNumStages][kHiddenSize];
+};
+
 template <typename token_t, int32_t kHiddenSize, int32_t kNumStages>
 struct DispatchPostprocessSmem {
   static_assert((kHiddenSize * sizeof(token_t)) % kTMAAlignment == 0,
@@ -75,6 +122,18 @@ struct DispatchPostprocessSmem {
   uint64_t mbar_empty[kNumStages];
 
   alignas(kTMAAlignment) token_t tma_buffer[kNumStages][kHiddenSize];
+};
+
+template <typename offset_t, int32_t kPackedRowBytes, int32_t kTopk,
+          int32_t kNumStages>
+struct DispatchMXFP8PostprocessSmem {
+  static_assert(
+      kPackedRowBytes % kTMABulkCopyAlignment == 0,
+      "Packed MXFP8 rows must have a cp.async.bulk-compatible stride");
+
+  uint64_t mbar_full[kNumStages];
+  uint64_t mbar_empty[kNumStages];
+  alignas(kTMAAlignment) uint8_t tma_buffer[kNumStages][kPackedRowBytes];
 };
 
 // kNumStoreStages > 0
@@ -136,6 +195,34 @@ struct MaxDispatchStages {
                                       kMaxSmemSize, Lo, Mid - 1>::value);
 };
 
+// CUDA 12.9 rejects the packed-width expression when MaxDispatchStages is
+// instantiated inside the nested runtime-dispatch macros below.  Route the
+// logical hidden size through a namespace-scope type so the same recursive
+// stage calculation is instantiated entirely in type context.
+template <typename token_t, typename weight_t, typename offset_t,
+          int32_t kLogicalHiddenSize, int32_t kMaxSmemSize>
+struct MaxMXFP8PrequantizedDispatchStages
+    : MaxDispatchStages<token_t, weight_t, offset_t,
+                        mxfp8_packed_row_bf16_elems(kLogicalHiddenSize),
+                        kMaxSmemSize> {};
+
+template <typename weight_t, typename offset_t, int32_t kHiddenSize,
+          int32_t kMaxSmemSize, int32_t Lo = 1, int32_t Hi = 64>
+struct MaxMXFP8DispatchStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(
+          DispatchMXFP8IntraNodeSmem<weight_t, offset_t, kHiddenSize, Mid>) <=
+      kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits ? MaxMXFP8DispatchStages<weight_t, offset_t, kHiddenSize,
+                                           kMaxSmemSize, Mid, Hi>::value
+                  : MaxMXFP8DispatchStages<weight_t, offset_t, kHiddenSize,
+                                           kMaxSmemSize, Lo, Mid - 1>::value);
+};
+
 template <typename token_t, int32_t kHiddenSize, int32_t kMaxSmemSize,
           int32_t Lo = 1, int32_t Hi = 64>
 struct MaxPostprocessStages {
@@ -150,6 +237,23 @@ struct MaxPostprocessStages {
                                          Mid, Hi>::value
                   : MaxPostprocessStages<token_t, kHiddenSize, kMaxSmemSize, Lo,
                                          Mid - 1>::value);
+};
+
+template <typename offset_t, int32_t kPackedRowBytes, int32_t kTopk,
+          int32_t kMaxSmemSize, int32_t Lo = 1, int32_t Hi = 64>
+struct MaxMXFP8PostprocessStages {
+  static constexpr int32_t Mid = (Lo + Hi + 1) / 2;
+  static constexpr bool fits =
+      sizeof(DispatchMXFP8PostprocessSmem<offset_t, kPackedRowBytes, kTopk,
+                                          Mid>) <= kMaxSmemSize;
+  static constexpr int32_t value =
+      (Lo >= Hi)
+          ? Lo
+          : (fits
+                 ? MaxMXFP8PostprocessStages<offset_t, kPackedRowBytes, kTopk,
+                                             kMaxSmemSize, Mid, Hi>::value
+                 : MaxMXFP8PostprocessStages<offset_t, kPackedRowBytes, kTopk,
+                                             kMaxSmemSize, Lo, Mid - 1>::value);
 };
 
 template <typename token_t, typename weight_t, int32_t kHiddenSize,
@@ -257,6 +361,17 @@ template <typename T>
 void __global__ __launch_bounds__(128, 1)
     kernel_barrier_all_on_stream(T **barrier_ptrs, int32_t rank,
                                  int32_t num_ranks) {
+  barrier_all_block<T>(reinterpret_cast<T **>(barrier_ptrs), rank, num_ranks);
+}
+
+template <typename T>
+void __global__ __launch_bounds__(128, 1)
+    kernel_barrier_all_on_stream_range(T **barrier_ptrs, int32_t rank,
+                                       int32_t num_ranks,
+                                       const int32_t *logical_token_range) {
+  if (logical_token_range[1] <= logical_token_range[0]) {
+    return;
+  }
   barrier_all_block<T>(reinterpret_cast<T **>(barrier_ptrs), rank, num_ranks);
 }
 
@@ -587,12 +702,12 @@ __launch_bounds__(kNumWarps *WARP_SIZE, 1) kernel_compute_dispatch_layout(
   }
 }
 
-// Dispatch uses one producer warp plus kNumConsumerGroups consumer warps.
+// BF16 dispatch uses one producer warp plus kNumConsumerGroups consumer warps.
 // Each consumer warp can issue up to kTopk TMA stores per token using
 // ballot/shuffle, keeping multiple TMA stores in flight.
 template <typename token_t, typename weight_t, typename offset_t,
           int32_t kHiddenSize, int32_t kTopk, int32_t kNumStages,
-          int32_t kNumConsumerGroups, bool kHasWeight>
+          int32_t kNumConsumerGroups, bool kHasWeight, bool kRanged>
 void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
     kernel_dispatch_intranode(
         void *x,                             // [num_token, hidden_size]
@@ -601,7 +716,7 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
         offset_t *topk_indices,              // [num_token, topk]
         offset_t *token_dst_scatter_indices, // [num_token, topk]
         int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
-        int32_t rank, int32_t num_ranks,
+        int32_t rank, int32_t num_ranks, const int32_t *logical_token_range,
         // outputs
         void *recv_x_ptrs, // [num_ranks], recv_x [num_recv_token, hidden_size]
         void **recv_weights_ptrs, // [num_ranks], recv_weights [num_recv_token,
@@ -627,6 +742,20 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
   const int num_block = gridDim.x;
   const int warp_id = thread_id / WARP_SIZE;
   const int lane_id = thread_id % WARP_SIZE;
+  int32_t token_begin = 0;
+  int32_t token_end = num_token;
+  if constexpr (kRanged) {
+    const int32_t logical_begin = logical_token_range[0];
+    const int32_t logical_end = logical_token_range[1];
+    if (logical_end <= logical_begin) {
+      return;
+    }
+    token_begin = max(0, min(logical_begin, num_token));
+    token_end = max(0, min(logical_end, num_token));
+    if (token_end <= token_begin) {
+      return;
+    }
+  }
   // TMA store pipeline depth
   constexpr int32_t kStorePipe = 2;
 
@@ -669,7 +798,7 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
   const int32_t num_bytes_per_token = hidden_size * sizeof(token_t);
 
   if (is_producer_warp) {
-    for (int token_offset = block_id; token_offset < num_token;
+    for (int token_offset = token_begin + block_id; token_offset < token_end;
          token_offset += num_block) {
       token_t *src_gmem_ptr =
           offset_ptr(reinterpret_cast<token_t *>(x), token_offset, hidden_size);
@@ -699,8 +828,9 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
     int32_t tokens_processed = 0;
 
     const uint32_t is_leader_lane = elect_one_sync();
-    for (int token_offset = block_id + consumer_group_id * num_block;
-         token_offset < num_token;
+    for (int token_offset =
+             token_begin + block_id + consumer_group_id * num_block;
+         token_offset < token_end;
          token_offset += num_block * kNumConsumerGroups) {
       uint64_t *cur_mbar_full_ptr = mbar_full_ptr + consumer_pipe_state.index();
 
@@ -711,11 +841,13 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
       weight_t my_weight = 0;
 
       if (lane_id < kTopk) {
+        const int32_t meta_token_offset =
+            kRanged ? token_offset - token_begin : token_offset;
         my_expert_idx = topk_indices[token_offset * kTopk + lane_id];
         my_target_rank = my_expert_idx / num_experts_per_rank;
-        my_is_need_send = topk_send_mask[token_offset * kTopk + lane_id];
+        my_is_need_send = topk_send_mask[meta_token_offset * kTopk + lane_id];
         my_store_idx =
-            token_dst_scatter_indices[token_offset * kTopk + lane_id];
+            token_dst_scatter_indices[meta_token_offset * kTopk + lane_id];
         if constexpr (kHasWeight) {
           my_weight = reinterpret_cast<weight_t *>(
               topk_weights)[token_offset * kTopk + lane_id];
@@ -793,6 +925,413 @@ void __global__ __launch_bounds__((1 + kNumConsumerGroups) * WARP_SIZE, 1)
   }
 }
 
+// Packed-row dispatch variant with one issuer warp per destination rank.
+template <typename token_t, typename weight_t, typename offset_t,
+          int32_t kHiddenSize, int32_t kTopk, int32_t kNumStages,
+          int32_t kNumPeerWarps, bool kHasWeight>
+void __global__ __launch_bounds__((1 + kNumPeerWarps) * WARP_SIZE, 1)
+    kernel_dispatch_mxfp8_prequantized_intranode(
+        void *x, int32_t *topk_send_mask, void *topk_weights,
+        offset_t *topk_indices, offset_t *token_dst_scatter_indices,
+        int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+        int32_t rank, int32_t num_ranks, void *recv_x_ptrs,
+        void **recv_weights_ptrs, offset_t **recv_topk_scatter_indices_ptrs) {
+  extern __shared__ __align__(1024) uint8_t smem_buffer[];
+  using smem_t =
+      kernels::smem::DispatchIntraNodeSmem<token_t, weight_t, offset_t,
+                                           kHiddenSize, kNumStages>;
+  auto &smem = *reinterpret_cast<smem_t *>(smem_buffer);
+
+  static_assert(kTopk <= WARP_SIZE, "top-k must fit in one warp");
+  const int32_t thread_id = threadIdx.x;
+  const int32_t warp_id = thread_id / WARP_SIZE;
+  const int32_t lane_id = thread_id % WARP_SIZE;
+  const int32_t block_id = blockIdx.x;
+  const int32_t num_block = gridDim.x;
+  constexpr int32_t kStorePipe = 4;
+  static_assert(kNumStages > kStorePipe,
+                "packed dispatch needs more stages than pending stores");
+  const bool is_producer = warp_id == 0;
+  const bool is_peer_consumer = warp_id >= 1 && warp_id <= kNumPeerWarps;
+  const int32_t consumer_id = warp_id - 1;
+  const int32_t peer = consumer_id;
+
+  if (warp_id == 0 && elect_one_sync()) {
+    for (int32_t i = 0; i < kNumStages; ++i) {
+      initialize_barrier(smem.mbar_full + i, 1);
+      initialize_barrier(smem.mbar_empty + i, kNumPeerWarps);
+    }
+  }
+  if (thread_id < num_ranks) {
+    smem.recv_x_ptrs[thread_id] =
+        reinterpret_cast<token_t **>(recv_x_ptrs)[thread_id];
+    smem.recv_weights_ptrs[thread_id] =
+        reinterpret_cast<weight_t **>(recv_weights_ptrs)[thread_id];
+    smem.recv_topk_scatter_indices_ptrs[thread_id] =
+        recv_topk_scatter_indices_ptrs[thread_id];
+  }
+
+  auto producer_state = PipelineState<kNumStages>(0, 1, 0);
+  auto consumer_state = PipelineState<kNumStages>(0, 0, 0);
+  __syncthreads();
+
+  const int32_t row_bytes = hidden_size * sizeof(token_t);
+  if (is_producer) {
+    for (int32_t token = block_id; token < num_token; token += num_block) {
+      uint64_t *empty = smem.mbar_empty + producer_state.index();
+      uint64_t *full = smem.mbar_full + producer_state.index();
+      wait_barrier(empty, producer_state.phase());
+      const token_t *src =
+          offset_ptr(reinterpret_cast<const token_t *>(x), token, hidden_size);
+      void *dst = smem.tma_buffer[producer_state.index()];
+      if (elect_one_sync()) {
+        tma_copy_1d_g2s(src, full, dst, row_bytes);
+        mbar_arrive_and_set_barrier_transaction_bytes(full, row_bytes);
+      }
+      __syncwarp();
+      ++producer_state;
+    }
+  } else if (is_peer_consumer) {
+    auto release_state = PipelineState<kNumStages>(0, 0, 0);
+    int32_t tokens_processed = 0;
+    const uint32_t is_leader_lane = elect_one_sync();
+    for (int32_t token = block_id; token < num_token; token += num_block) {
+      int32_t target_rank = -1;
+      int32_t need_send = 0;
+      int32_t store_idx = -1;
+      weight_t weight = 0;
+      if (lane_id < kTopk) {
+        int32_t expert = topk_indices[token * kTopk + lane_id];
+        target_rank = expert / num_experts_per_rank;
+        need_send = topk_send_mask[token * kTopk + lane_id];
+        store_idx = token_dst_scatter_indices[token * kTopk + lane_id];
+        if constexpr (kHasWeight) {
+          weight = reinterpret_cast<weight_t *>(
+              topk_weights)[token * kTopk + lane_id];
+        }
+      }
+
+      tma_store_wait<kStorePipe - 1>();
+      __syncwarp();
+      if (tokens_processed >= kStorePipe) {
+        if (is_leader_lane) {
+          arrive_barrier(smem.mbar_empty + release_state.index());
+        }
+        ++release_state;
+      }
+
+      wait_barrier(smem.mbar_full + consumer_state.index(),
+                   consumer_state.phase());
+      uint32_t send_mask = __ballot_sync(
+          0xffffffff, peer < num_ranks && target_rank == peer && need_send);
+      if (send_mask != 0) {
+        int32_t send_lane = __ffs(send_mask) - 1;
+        int32_t peer_store_idx = __shfl_sync(0xffffffff, store_idx, send_lane);
+        token_t *dst =
+            offset_ptr(smem.recv_x_ptrs[peer], peer_store_idx, hidden_size);
+        if (is_leader_lane) {
+          tma_copy_1d_s2g(smem.tma_buffer[consumer_state.index()], dst,
+                          row_bytes);
+        }
+        if (lane_id < kTopk) {
+          if constexpr (kHasWeight) {
+            offset_ptr(smem.recv_weights_ptrs[peer], peer_store_idx,
+                       kTopk)[lane_id] = weight;
+          }
+          offset_t index = target_rank == peer ? store_idx : -1;
+          offset_ptr(smem.recv_topk_scatter_indices_ptrs[peer], peer_store_idx,
+                     kTopk)[lane_id] = index;
+        }
+      }
+      tma_store_arrive();
+      __syncwarp();
+      ++consumer_state;
+      ++tokens_processed;
+    }
+    tma_store_wait_all();
+    __threadfence_system();
+  }
+}
+
+// Fused BF16 -> MXFP8 dispatch. Warp 0 performs the BF16 TMA load, a warp group
+// quantizes and packs in shared memory, and the remaining warps issue peer TMA
+// stores. The compacted representation is block-32 E4M3 data with raw E8M0
+// scale bytes and a transport-aligned row stride.
+template <typename weight_t, typename offset_t, int32_t kHiddenSize,
+          int32_t kTopk, int32_t kNumStages, int32_t kNumConsumerGroups,
+          int32_t kNumQuantWarps, bool kHasWeight>
+void __global__ __launch_bounds__((1 + kNumQuantWarps + kNumConsumerGroups) *
+                                      WARP_SIZE,
+                                  1)
+    kernel_dispatch_mxfp8_quant_fused_intranode(
+        const nv_bfloat16 *x, int32_t *topk_send_mask, void *topk_weights,
+        offset_t *topk_indices, offset_t *token_dst_scatter_indices,
+        int32_t num_token, int32_t num_experts_per_rank, int32_t rank,
+        int32_t num_ranks, void *recv_x_ptrs, void **recv_weights_ptrs,
+        offset_t **recv_topk_scatter_indices_ptrs) {
+  extern __shared__ __align__(1024) uint8_t smem_buffer[];
+  using smem_t =
+      kernels::smem::DispatchMXFP8IntraNodeSmem<weight_t, offset_t, kHiddenSize,
+                                                kNumStages>;
+  auto &smem = *reinterpret_cast<smem_t *>(smem_buffer);
+
+  static_assert(kHiddenSize % kMXFP8BlockSize == 0,
+                "MXFP8 hidden size must be divisible by 32");
+  static_assert(kTopk <= WARP_SIZE,
+                "kTopk must be <= WARP_SIZE for warp shuffle");
+  constexpr int32_t kQuantWarpsPerGroup = 8;
+  static_assert(kNumQuantWarps % kQuantWarpsPerGroup == 0,
+                "quant warps must contain complete quant groups");
+  constexpr int32_t kNumQuantThreads = kQuantWarpsPerGroup * WARP_SIZE;
+  constexpr int32_t kNumQuantGroups = kNumQuantWarps / kQuantWarpsPerGroup;
+  static_assert(kNumStages % kNumQuantGroups == 0,
+                "stages must be divisible by quant groups");
+  constexpr int32_t kNumMXBlocks = kHiddenSize / kMXFP8BlockSize;
+  constexpr int32_t kPackedRowBytes = mxfp8_packed_row_bytes_of(kHiddenSize);
+  constexpr int32_t kStorePipe = 4;
+  static_assert(kNumStages > kStorePipe,
+                "fused dispatch needs more stages than pending stores");
+
+  const int32_t thread_id = threadIdx.x;
+  const int32_t warp_id = thread_id / WARP_SIZE;
+  const int32_t lane_id = thread_id % WARP_SIZE;
+  const int32_t block_id = blockIdx.x;
+  const int32_t num_block = gridDim.x;
+  const bool is_load_warp = warp_id == 0;
+  const bool is_quant_warp = warp_id >= 1 && warp_id < 1 + kNumQuantWarps;
+  const int32_t quant_warp_id = warp_id - 1;
+  const int32_t quant_group_id = quant_warp_id / kQuantWarpsPerGroup;
+  const int32_t quant_warp_in_group = quant_warp_id % kQuantWarpsPerGroup;
+  const bool is_consumer_warp =
+      warp_id >= 1 + kNumQuantWarps &&
+      warp_id < 1 + kNumQuantWarps + kNumConsumerGroups;
+  const int32_t consumer_group_id = warp_id - 1 - kNumQuantWarps;
+
+  if (warp_id == 0 && elect_one_sync()) {
+    for (int32_t i = 0; i < kNumStages; ++i) {
+      initialize_barrier(smem.mbar_load_full + i, 1);
+      initialize_barrier(smem.mbar_packed_full + i, kNumQuantThreads);
+      initialize_barrier(smem.mbar_empty + i, kNumConsumerGroups);
+    }
+  }
+  if (thread_id < num_ranks) {
+    smem.recv_x_ptrs[thread_id] =
+        reinterpret_cast<uint8_t **>(recv_x_ptrs)[thread_id];
+    smem.recv_weights_ptrs[thread_id] =
+        reinterpret_cast<weight_t **>(recv_weights_ptrs)[thread_id];
+    smem.recv_topk_scatter_indices_ptrs[thread_id] =
+        recv_topk_scatter_indices_ptrs[thread_id];
+  }
+
+  auto load_producer_state = PipelineState<kNumStages>(0, 1, 0);
+  auto quant_consumer_state = PipelineState<kNumStages>(0, 0, 0);
+  auto packed_producer_state = PipelineState<kNumStages>(0, 1, 0);
+  quant_consumer_state += quant_group_id;
+  packed_producer_state += quant_group_id;
+  auto consumer_state = PipelineState<kNumStages>(0, 0, 0);
+  __syncthreads();
+
+  if (is_load_warp) {
+    constexpr int32_t kInputBytes = kHiddenSize * sizeof(nv_bfloat16);
+    for (int32_t token = block_id; token < num_token; token += num_block) {
+      uint64_t *empty = smem.mbar_empty + load_producer_state.index();
+      uint64_t *full = smem.mbar_load_full + load_producer_state.index();
+      wait_barrier(empty, load_producer_state.phase());
+      void *dst = smem.tma_buffer[load_producer_state.index()];
+      const void *src = offset_ptr(x, token, kHiddenSize);
+      if (elect_one_sync()) {
+        mbar_arrive_and_set_barrier_transaction_bytes(full, kInputBytes);
+        tma_copy_1d_g2s(src, full, dst, kInputBytes);
+      }
+      __syncwarp();
+      ++load_producer_state;
+    }
+  } else if (is_quant_warp) {
+    const int32_t quant_thread = quant_warp_in_group * WARP_SIZE + lane_id;
+    const int32_t quarter_warp = lane_id / 8;
+    const int32_t lane_in_quarter = lane_id % 8;
+    for (int32_t token = block_id + quant_group_id * num_block;
+         token < num_token; token += num_block * kNumQuantGroups) {
+      uint64_t *load_full = smem.mbar_load_full + quant_consumer_state.index();
+      wait_barrier(load_full, quant_consumer_state.phase());
+      auto *stage_bf16 = smem.tma_buffer[quant_consumer_state.index()];
+      auto *stage_bytes = reinterpret_cast<uint8_t *>(stage_bf16);
+
+      static_assert(kNumMXBlocks % 4 == 0,
+                    "supported MXFP8 hidden sizes use block quads");
+      constexpr int32_t kNumBlockQuads = kNumMXBlocks / 4;
+      constexpr int32_t kBlockQuadsPerWireChunk = kMXFP8BlocksPerChunk / 4;
+      static_assert(kBlockQuadsPerWireChunk % kQuantWarpsPerGroup == 0,
+                    "quant warps must evenly divide a wire chunk");
+      constexpr int32_t kNumQuantPhases =
+          kBlockQuadsPerWireChunk / kQuantWarpsPerGroup;
+      constexpr int32_t kNumChunks =
+          (kNumBlockQuads + kBlockQuadsPerWireChunk - 1) /
+          kBlockQuadsPerWireChunk;
+#pragma unroll
+      for (int32_t chunk = 0; chunk < kNumChunks; ++chunk) {
+        uint8_t saved_scales[kNumQuantPhases] = {};
+#pragma unroll
+        for (int32_t phase = 0; phase < kNumQuantPhases; ++phase) {
+          int32_t block_quad = chunk * kBlockQuadsPerWireChunk +
+                               phase * kQuantWarpsPerGroup +
+                               quant_warp_in_group;
+          bool valid_quad = block_quad < kNumBlockQuads;
+          int32_t mx_block = block_quad * 4 + quarter_warp;
+          union {
+            uint64_t raw;
+            __nv_bfloat162 value[2];
+          } input_vec;
+          input_vec.raw = 0;
+          if (valid_quad) {
+            input_vec.raw = reinterpret_cast<const uint64_t *>(
+                stage_bf16 + mx_block * kMXFP8BlockSize)[lane_in_quarter];
+          }
+          // Higher block quads compact over BF16 source bytes consumed by lower
+          // block quads. Make every warp finish its source load before any warp
+          // stores the compacted data for this half of the wire chunk.
+          named_barrier_arrive_and_wait(kNumQuantThreads, 1 + quant_group_id);
+
+          float2 value0 = __bfloat1622float2(input_vec.value[0]);
+          float2 value1 = __bfloat1622float2(input_vec.value[1]);
+          float amax = fmaxf(fmaxf(fabsf(value0.x), fabsf(value0.y)),
+                             fmaxf(fabsf(value1.x), fabsf(value1.y)));
+#pragma unroll
+          for (int32_t delta = 4; delta > 0; delta >>= 1) {
+            amax = fmaxf(amax,
+                         __shfl_xor_sync(0xffffffff, amax, delta, WARP_SIZE));
+          }
+          uint32_t scale_word = 0;
+          if (lane_in_quarter == 0) {
+            scale_word = float_to_e8m0(amax * (1.0f / 448.0f));
+          }
+          scale_word = __shfl_sync(0xffffffff, scale_word, quarter_warp * 8);
+          uint8_t scale = static_cast<uint8_t>(scale_word);
+          saved_scales[phase] = scale;
+          float scale_reciprocal = e8m0_reciprocal(scale);
+          __nv_fp8x2_storage_t quantized0 =
+              __nv_cvt_float2_to_fp8x2(make_float2(value0.x * scale_reciprocal,
+                                                   value0.y * scale_reciprocal),
+                                       __NV_SATFINITE, __NV_E4M3);
+          __nv_fp8x2_storage_t quantized1 =
+              __nv_cvt_float2_to_fp8x2(make_float2(value1.x * scale_reciprocal,
+                                                   value1.y * scale_reciprocal),
+                                       __NV_SATFINITE, __NV_E4M3);
+          if (valid_quad) {
+            uint32_t packed_fp8 = static_cast<uint32_t>(quantized0) |
+                                  (static_cast<uint32_t>(quantized1) << 16);
+            reinterpret_cast<uint32_t *>(
+                stage_bytes + mxfp8_data_offset(mx_block))[lane_in_quarter] =
+                packed_fp8;
+          }
+        }
+#pragma unroll
+        for (int32_t phase = 0; phase < kNumQuantPhases; ++phase) {
+          int32_t block_quad = chunk * kBlockQuadsPerWireChunk +
+                               phase * kQuantWarpsPerGroup +
+                               quant_warp_in_group;
+          if (block_quad < kNumBlockQuads && lane_in_quarter == 0) {
+            int32_t mx_block = block_quad * 4 + quarter_warp;
+            stage_bytes[mxfp8_scale_offset(mx_block, kNumMXBlocks)] =
+                saved_scales[phase];
+          }
+        }
+        named_barrier_arrive_and_wait(kNumQuantThreads, 1 + quant_group_id);
+      }
+      constexpr int32_t kPayloadBytes = mxfp8_packed_payload_bytes(kHiddenSize);
+      for (int32_t i = kPayloadBytes + quant_thread; i < kPackedRowBytes;
+           i += kNumQuantThreads) {
+        stage_bytes[i] = 0;
+      }
+      named_barrier_arrive_and_wait(kNumQuantThreads, 1 + quant_group_id);
+      // Quantization writes use the generic proxy while the peer TMA store
+      // reads this stage through the async proxy. Publish every writer's
+      // shared-memory updates before marking the packed stage full.
+      fence_async_shared();
+      arrive_barrier(smem.mbar_packed_full + packed_producer_state.index());
+      quant_consumer_state += kNumQuantGroups;
+      packed_producer_state += kNumQuantGroups;
+    }
+  } else if (is_consumer_warp) {
+    auto release_state = PipelineState<kNumStages>(0, 0, 0);
+    int32_t tokens_processed = 0;
+    const uint32_t is_leader_lane = elect_one_sync();
+    for (int32_t token = block_id; token < num_token; token += num_block) {
+      int32_t target_rank = -1;
+      int32_t need_send = 0;
+      int32_t store_idx = -1;
+      weight_t weight = 0;
+      if (lane_id < kTopk) {
+        int32_t expert = topk_indices[token * kTopk + lane_id];
+        target_rank = expert / num_experts_per_rank;
+        need_send = topk_send_mask[token * kTopk + lane_id];
+        store_idx = token_dst_scatter_indices[token * kTopk + lane_id];
+        if constexpr (kHasWeight) {
+          weight = reinterpret_cast<weight_t *>(
+              topk_weights)[token * kTopk + lane_id];
+        }
+      }
+      __syncwarp();
+
+      tma_store_wait<kStorePipe - 1>();
+      __syncwarp();
+      if (tokens_processed >= kStorePipe) {
+        if (is_leader_lane) {
+          arrive_barrier(smem.mbar_empty + release_state.index());
+        }
+        ++release_state;
+      }
+
+      uint64_t *packed_full = smem.mbar_packed_full + consumer_state.index();
+      wait_barrier(packed_full, consumer_state.phase());
+      void *src = smem.tma_buffer[consumer_state.index()];
+      // One warp covers each remote peer. Consumer 0 also handles the local
+      // destination, keeping the fused launch within Hopper's 32-warp CTA
+      // limit while preserving all 24 quantization warps.
+#pragma unroll
+      for (int32_t peer_slot = 0; peer_slot < 2; ++peer_slot) {
+        int32_t peer = -1;
+        if (peer_slot == 0) {
+          int32_t peer_delta = consumer_group_id + 1;
+          if (peer_delta < num_ranks) {
+            peer = (rank + peer_delta) % num_ranks;
+          }
+        } else if (consumer_group_id == 0) {
+          peer = rank;
+        }
+        uint32_t send_mask = __ballot_sync(
+            0xffffffff, peer >= 0 && target_rank == peer && need_send);
+        if (send_mask) {
+          int32_t send_lane = __ffs(send_mask) - 1;
+          int32_t peer_store_idx =
+              __shfl_sync(0xffffffff, store_idx, send_lane);
+          uint8_t *dst = offset_ptr(smem.recv_x_ptrs[peer], peer_store_idx,
+                                    kPackedRowBytes);
+          if (is_leader_lane) {
+            tma_copy_1d_s2g(src, dst, kPackedRowBytes);
+          }
+          if (lane_id < kTopk) {
+            if constexpr (kHasWeight) {
+              offset_ptr(smem.recv_weights_ptrs[peer], peer_store_idx,
+                         kTopk)[lane_id] = weight;
+            }
+            offset_t index = target_rank == peer ? store_idx : -1;
+            offset_ptr(smem.recv_topk_scatter_indices_ptrs[peer],
+                       peer_store_idx, kTopk)[lane_id] = index;
+          }
+          __syncwarp();
+        }
+      }
+      tma_store_arrive();
+      __syncwarp();
+      ++consumer_state;
+      ++tokens_processed;
+    }
+    tma_store_wait_all();
+    __threadfence_system();
+  }
+}
+
 template <typename token_t, typename weight_t, typename offset_t,
           int32_t kHiddenSize, int32_t kNumStages, int32_t kWritePipeCount,
           bool kHasWeight>
@@ -814,6 +1353,12 @@ __launch_bounds__(4 * WARP_SIZE, 1) kernel_dispatch_postprocess_tma(
   const int warp_id = thread_id / WARP_SIZE;
   const int lane_id = thread_id % WARP_SIZE;
   const int32_t num_recv_token = recv_token_count[rank];
+  // A fixed-Q chunk plan represents trailing inactive steps with zero receive
+  // counts.  Return before initializing the TMA pipeline so those steps pay
+  // only the kernel-launch cost.  The predicate is uniform for the whole grid.
+  if (num_recv_token <= 0) {
+    return;
+  }
 
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
   using smem_t =
@@ -918,6 +1463,131 @@ __launch_bounds__(4 * WARP_SIZE, 1) kernel_dispatch_postprocess_tma(
   __syncthreads();
 }
 
+template <typename offset_t, int32_t kHiddenSize, int32_t kTopk,
+          int32_t kNumStages>
+void __global__ __launch_bounds__((1 + kTopk) * WARP_SIZE, 1)
+    kernel_dispatch_mxfp8_postprocess_unpack(
+        const uint8_t *recv_packed,
+        offset_t *recv_topk_scatter_indices_comm_buffer,
+        int32_t *recv_token_count, uint8_t *dispatch_data,
+        uint8_t *dispatch_scales, int32_t rank) {
+  constexpr int32_t kNumMXBlocks = kHiddenSize / kMXFP8BlockSize;
+  constexpr int32_t kPackedRowBytes = mxfp8_packed_row_bytes_of(kHiddenSize);
+  constexpr int32_t kNumConsumerWarps = kTopk;
+  constexpr int32_t kNumWireChunks =
+      (kNumMXBlocks + kMXFP8BlocksPerChunk - 1) / kMXFP8BlocksPerChunk;
+
+  extern __shared__ __align__(1024) uint8_t smem_buffer[];
+  using smem_t =
+      kernels::smem::DispatchMXFP8PostprocessSmem<offset_t, kPackedRowBytes,
+                                                  kTopk, kNumStages>;
+  auto &smem = *reinterpret_cast<smem_t *>(smem_buffer);
+  const int32_t warp_id = threadIdx.x / WARP_SIZE;
+  const int32_t lane_id = threadIdx.x % WARP_SIZE;
+  const int32_t block_id = blockIdx.x;
+  const int32_t num_block = gridDim.x;
+  const int32_t num_recv_token = recv_token_count[rank];
+
+  if (warp_id == 0 && elect_one_sync()) {
+    for (int32_t i = 0; i < kNumStages; ++i) {
+      initialize_barrier(smem.mbar_full + i, 1);
+      initialize_barrier(smem.mbar_empty + i, kNumConsumerWarps * WARP_SIZE);
+    }
+  }
+  auto producer_state = PipelineState<kNumStages>(0, 1, 0);
+  auto consumer_state = PipelineState<kNumStages>(0, 0, 0);
+  __syncthreads();
+
+  if (warp_id == 0) {
+    for (int32_t token = block_id; token < num_recv_token; token += num_block) {
+      int32_t scatter = -1;
+      if (lane_id < kTopk) {
+        scatter =
+            recv_topk_scatter_indices_comm_buffer[token * kTopk + lane_id];
+      }
+      uint32_t valid_mask = __ballot_sync(0xffffffff, scatter != -1);
+
+      uint64_t *empty = smem.mbar_empty + producer_state.index();
+      uint64_t *full = smem.mbar_full + producer_state.index();
+      wait_barrier(empty, producer_state.phase());
+      if (lane_id == 0) {
+        if (valid_mask != 0) {
+          const uint8_t *src = offset_ptr(recv_packed, token, kPackedRowBytes);
+          void *dst = smem.tma_buffer[producer_state.index()];
+          mbar_arrive_and_set_barrier_transaction_bytes(full, kPackedRowBytes);
+          tma_copy_1d_g2s(src, full, dst, kPackedRowBytes);
+        } else {
+          arrive_barrier(full);
+        }
+      }
+      __syncwarp();
+      ++producer_state;
+    }
+  } else {
+    const int32_t topk_slot = warp_id - 1;
+    const uint32_t is_leader_lane = elect_one_sync();
+    for (int32_t token = block_id; token < num_recv_token; token += num_block) {
+      uint64_t *full = smem.mbar_full + consumer_state.index();
+      wait_barrier(full, consumer_state.phase());
+      const uint8_t *packed = smem.tma_buffer[consumer_state.index()];
+      int32_t dst_idx =
+          recv_topk_scatter_indices_comm_buffer[token * kTopk + topk_slot];
+      if (dst_idx != -1) {
+        uint8_t *dst_data = offset_ptr(dispatch_data, dst_idx, kHiddenSize);
+        uint8_t *dst_scales =
+            offset_ptr(dispatch_scales, dst_idx, kNumMXBlocks);
+#pragma unroll
+        for (int32_t chunk = 0; chunk < kNumWireChunks; ++chunk) {
+          int32_t first_block = chunk * kMXFP8BlocksPerChunk;
+          int32_t blocks_in_chunk = mxfp8_chunk_blocks(chunk, kNumMXBlocks);
+          if (is_leader_lane) {
+            tma_copy_1d_s2g(packed + mxfp8_data_offset(first_block),
+                            dst_data + first_block * kMXFP8BlockSize,
+                            blocks_in_chunk * kMXFP8BlockSize);
+          }
+          if (lane_id < blocks_in_chunk) {
+            int32_t mx_block = first_block + lane_id;
+            dst_scales[mx_block] =
+                packed[mxfp8_scale_offset(mx_block, kNumMXBlocks)];
+          }
+        }
+      }
+      if (dst_idx != -1 && is_leader_lane) {
+        tma_store_arrive();
+        tma_store_wait<0>();
+      }
+      // Every reader participates in the release barrier so stage reuse is
+      // ordered after all generic-proxy reads from packed data.
+      __syncwarp();
+      arrive_barrier(smem.mbar_empty + consumer_state.index());
+      ++consumer_state;
+    }
+  }
+  tma_store_wait_all();
+}
+
+template <typename weight_t, typename offset_t, int32_t kTopk, bool kHasWeight>
+void __global__ kernel_dispatch_mxfp8_postprocess_metadata(
+    weight_t *recv_topk_weights,
+    offset_t *recv_topk_scatter_indices_comm_buffer, int32_t *recv_token_count,
+    weight_t *dispatch_weights, offset_t *recv_topk_scatter_indices,
+    int32_t rank) {
+  const int32_t num_entries = recv_token_count[rank] * kTopk;
+  for (int32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < num_entries;
+       idx += blockDim.x * gridDim.x) {
+    offset_t dst_idx = recv_topk_scatter_indices_comm_buffer[idx];
+    recv_topk_scatter_indices[idx] = dst_idx;
+    if constexpr (kHasWeight) {
+      if (dst_idx != -1) {
+        dispatch_weights[dst_idx] = recv_topk_weights[idx];
+      }
+    }
+    // This kernel runs after every payload consumer in the same stream, so no
+    // consumer can race with resetting the communication metadata for reuse.
+    recv_topk_scatter_indices_comm_buffer[idx] = -1;
+  }
+}
+
 template <typename token_t, typename weight_t, typename offset_t,
           int32_t kHiddenSize, int32_t kNumWarps, int32_t kElemsPerThread,
           bool kHasWeight = false>
@@ -936,6 +1606,13 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   // const int warp_id = thread_id / WARP_SIZE;
   constexpr int32_t kElemsPerInt4 = sizeof(int4) / sizeof(token_t);
   constexpr int32_t kNumThreadsPerBlock = kNumWarps * WARP_SIZE;
+  const int32_t num_recv_token = recv_token_count[rank];
+  // Skip accumulator setup and block synchronization for rank-local empty
+  // steps.  All threads observe the same receive count, so this early return
+  // is uniform and leaves active-step arithmetic and reduction order intact.
+  if (num_recv_token <= 0) {
+    return;
+  }
 
   constexpr int32_t kHiddenSizeInt4 = kHiddenSize / kElemsPerInt4;
   constexpr int32_t kInt4PerThread =
@@ -953,7 +1630,6 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   }
 
   __syncthreads();
-  int32_t num_recv_token = recv_token_count[rank];
 
   for (int32_t i = block_id; i < num_recv_token; i += num_block) {
     int32_t is_valid_lane = 0;
@@ -1036,7 +1712,7 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
 template <typename token_t, typename weight_t, typename offset_t, int32_t kTopk,
           int32_t kHiddenSize, int32_t kNumLoadStages, int32_t kNumStoreStages,
           int32_t kNumWarps, int32_t kWarpsPerWG, int32_t kElemsPerThread,
-          bool kHasWeight = false>
+          bool kHasWeight = false, bool kRanged = false>
 void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
     kernel_combine_intranode(
         void *x_ptrs,                        // [num_ranks]
@@ -1047,7 +1723,7 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
         void *recv_x,                        // [num_token, hidden_size]
         void *recv_weight,                   // [num_token, topk]
         int32_t num_token, int32_t num_experts_per_rank, int32_t rank,
-        int32_t num_ranks) {
+        int32_t num_ranks, const int32_t *logical_token_range) {
   static_assert(kWarpsPerWG > 1, "kWarpsPerWG must be greater than 1");
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
   const int thread_id = threadIdx.x;
@@ -1055,6 +1731,20 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   const int num_block = gridDim.x;
   const int warp_id = thread_id / WARP_SIZE;
   const int lane_id = thread_id % WARP_SIZE;
+  int32_t token_begin = 0;
+  int32_t token_end = num_token;
+  if constexpr (kRanged) {
+    const int32_t logical_begin = logical_token_range[0];
+    const int32_t logical_end = logical_token_range[1];
+    if (logical_end <= logical_begin) {
+      return;
+    }
+    token_begin = max(0, min(logical_begin, num_token));
+    token_end = max(0, min(logical_end, num_token));
+    if (token_end <= token_begin) {
+      return;
+    }
+  }
   constexpr int32_t kNumWGPerBlock =
       kHasWeight ? (kNumWarps - 1) / kWarpsPerWG : kNumWarps / kWarpsPerWG;
   constexpr int32_t kElemsPerInt4 = sizeof(int4) / sizeof(token_t);
@@ -1127,15 +1817,19 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
     if (warp_id == kNumWarps - 1) {
       int32_t total_weight_warps = num_block;
       int32_t total_weight_threads = total_weight_warps * WARP_SIZE;
-      int32_t num_weights = num_token * kTopk;
-      int32_t global_weight_thread_id = lane_id + block_id * WARP_SIZE;
-      for (int i = global_weight_thread_id; i < num_weights;
+      int32_t weight_begin = token_begin * kTopk;
+      int32_t weight_end = token_end * kTopk;
+      int32_t global_weight_thread_id =
+          weight_begin + lane_id + block_id * WARP_SIZE;
+      for (int i = global_weight_thread_id; i < weight_end;
            i += total_weight_threads) {
         int32_t token_offset = i / kTopk;
+        const int32_t meta_token_offset =
+            kRanged ? token_offset - token_begin : token_offset;
         int32_t topk_idx = i % kTopk;
         int32_t expert_idx = topk_indices[token_offset * kTopk + topk_idx];
         int32_t scatter_idx =
-            token_dst_scatter_indices[token_offset * kTopk + topk_idx];
+            token_dst_scatter_indices[meta_token_offset * kTopk + topk_idx];
         int32_t expert_rank = expert_idx / num_experts_per_rank;
         bool is_valid_lane = (expert_rank < num_ranks) && (scatter_idx != -1);
         weight_t valid_weight = 0;
@@ -1162,8 +1856,8 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
   const int32_t consumer_tid_in_wg =
       thread_id % (WARP_SIZE * kWarpsPerWG) - WARP_SIZE;
   if (is_tma_load_warp) {
-    for (int token_offset = global_warp_group_id; token_offset < num_token;
-         token_offset += total_warp_groups) {
+    for (int token_offset = token_begin + global_warp_group_id;
+         token_offset < token_end; token_offset += total_warp_groups) {
 
       int32_t expert_rank_lane = 0;
       int32_t scatter_idx_lane = 0;
@@ -1172,11 +1866,14 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
       static_assert(kTopk <= WARP_SIZE,
                     "kTopk must be less than or equal to WARP_SIZE");
       if (lane_id < kTopk) {
+        const int32_t meta_token_offset =
+            kRanged ? token_offset - token_begin : token_offset;
         int32_t expert_idx = topk_indices[token_offset * kTopk + lane_id];
         expert_rank_lane = expert_idx / num_experts_per_rank;
-        int32_t is_need_send = topk_send_mask[token_offset * kTopk + lane_id];
+        int32_t is_need_send =
+            topk_send_mask[meta_token_offset * kTopk + lane_id];
         scatter_idx_lane =
-            token_dst_scatter_indices[token_offset * kTopk + lane_id];
+            token_dst_scatter_indices[meta_token_offset * kTopk + lane_id];
         is_valid_lane = expert_rank_lane < num_ranks and is_need_send;
       }
 
@@ -1228,14 +1925,18 @@ void __global__ __launch_bounds__(kNumWarps *WARP_SIZE, 1)
 
     const uint32_t is_leader_lane = elect_one_sync();
     int32_t token_iter = 0;
-    for (int token_offset = global_warp_group_id; token_offset < num_token;
+    for (int token_offset = token_begin + global_warp_group_id;
+         token_offset < token_end;
          token_offset += total_warp_groups, ++token_iter) {
       int32_t is_valid_lane = 0;
 
       if (lane_id < kTopk) {
+        const int32_t meta_token_offset =
+            kRanged ? token_offset - token_begin : token_offset;
         int32_t expert_idx = topk_indices[token_offset * kTopk + lane_id];
         int32_t expert_rank = expert_idx / num_experts_per_rank;
-        int32_t is_need_send = topk_send_mask[token_offset * kTopk + lane_id];
+        int32_t is_need_send =
+            topk_send_mask[meta_token_offset * kTopk + lane_id];
         is_valid_lane = (expert_rank < num_ranks) && is_need_send;
       }
 
@@ -1362,10 +2063,13 @@ void compute_stable_local_token_within_expert_offset_cuda(
     CUDA_CHECK(cudaDeviceGetAttribute(&device_sm_count,
                                       cudaDevAttrMultiProcessorCount, device));
   }
+  // Empty local ranks are valid EP inputs.  Keep one cooperative CTA for the
+  // zero-tile case so the kernel still executes its normal expert-count and
+  // output initialization logic; a zero-sized grid is an invalid launch.
   if (num_sm <= 0) {
     num_sm = (num_token * topk + kNumThreads - 1) / kNumThreads;
   }
-  num_sm = (num_sm < device_sm_count) ? num_sm : device_sm_count;
+  num_sm = std::max(1, std::min(num_sm, device_sm_count));
 
   dim3 block_dim(kNumThreads);
   dim3 grid_dim(num_sm);
@@ -1436,15 +2140,15 @@ void compute_dispatch_layout_cuda(
   CUDA_CHECK(cudaGetLastError());
 }
 
-void dispatch_intranode_cuda(
+static void dispatch_intranode_cuda_impl(
     void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
     void *token_dst_scatter_indices, void *recv_x_ptrs,
     void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
     int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
     int32_t rank, int32_t num_ranks, int32_t num_sm,
     flash_comm::FlashCommDType dtype, flash_comm::FlashCommDType weight_dtype,
-    flash_comm::FlashCommDType offset_dtype, int32_t topk,
-    cudaStream_t stream) {
+    flash_comm::FlashCommDType offset_dtype, int32_t topk, cudaStream_t stream,
+    const int32_t *logical_token_range) {
   constexpr int32_t kNumConsumerGroups = 3;
   constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
   constexpr int32_t kPreferredStages = 12;
@@ -1488,26 +2192,30 @@ void dispatch_intranode_cuda(
             constexpr int32_t smem_size = sizeof(smem_t);
             static_assert(smem_size <= kMaxSmemSize,
                           "smem_size exceeds kMaxSmemSize");
+            const bool ranged = logical_token_range != nullptr;
             DISPATCH_BOOL(has_weight, kHasWeight, {
-              CUDA_CHECK(cudaFuncSetAttribute(
-                  kernels::kernel_dispatch_intranode<
-                      token_t, weight_t, offset_t, kHiddenSize, kTopk,
-                      kNumStages, kNumConsumerGroups, kHasWeight>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-              flash_comm::launch_kernel_ex(
-                  kernels::kernel_dispatch_intranode<
-                      token_t, weight_t, offset_t, kHiddenSize, kTopk,
-                      kNumStages, kNumConsumerGroups, kHasWeight>,
-                  grid_dim, block_dim, smem_size, stream,
-                  flash_comm::internal::get_cga_cluster_size(), x,
-                  reinterpret_cast<int32_t *>(topk_send_mask),
-                  kHasWeight ? topk_weights : nullptr,
-                  reinterpret_cast<offset_t *>(topk_indices),
-                  reinterpret_cast<offset_t *>(token_dst_scatter_indices),
-                  num_token, hidden_size, num_experts_per_rank, rank, num_ranks,
-                  recv_x_ptrs, recv_weights_ptrs,
-                  reinterpret_cast<offset_t **>(
-                      recv_topk_scatter_indices_ptrs));
+              DISPATCH_BOOL(ranged, kRanged, {
+                CUDA_CHECK(cudaFuncSetAttribute(
+                    kernels::kernel_dispatch_intranode<
+                        token_t, weight_t, offset_t, kHiddenSize, kTopk,
+                        kNumStages, kNumConsumerGroups, kHasWeight, kRanged>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                flash_comm::launch_kernel_ex(
+                    kernels::kernel_dispatch_intranode<
+                        token_t, weight_t, offset_t, kHiddenSize, kTopk,
+                        kNumStages, kNumConsumerGroups, kHasWeight, kRanged>,
+                    grid_dim, block_dim, smem_size, stream,
+                    flash_comm::internal::get_cga_cluster_size(), x,
+                    reinterpret_cast<int32_t *>(topk_send_mask),
+                    kHasWeight ? topk_weights : nullptr,
+                    reinterpret_cast<offset_t *>(topk_indices),
+                    reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                    num_token, hidden_size, num_experts_per_rank, rank,
+                    num_ranks, logical_token_range, recv_x_ptrs,
+                    recv_weights_ptrs,
+                    reinterpret_cast<offset_t **>(
+                        recv_topk_scatter_indices_ptrs));
+              });
             });
           });
         });
@@ -1515,6 +2223,146 @@ void dispatch_intranode_cuda(
     });
   });
   CUDA_CHECK(cudaGetLastError());
+}
+
+void dispatch_mxfp8_quant_fused_intranode_cuda(
+    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x_ptrs,
+    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
+    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+    int32_t rank, int32_t num_ranks, int32_t num_sm,
+    flash_comm::FlashCommDType weight_dtype,
+    flash_comm::FlashCommDType offset_dtype, int32_t topk,
+    cudaStream_t stream) {
+  constexpr int32_t kNumConsumerGroups = kMXFP8MaxIntranodeRanks - 1;
+  constexpr int32_t kNumQuantWarps = 24;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
+  constexpr int32_t kPreferredStages = 12;
+  DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
+    DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
+      DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
+        DISPATCH_TOPK(topk, kTopk, {
+          constexpr int32_t kActiveConsumerGroups = kNumConsumerGroups;
+          constexpr int32_t kMaxFitStages =
+              kernels::smem::MaxMXFP8DispatchStages<
+                  weight_t, offset_t, kHiddenSize, kMaxSmemSize>::value;
+          constexpr int32_t kCapped = kMaxFitStages < kPreferredStages
+                                          ? kMaxFitStages
+                                          : kPreferredStages;
+          constexpr int32_t kNumQuantGroups = kNumQuantWarps / 8;
+          constexpr int32_t kStageMultiple = kNumQuantGroups;
+          constexpr int32_t kNumStages =
+              (kCapped / kStageMultiple) * kStageMultiple;
+          static_assert(
+              kNumStages >= kNumQuantGroups,
+              "MXFP8 dispatch needs at least one stage per quant group");
+          using smem_t = kernels::smem::DispatchMXFP8IntraNodeSmem<
+              weight_t, offset_t, kHiddenSize, kNumStages>;
+          constexpr int32_t smem_size = sizeof(smem_t);
+          bool has_weight = topk_weights != nullptr;
+          DISPATCH_BOOL(has_weight, kHasWeight, {
+            auto kernel = kernels::kernel_dispatch_mxfp8_quant_fused_intranode<
+                weight_t, offset_t, kHiddenSize, kTopk, kNumStages,
+                kActiveConsumerGroups, kNumQuantWarps, kHasWeight>;
+            CUDA_CHECK(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                smem_size));
+            flash_comm::launch_kernel_ex(
+                kernel, dim3(num_sm),
+                dim3((1 + kNumQuantWarps + kActiveConsumerGroups) * WARP_SIZE),
+                smem_size, stream, flash_comm::internal::get_cga_cluster_size(),
+                reinterpret_cast<nv_bfloat16 *>(x),
+                reinterpret_cast<int32_t *>(topk_send_mask),
+                kHasWeight ? topk_weights : nullptr,
+                reinterpret_cast<offset_t *>(topk_indices),
+                reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                num_token, num_experts_per_rank, rank, num_ranks, recv_x_ptrs,
+                recv_weights_ptrs,
+                reinterpret_cast<offset_t **>(recv_topk_scatter_indices_ptrs));
+          });
+        });
+      });
+    });
+  });
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void dispatch_mxfp8_prequantized_intranode_cuda(
+    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x_ptrs,
+    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
+    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+    int32_t rank, int32_t num_ranks, int32_t num_sm,
+    flash_comm::FlashCommDType weight_dtype,
+    flash_comm::FlashCommDType offset_dtype, int32_t topk,
+    cudaStream_t stream) {
+  constexpr int32_t kNumPeerWarps = 8;
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
+  constexpr int32_t kPreferredStages = 12;
+  using token_t = nv_bfloat16;
+  DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
+    DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
+      // Dispatch on the logical hidden size and derive the packed row from it,
+      // so the transport kernel stays a plain BF16 row mover over a row length
+      // that only the quantization layout defines.
+      DISPATCH_HIDDEN_SIZE(hidden_size, kLogicalHiddenSize, {
+        constexpr int32_t kHiddenSize =
+            mxfp8_packed_row_bf16_elems(kLogicalHiddenSize);
+        DISPATCH_TOPK(topk, kTopk, {
+          constexpr int32_t kMaxFitStages =
+              kernels::smem::MaxMXFP8PrequantizedDispatchStages<
+                  token_t, weight_t, offset_t, kLogicalHiddenSize,
+                  kMaxSmemSize>::value;
+          constexpr int32_t kCapped = kMaxFitStages < kPreferredStages
+                                          ? kMaxFitStages
+                                          : kPreferredStages;
+          constexpr int32_t kNumStages = kCapped;
+          static_assert(kNumStages >= 2,
+                        "packed dispatch needs at least two pipeline stages");
+          using smem_t =
+              kernels::smem::DispatchIntraNodeSmem<token_t, weight_t, offset_t,
+                                                   kHiddenSize, kNumStages>;
+          constexpr int32_t smem_size = sizeof(smem_t);
+          bool has_weight = topk_weights != nullptr;
+          DISPATCH_BOOL(has_weight, kHasWeight, {
+            auto kernel = kernels::kernel_dispatch_mxfp8_prequantized_intranode<
+                token_t, weight_t, offset_t, kHiddenSize, kTopk, kNumStages,
+                kNumPeerWarps, kHasWeight>;
+            CUDA_CHECK(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                smem_size));
+            flash_comm::launch_kernel_ex(
+                kernel, dim3(num_sm), dim3((1 + kNumPeerWarps) * WARP_SIZE),
+                smem_size, stream, flash_comm::internal::get_cga_cluster_size(),
+                x, reinterpret_cast<int32_t *>(topk_send_mask),
+                kHasWeight ? topk_weights : nullptr,
+                reinterpret_cast<offset_t *>(topk_indices),
+                reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                num_token, kHiddenSize, num_experts_per_rank, rank, num_ranks,
+                recv_x_ptrs, recv_weights_ptrs,
+                reinterpret_cast<offset_t **>(recv_topk_scatter_indices_ptrs));
+          });
+        });
+      });
+    });
+  });
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void dispatch_intranode_cuda(
+    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x_ptrs,
+    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
+    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+    int32_t rank, int32_t num_ranks, int32_t num_sm,
+    flash_comm::FlashCommDType dtype, flash_comm::FlashCommDType weight_dtype,
+    flash_comm::FlashCommDType offset_dtype, int32_t topk,
+    const int32_t *logical_token_range, cudaStream_t stream) {
+  dispatch_intranode_cuda_impl(
+      x, topk_send_mask, topk_weights, topk_indices, token_dst_scatter_indices,
+      recv_x_ptrs, recv_weights_ptrs, recv_topk_scatter_indices_ptrs, num_token,
+      hidden_size, num_experts_per_rank, rank, num_ranks, num_sm, dtype,
+      weight_dtype, offset_dtype, topk, stream, logical_token_range);
 }
 
 void dispatch_postprocess_cuda(
@@ -1597,14 +2445,96 @@ void dispatch_postprocess_cuda(
   CUDA_CHECK(cudaGetLastError());
 }
 
-void combine_intranode_cuda(
+void dispatch_mxfp8_postprocess_unpack_cuda(
+    void *recv_packed, void *recv_topk_scatter_indices_comm_buffer,
+    void *recv_topk_weights, int32_t *recv_token_count, void *dispatch_data,
+    void *dispatch_scales, void *dispatch_weights,
+    void *recv_topk_scatter_indices, int32_t num_recv_worst_token,
+    int32_t hidden_size, int32_t topk, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, flash_comm::FlashCommDType weight_dtype,
+    flash_comm::FlashCommDType offset_dtype, cudaStream_t stream) {
+  constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
+  int32_t num_blocks = num_sm;
+  if (num_blocks <= 0) {
+    int32_t device = 0;
+    int32_t device_sm_count = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&device_sm_count,
+                                      cudaDevAttrMultiProcessorCount, device));
+    // Scale with both receive-buffer size and device size while avoiding an
+    // unbounded grid for large expert-aligned buffers.
+    constexpr int32_t kRowsPerCTA = 2;
+    constexpr int32_t kMaxWaves = 128;
+    num_blocks =
+        std::min((num_recv_worst_token + kRowsPerCTA - 1) / kRowsPerCTA,
+                 device_sm_count * kMaxWaves);
+  }
+  num_blocks = std::max(num_blocks, 1);
+  bool has_weight = recv_topk_weights != nullptr && dispatch_weights != nullptr;
+  DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
+    DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
+      DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
+        DISPATCH_TOPK(topk, kTopk, {
+          constexpr int32_t kPackedRowBytes =
+              mxfp8_packed_row_bytes_of(kHiddenSize);
+          constexpr int32_t kNumWarps = 1 + kTopk;
+          constexpr int32_t kPreferredStages = 4;
+          constexpr int32_t kMaxFitStages =
+              kernels::smem::MaxMXFP8PostprocessStages<
+                  offset_t, kPackedRowBytes, kTopk, kMaxSmemSize>::value;
+          constexpr int32_t kNumStages = kMaxFitStages < kPreferredStages
+                                             ? kMaxFitStages
+                                             : kPreferredStages;
+          using smem_t = kernels::smem::DispatchMXFP8PostprocessSmem<
+              offset_t, kPackedRowBytes, kTopk, kNumStages>;
+          constexpr int32_t smem_size = sizeof(smem_t);
+          DISPATCH_BOOL(has_weight, kHasWeight, {
+            auto kernel = kernels::kernel_dispatch_mxfp8_postprocess_unpack<
+                offset_t, kHiddenSize, kTopk, kNumStages>;
+            CUDA_CHECK(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                smem_size));
+            kernel<<<num_blocks, kNumWarps * WARP_SIZE, smem_size, stream>>>(
+                reinterpret_cast<uint8_t *>(recv_packed),
+                reinterpret_cast<offset_t *>(
+                    recv_topk_scatter_indices_comm_buffer),
+                recv_token_count, reinterpret_cast<uint8_t *>(dispatch_data),
+                reinterpret_cast<uint8_t *>(dispatch_scales), rank);
+
+            constexpr int32_t kMetadataThreads = 256;
+            int32_t metadata_blocks =
+                (num_recv_worst_token * kTopk + kMetadataThreads - 1) /
+                kMetadataThreads;
+            metadata_blocks = metadata_blocks > 0 ? metadata_blocks : 1;
+            auto metadata_kernel =
+                kernels::kernel_dispatch_mxfp8_postprocess_metadata<
+                    weight_t, offset_t, kTopk, kHasWeight>;
+            metadata_kernel<<<metadata_blocks, kMetadataThreads, 0, stream>>>(
+                kHasWeight ? reinterpret_cast<weight_t *>(recv_topk_weights)
+                           : nullptr,
+                reinterpret_cast<offset_t *>(
+                    recv_topk_scatter_indices_comm_buffer),
+                recv_token_count,
+                kHasWeight ? reinterpret_cast<weight_t *>(dispatch_weights)
+                           : nullptr,
+                reinterpret_cast<offset_t *>(recv_topk_scatter_indices), rank);
+          });
+        });
+      });
+    });
+  });
+  CUDA_CHECK(cudaGetLastError());
+}
+
+static void combine_intranode_cuda_impl(
     void *x_ptrs, void *weight_ptrs, void *topk_send_mask, void *topk_indices,
     void *token_dst_scatter_indices, void *recv_x, void *recv_weight,
-    int32_t num_token, int32_t hidden_size, int32_t topk,
+    bool has_weight, int32_t num_token, int32_t hidden_size, int32_t topk,
     int32_t num_experts_per_rank, int32_t rank, int32_t num_ranks,
     int32_t num_sm, flash_comm::FlashCommDType dtype,
     flash_comm::FlashCommDType weight_dtype,
-    flash_comm::FlashCommDType offset_dtype, cudaStream_t stream) {
+    flash_comm::FlashCommDType offset_dtype, cudaStream_t stream,
+    const int32_t *logical_token_range) {
   constexpr int32_t kNumStoreStages = 2;
   constexpr int32_t kElemsPerThread = 64;
 
@@ -1612,9 +2542,9 @@ void combine_intranode_cuda(
   constexpr int32_t kNumWGPerBlock = 2;
 
   constexpr int32_t kMaxSmemSize = flash_comm::kMaxSmemBytes;
-  FLASH_CHECK((weight_ptrs != nullptr) == (recv_weight != nullptr))
-      << "weight_ptrs and recv_weight must be both nullptr or both not nullptr";
-  bool has_weight = weight_ptrs != nullptr;
+  FLASH_CHECK(!has_weight || weight_ptrs != nullptr);
+  FLASH_CHECK(!has_weight || recv_weight != nullptr || num_token == 0);
+  FLASH_CHECK(has_weight || (weight_ptrs == nullptr && recv_weight == nullptr));
   DISPATCH_TOKEN_DTYPE(dtype, token_t, {
     DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
       DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
@@ -1640,8 +2570,7 @@ void combine_intranode_cuda(
                           kernels::smem::kTMAAlignment ==
                       0,
                   "combine_intranode: one token row must be kTMAAlignment "
-                  "bytes "
-                  "for TMA.");
+                  "bytes for TMA.");
               constexpr int32_t kNumWarps =
                   kNumWGPerBlock * kWarpsPerWG + int(kHasWeight);
               static_assert(
@@ -1660,26 +2589,29 @@ void combine_intranode_cuda(
               constexpr int32_t smem_size = sizeof(smem_t);
               static_assert(smem_size <= kMaxSmemSize,
                             "smem_size exceeds kMaxSmemSize");
-              CUDA_CHECK(cudaFuncSetAttribute(
-                  kernels::kernel_combine_intranode<
-                      token_t, weight_t, offset_t, kTopk, kHiddenSize,
-                      kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
-                      kElemsPerThread, kHasWeight>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-              dim3 block_dim(kNumThreads);
-              dim3 grid_dim(num_sm);
-              flash_comm::launch_kernel_ex(
-                  kernels::kernel_combine_intranode<
-                      token_t, weight_t, offset_t, kTopk, kHiddenSize,
-                      kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
-                      kElemsPerThread, kHasWeight>,
-                  grid_dim, block_dim, smem_size, stream,
-                  flash_comm::internal::get_cga_cluster_size(), x_ptrs,
-                  weight_ptrs, reinterpret_cast<offset_t *>(topk_send_mask),
-                  reinterpret_cast<offset_t *>(topk_indices),
-                  reinterpret_cast<offset_t *>(token_dst_scatter_indices),
-                  recv_x, recv_weight, num_token, num_experts_per_rank, rank,
-                  num_ranks);
+              const bool ranged = logical_token_range != nullptr;
+              DISPATCH_BOOL(ranged, kRanged, {
+                CUDA_CHECK(cudaFuncSetAttribute(
+                    kernels::kernel_combine_intranode<
+                        token_t, weight_t, offset_t, kTopk, kHiddenSize,
+                        kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
+                        kElemsPerThread, kHasWeight, kRanged>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                dim3 block_dim(kNumThreads);
+                dim3 grid_dim(num_sm);
+                flash_comm::launch_kernel_ex(
+                    kernels::kernel_combine_intranode<
+                        token_t, weight_t, offset_t, kTopk, kHiddenSize,
+                        kNumLoadStages, kNumStoreStages, kNumWarps, kWarpsPerWG,
+                        kElemsPerThread, kHasWeight, kRanged>,
+                    grid_dim, block_dim, smem_size, stream,
+                    flash_comm::internal::get_cga_cluster_size(), x_ptrs,
+                    weight_ptrs, reinterpret_cast<offset_t *>(topk_send_mask),
+                    reinterpret_cast<offset_t *>(topk_indices),
+                    reinterpret_cast<offset_t *>(token_dst_scatter_indices),
+                    recv_x, recv_weight, num_token, num_experts_per_rank, rank,
+                    num_ranks, logical_token_range);
+              });
             });
           });
         });
@@ -1689,6 +2621,22 @@ void combine_intranode_cuda(
   CUDA_CHECK(cudaGetLastError());
 }
 
+void combine_intranode_cuda(
+    void *x_ptrs, void *weight_ptrs, void *topk_send_mask, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x, void *recv_weight,
+    bool has_weight, int32_t num_token, int32_t hidden_size, int32_t topk,
+    int32_t num_experts_per_rank, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, flash_comm::FlashCommDType dtype,
+    flash_comm::FlashCommDType weight_dtype,
+    flash_comm::FlashCommDType offset_dtype, const int32_t *logical_token_range,
+    cudaStream_t stream) {
+  combine_intranode_cuda_impl(
+      x_ptrs, weight_ptrs, topk_send_mask, topk_indices,
+      token_dst_scatter_indices, recv_x, recv_weight, has_weight, num_token,
+      hidden_size, topk, num_experts_per_rank, rank, num_ranks, num_sm, dtype,
+      weight_dtype, offset_dtype, stream, logical_token_range);
+}
+
 void combine_preprocess_inplace_cuda(
     void *x, void *weight_ptrs, int32_t *recv_token_count,
     void *recv_topk_scatter_indices, void *recv_topk_weight,
@@ -1696,11 +2644,8 @@ void combine_preprocess_inplace_cuda(
     int32_t rank, int32_t num_ranks, int32_t num_sm,
     flash_comm::FlashCommDType dtype, flash_comm::FlashCommDType weight_dtype,
     flash_comm::FlashCommDType offset_dtype, cudaStream_t stream) {
-  constexpr int32_t kNumWarps = 16;
   constexpr int32_t kElemsPerThread = 32;
 
-  constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
-  dim3 block_dim(kNumThreads);
   dim3 grid_dim(num_sm);
   size_t smem_size = 0;
   bool has_weight = weight_ptrs != nullptr;
@@ -1713,6 +2658,9 @@ void combine_preprocess_inplace_cuda(
   DISPATCH_TOKEN_DTYPE(dtype, token_t, {
     DISPATCH_OFFSET_TYPE(offset_dtype, offset_t, {
       DISPATCH_HIDDEN_SIZE(hidden_size, kHiddenSize, {
+        constexpr int32_t kNumWarps = kHiddenSize >= 12288 ? 32 : 16;
+        constexpr int32_t kNumThreads = kNumWarps * WARP_SIZE;
+        dim3 block_dim(kNumThreads);
         DISPATCH_WEIGHT_DTYPE(weight_dtype, weight_t, {
           DISPATCH_BOOL(has_weight, kHasWeight, {
             kernels::kernel_combine_preprocess_inplace<
@@ -1743,6 +2691,20 @@ void barrier_all_on_stream_cuda(void **barrier_ptrs, int32_t rank,
   kernels::kernel_barrier_all_on_stream<int32_t>
       <<<grid_dim, block_dim, 0, stream>>>(
           reinterpret_cast<int32_t **>(barrier_ptrs), rank, num_ranks);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void barrier_all_on_stream_range_cuda(void **barrier_ptrs, int32_t rank,
+                                      int32_t num_ranks,
+                                      const int32_t *logical_token_range,
+                                      cudaStream_t stream) {
+  FLASH_CHECK(rank >= 0 && rank < num_ranks);
+  FLASH_CHECK(logical_token_range != nullptr);
+  constexpr int32_t kNumThreads = 128;
+  kernels::kernel_barrier_all_on_stream_range<int32_t>
+      <<<1, kNumThreads, 0, stream>>>(
+          reinterpret_cast<int32_t **>(barrier_ptrs), rank, num_ranks,
+          logical_token_range);
   CUDA_CHECK(cudaGetLastError());
 }
 

@@ -58,6 +58,25 @@ void dispatch_intranode_cuda(
     int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
     int32_t rank, int32_t num_ranks, int32_t num_sm, FlashCommDType dtype,
     FlashCommDType weight_dtype, FlashCommDType offset_dtype, int32_t topk,
+    const int32_t *logical_token_range, cudaStream_t stream);
+
+void dispatch_mxfp8_quant_fused_intranode_cuda(
+    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x_ptrs,
+    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
+    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+    int32_t rank, int32_t num_ranks, int32_t num_sm,
+    FlashCommDType weight_dtype, FlashCommDType offset_dtype, int32_t topk,
+    cudaStream_t stream);
+
+void dispatch_mxfp8_prequantized_intranode_cuda(
+    void *x, void *topk_send_mask, void *topk_weights, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x_ptrs,
+    void **recv_weights_ptrs, void **recv_topk_scatter_indices_ptrs,
+    // Logical hidden size: the packed row length is derived from it.
+    int32_t num_token, int32_t hidden_size, int32_t num_experts_per_rank,
+    int32_t rank, int32_t num_ranks, int32_t num_sm,
+    FlashCommDType weight_dtype, FlashCommDType offset_dtype, int32_t topk,
     cudaStream_t stream);
 
 void dispatch_postprocess_cuda(
@@ -68,15 +87,23 @@ void dispatch_postprocess_cuda(
     int32_t num_sm, FlashCommDType dtype, FlashCommDType weight_dtype,
     FlashCommDType offset_dtype, cudaStream_t stream);
 
-void combine_intranode_cuda(void *x_ptrs, void *weight_ptrs,
-                            void *topk_send_mask, void *topk_indices,
-                            void *token_dst_scatter_indices, void *recv_x,
-                            void *recv_weight, int32_t num_token,
-                            int32_t hidden_size, int32_t topk,
-                            int32_t num_experts_per_rank, int32_t rank,
-                            int32_t num_ranks, int32_t num_sm,
-                            FlashCommDType dtype, FlashCommDType weight_dtype,
-                            FlashCommDType offset_dtype, cudaStream_t stream);
+void dispatch_mxfp8_postprocess_unpack_cuda(
+    void *recv_packed, void *recv_topk_scatter_indices_comm_buffer,
+    void *recv_topk_weights, int32_t *recv_token_count, void *dispatch_data,
+    void *dispatch_scales, void *dispatch_weights,
+    void *recv_topk_scatter_indices, int32_t num_recv_worst_token,
+    int32_t hidden_size, int32_t topk, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, FlashCommDType weight_dtype, FlashCommDType offset_dtype,
+    cudaStream_t stream);
+
+void combine_intranode_cuda(
+    void *x_ptrs, void *weight_ptrs, void *topk_send_mask, void *topk_indices,
+    void *token_dst_scatter_indices, void *recv_x, void *recv_weight,
+    bool has_weight, int32_t num_token, int32_t hidden_size, int32_t topk,
+    int32_t num_experts_per_rank, int32_t rank, int32_t num_ranks,
+    int32_t num_sm, FlashCommDType dtype, FlashCommDType weight_dtype,
+    FlashCommDType offset_dtype, const int32_t *logical_token_range,
+    cudaStream_t stream);
 
 void combine_preprocess_inplace_cuda(
     void *x, void *weight_ptrs, int32_t *recv_token_count,
@@ -89,6 +116,10 @@ void combine_preprocess_inplace_cuda(
 void barrier_all_on_stream_cuda(void **barrier_ptrs, int32_t rank,
                                 int32_t num_ranks, FlashCommDType dtype,
                                 cudaStream_t stream);
+void barrier_all_on_stream_range_cuda(void **barrier_ptrs, int32_t rank,
+                                      int32_t num_ranks,
+                                      const int32_t *logical_token_range,
+                                      cudaStream_t stream);
 
 } // namespace intranode
 } // namespace ep

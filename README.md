@@ -41,7 +41,18 @@ Using Triton-distributed, programmers are able to develop efficient kernels comp
 Triton-distributed currently mainly targets Nvidia GPU and AMD GPU. It can also be ported to other hardware platforms.
 Feel free to contact us if you want to use Triton-distributed on your own hardware.
 
+The default branch tracks **Triton 3.7**. The previous Triton 3.4 line is kept on the [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4) branch. Ascend is not on the 3.7 plugin build path yet (`triton-ascend` has not rebased onto 3.7); use `triton-v3.4` for a working Ascend build. The 3.4-era Ascend sources are parked under [`ascend/`](ascend/README.md) on this branch until a plugin-based port exists.
+
 ## News
+- 09/17/2026 ✨✨✨: FlashComm fused MXFP8 intra-node dispatch: expert-parallel traffic can send packed FP8 instead of BF16, with bitwise checks against fused and prequantized paths. MXFP8 launch templates, caller-owned EP output buffers, and pinned-buffer lifetime checks are also tightened.
+- 09/01/2026 ✨✨✨: FlashComm fixed-buffer chunked EP: dispatch and combine run in chunks over a fixed-size buffer, so peak EP memory no longer scales with the worst-case token count. EP overlap buffers are also sized on demand, and the EP kernels cover a wider range of hidden sizes.
+- 08/17/2026 🚀🚀🚀: Upgraded to Triton 3.7. Triton-distributed now builds as an out-of-tree plugin against stock upstream Triton. The Triton 3.4 line is kept on [`triton-v3.4`](https://github.com/ByteDance-Seed/Triton-distributed/tree/triton-v3.4).
+- 08/10/2026 ✨✨✨: AMD MORI backend update restoring fused-MoE cooperative SHMEM APIs.
+- 08/07/2026 ✨✨✨: Fused inter-node CuTeDSL dispatch/combine on Hopper and Blackwell GPUs.
+- 08/06/2026 ✨✨✨: Ascend RDMA support ([PR #179](https://github.com/ByteDance-Seed/Triton-distributed/pull/179)).
+- 07/21/2026 ✨✨✨: FlashComm cross-node and multi-NIC EP.
+- 07/12/2026 ✨✨✨: FlashComm CUDA communication library with EP overlap, TMA support, `TRITON_DIST_CGA_CLUSTER_SIZE`, Triton host-overhead optimization, and AMD mori-shmem EP intra-node / low-latency kernels.
+- 06/30/2026 ✨✨✨: Fused intra-node CuTeDSL dispatch/combine on Hopper GPUs (dispatch+FC1 and FC2+combine).
 - 12/22/2025 ✨✨✨: Updated EP functions, support low-latency mode, token saving, and Mega-EP.
 - 21/10/2025 🔥🔥🔥: Triton-distributed is presented at [Triton Conference 2025](https://tritonconference.eventbuilder.com/TritonDeveloperConference?ref=TritonDeveloperConference), see the [talk](https://www.youtube.com/playlist?list=PLc_vA1r0qoiQqCdWFDUDqI90oY5EjfGuO) for details.
 - 09/03/2025 ✨✨✨: Introduced Intra-Kernel Profiler, See the [doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/profiler/intra_kernel_profiler.md) for details.

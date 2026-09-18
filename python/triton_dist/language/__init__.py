@@ -78,3 +78,16 @@ __all__ = [
     # core
     "extern_call",
 ]
+
+# Self-register as `triton.language.extra.distributed`, mirroring the upstream
+# plugin convention (e.g. utlx -> triton.language.extra.tlx). This lets kernels
+# reference distributed primitives via the canonical extras namespace without
+# any Triton source modification.
+import sys as _sys  # noqa: E402
+try:
+    import triton.language.extra as _extra  # noqa: E402
+    _sys.modules.setdefault("triton.language.extra.distributed", _sys.modules[__name__])
+    if not hasattr(_extra, "distributed"):
+        _extra.distributed = _sys.modules[__name__]
+except Exception:  # pragma: no cover - extras namespace optional
+    pass

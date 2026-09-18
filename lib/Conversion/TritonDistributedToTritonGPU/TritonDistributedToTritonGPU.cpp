@@ -20,38 +20,55 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "TritonDistributed/Conversion/TritonDistributedToTritonGPU/TritonDistributedToTritonGPUPass.h"
+
+/*
+ * TritonDistributed -> TritonGPU conversion.
+ *
+ * This is a rebase of upstream Triton 3.7.1's `TritonToTritonGPUPass.cpp` with
+ * the Triton-distributed extensions grafted on top:
+ *   - distributed dialect op patterns (wait / consume_token)
+ *   - proton record op pattern
+ *   - a SIMT exec-region conversion + a second "promotion" phase that lowers
+ *     register tensors used inside `simt.simt_exec_region` into shared memory
+ *     (ttg.memdesc + simt.load_shared / simt.store_shared).
+ *
+ * Keeping the common patterns identical to upstream avoids re-introducing the
+ * CTA->CGA layout drift; only the distributed/SIMT-specific logic lives here.
+ */
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
-#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Dialect/Triton/Transforms/FunctionTypeConversion.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
+
+#include "TritonDistributed/Conversion/TritonDistributedToTritonGPU/TritonDistributedToTritonGPUPass.h"
+#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
+#include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
+#include "third_party/proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
+
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
-#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
-#include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
-
-#define GEN_PASS_CLASSES
+namespace mlir::triton {
+#define GEN_PASS_DECL_CONVERTTRITONDISTRIBUTEDTOTRITONGPU
+#define GEN_PASS_DEF_CONVERTTRITONDISTRIBUTEDTOTRITONGPU
 #include "TritonDistributed/Conversion/TritonDistributedToTritonGPU/Passes.h.inc"
-#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
-
-#define DEBUG_TYPE "convert-triton-to-tritongpu"
-#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
-#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+} // namespace mlir::triton
 
 namespace {
 
@@ -108,14 +125,7 @@ public:
 void populateArithPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
                                       RewritePatternSet &patterns,
                                       TritonGPUConversionTarget &target) {
-  // --------------
-  // Add legality and rewrite pattern rules for operations
-  // from the Arith dialect. The basic premise is that
-  // Arith operations require both inputs to have the same
-  // non-null encoding
-  // --------------
   MLIRContext *context = patterns.getContext();
-  // TODO: there's probably a better way to avoid adding all ops one-by-one
   patterns.add<
       ArithConstantPattern, GenericOpPattern<arith::AddIOp>,
       GenericOpPattern<arith::SubIOp>, GenericOpPattern<arith::MulIOp>,
@@ -126,22 +136,15 @@ void populateArithPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<arith::RemSIOp>, GenericOpPattern<arith::AndIOp>,
       GenericOpPattern<arith::OrIOp>, GenericOpPattern<arith::XOrIOp>,
       GenericOpPattern<arith::ShLIOp>, GenericOpPattern<arith::ShRUIOp>,
-      GenericOpPattern<arith::ShRSIOp>, // NegFOp
-      // Floating point
+      GenericOpPattern<arith::ShRSIOp>, GenericOpPattern<arith::NegFOp>,
       GenericOpPattern<arith::AddFOp>, GenericOpPattern<arith::SubFOp>,
-      // MaxMin
       GenericOpPattern<arith::MaximumFOp>, GenericOpPattern<arith::MaxNumFOp>,
       GenericOpPattern<arith::MaxSIOp>, GenericOpPattern<arith::MaxUIOp>,
       GenericOpPattern<arith::MinimumFOp>, GenericOpPattern<arith::MinNumFOp>,
       GenericOpPattern<arith::MinSIOp>, GenericOpPattern<arith::MinUIOp>,
-      // Floating point
       GenericOpPattern<arith::MulFOp>, GenericOpPattern<arith::DivFOp>,
-      GenericOpPattern<arith::RemFOp>,
-      // Cmp
-      GenericOpPattern<arith::CmpIOp>, GenericOpPattern<arith::CmpFOp>,
-      // Select
-      GenericOpPattern<arith::SelectOp>,
-      // Cast Ops
+      GenericOpPattern<arith::RemFOp>, GenericOpPattern<arith::CmpIOp>,
+      GenericOpPattern<arith::CmpFOp>, GenericOpPattern<arith::SelectOp>,
       GenericOpPattern<arith::TruncIOp>, GenericOpPattern<arith::TruncFOp>,
       GenericOpPattern<arith::ExtUIOp>, GenericOpPattern<arith::ExtSIOp>,
       GenericOpPattern<arith::ExtFOp>, GenericOpPattern<arith::SIToFPOp>,
@@ -153,7 +156,6 @@ void populateMathPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
                                      RewritePatternSet &patterns,
                                      TritonGPUConversionTarget &target) {
   MLIRContext *context = patterns.getContext();
-  // Rewrite rule
   patterns.add<GenericOpPattern<math::ExpOp>, GenericOpPattern<math::Exp2Op>,
                GenericOpPattern<math::FloorOp>, GenericOpPattern<math::CeilOp>,
                GenericOpPattern<math::CosOp>, GenericOpPattern<math::SinOp>,
@@ -174,17 +176,15 @@ struct TritonExpandDimsPattern
   LogicalResult
   matchAndRewrite(triton::ExpandDimsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // Type retType = op.getType());
     RankedTensorType argType =
         cast<RankedTensorType>(adaptor.getSrc().getType());
     Attribute _argEncoding = argType.getEncoding();
     if (!_argEncoding)
       return failure();
     auto argEncoding = cast<triton::gpu::BlockedEncodingAttr>(_argEncoding);
-    // return shape
     auto retShape = argType.getShape().vec();
     retShape.insert(retShape.begin() + op.getAxis(), 1);
-    // return encoding
+    auto newRank = retShape.size();
     auto retSizePerThread = llvm::to_vector(argEncoding.getSizePerThread());
     retSizePerThread.insert(retSizePerThread.begin() + op.getAxis(), 1);
     auto retThreadsPerWarp = to_vector(argEncoding.getThreadsPerWarp());
@@ -194,50 +194,30 @@ struct TritonExpandDimsPattern
     SmallVector<unsigned, 4> retOrder(retShape.size());
     std::iota(retOrder.begin(), retOrder.end(), 0);
 
-    auto argCTALayout = argEncoding.getCTALayout();
-    auto retCTAsPerCGA = insertOne(argCTALayout.getCTAsPerCGA(), op.getAxis());
-    auto retCTASplitNum =
-        insertOne(argCTALayout.getCTASplitNum(), op.getAxis());
-    auto retCTAOrder = insertOrder(argCTALayout.getCTAOrder(), op.getAxis());
-    auto retCTALayout = triton::gpu::CTALayoutAttr::get(
-        getContext(), retCTAsPerCGA, retCTASplitNum, retCTAOrder);
-
+    auto ctaLl = argEncoding.getCGALayout().getLinearLayout();
+    auto kBlock = *ctaLl.getInDimNames().begin();
+    auto *ctx = kBlock.getContext();
+    auto newDim = standardOutDimNames(ctx, newRank)[newRank - 1];
+    ctaLl *= LinearLayout::identity1D(1, kBlock, newDim);
+    auto newOrder = to_vector(llvm::seq<int32_t>(newRank));
+    for (int i = newRank - 1; i >= op.getAxis() + 1; --i) {
+      std::swap(newOrder[i], newOrder[i - 1]);
+    }
+    ctaLl = transposeLinearLayout(ctaLl, newOrder);
+    auto retCGALayout = CGAEncodingAttr::get(ctx, std::move(ctaLl));
     triton::gpu::BlockedEncodingAttr retEncoding =
         triton::gpu::BlockedEncodingAttr::get(getContext(), retSizePerThread,
                                               retThreadsPerWarp, retWarpsPerCTA,
-                                              retOrder, retCTALayout);
-    // convert operand to slice of return type
+                                              retOrder, retCGALayout);
     Attribute newArgEncoding = triton::gpu::SliceEncodingAttr::get(
         getContext(), op.getAxis(), retEncoding);
-    RankedTensorType newArgType = RankedTensorType::get(
-        argType.getShape(), argType.getElementType(), newArgEncoding);
-    // construct new op
-    auto newSrc = rewriter.create<triton::gpu::ConvertLayoutOp>(
-        op.getLoc(), newArgType, adaptor.getSrc());
+    RankedTensorType newArgType = argType.cloneWithEncoding(newArgEncoding);
+    auto newSrc = triton::gpu::ConvertLayoutOp::create(
+        rewriter, op.getLoc(), newArgType, adaptor.getSrc());
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::ExpandDimsOp>(
                       op, newSrc, adaptor.getAxis()),
                   adaptor.getAttributes());
     return success();
-  }
-
-private:
-  template <typename T>
-  SmallVector<T> insertOne(ArrayRef<T> vec, unsigned axis) const {
-    SmallVector<T> res(vec.begin(), vec.end());
-    res.insert(res.begin() + axis, 1);
-    return res;
-  }
-
-  // Example:    order = [   0, 2, 1, 3], dim = 2
-  //          resOrder = [2, 0, 3, 1, 4]
-  SmallVector<unsigned> insertOrder(ArrayRef<unsigned> order,
-                                    unsigned axis) const {
-    SmallVector<unsigned> resOrder(order.begin(), order.end());
-    for (unsigned i = 0; i < resOrder.size(); ++i)
-      if (resOrder[i] >= axis)
-        ++resOrder[i];
-    resOrder.insert(resOrder.begin(), axis);
-    return resOrder;
   }
 };
 
@@ -275,9 +255,7 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
     Attribute dEncoding = triton::gpu::BlockedEncodingAttr::get(
         getContext(), origShape, retSizePerThread, retOrder, numWarps,
         threadsPerWarp, numCTAs);
-    RankedTensorType retType =
-        RankedTensorType::get(origShape, origType.getElementType(), dEncoding);
-    // a & b must be of smem layout
+    RankedTensorType retType = origType.cloneWithEncoding(dEncoding);
     auto aType = cast<RankedTensorType>(adaptor.getA().getType());
     auto bType = cast<RankedTensorType>(adaptor.getB().getType());
     Type aEltType = aType.getElementType();
@@ -292,18 +270,18 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
     if (!mlir::isa<triton::gpu::DotOperandEncodingAttr>(aEncoding)) {
       Attribute encoding = triton::gpu::DotOperandEncodingAttr::get(
           getContext(), 0, dEncoding, aEltType);
-      auto dstType =
-          RankedTensorType::get(aType.getShape(), aEltType, encoding);
-      a = rewriter.create<triton::gpu::ConvertLayoutOp>(a.getLoc(), dstType, a);
+      auto dstType = aType.cloneWithEncoding(encoding);
+      a = triton::gpu::ConvertLayoutOp::create(rewriter, a.getLoc(), dstType,
+                                               a);
     }
     if (!mlir::isa<triton::gpu::DotOperandEncodingAttr>(bEncoding)) {
       Attribute encoding = triton::gpu::DotOperandEncodingAttr::get(
           getContext(), 1, dEncoding, bEltType);
-      auto dstType =
-          RankedTensorType::get(bType.getShape(), bEltType, encoding);
-      b = rewriter.create<triton::gpu::ConvertLayoutOp>(b.getLoc(), dstType, b);
+      auto dstType = bType.cloneWithEncoding(encoding);
+      b = triton::gpu::ConvertLayoutOp::create(rewriter, b.getLoc(), dstType,
+                                               b);
     }
-    c = rewriter.create<triton::gpu::ConvertLayoutOp>(c.getLoc(), retType, c);
+    c = triton::gpu::ConvertLayoutOp::create(rewriter, c.getLoc(), retType, c);
 
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::DotOp>(
                       op, retType, a, b, c, adaptor.getInputPrecision(),
@@ -319,12 +297,6 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
   LogicalResult
   matchAndRewrite(triton::CatOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // The cat op satisfy two conditions:
-    // 1. output.numel = lhs.numel + rhs.numel
-    // 2. output.total_elems_per_thread =
-    // next_power_of_2(lhs.total_elems_per_thread + rhs.total_elems_per_thread)
-    // For now, this behaves like generic, but this
-    // will evolve when we add support for `can_reorder=False`.
     auto retType = cast<RankedTensorType>(
         this->getTypeConverter()->convertType(op.getType()));
     auto retEncoding =
@@ -334,13 +306,9 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
     auto lhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(lhsType);
     auto rhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(rhsType);
     auto retTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(retType);
-    auto retShape = retType.getShape();
     auto retOrder = retEncoding.getOrder();
     auto retThreadsPerWarp = retEncoding.getThreadsPerWarp();
     auto retWarpsPerCTA = retEncoding.getWarpsPerCTA();
-    // Get new retSizePerThread if ret elems per thread is not enough.
-    // We have to round it up to the next power of 2 due to triton's tensor size
-    // constraint.
     auto newRetTotalElemsPerThread =
         nextPowOf2(lhsTotalElemsPerThread + rhsTotalElemsPerThread);
     auto newRetSizePerThread = llvm::to_vector(retEncoding.getSizePerThread());
@@ -349,9 +317,8 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
     triton::gpu::BlockedEncodingAttr newRetEncoding =
         triton::gpu::BlockedEncodingAttr::get(
             getContext(), newRetSizePerThread, retThreadsPerWarp,
-            retWarpsPerCTA, retOrder, retEncoding.getCTALayout());
-    auto newRetType = RankedTensorType::get(retShape, retType.getElementType(),
-                                            newRetEncoding);
+            retWarpsPerCTA, retOrder, retEncoding.getCGALayout());
+    auto newRetType = retType.cloneWithEncoding(newRetEncoding);
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::CatOp>(
                       op, newRetType, adaptor.getOperands()),
                   adaptor.getAttributes());
@@ -364,9 +331,6 @@ struct TritonJoinOpPattern : public OpConversionPattern<triton::JoinOp> {
 
   LogicalResult matchAndRewrite(JoinOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
-    // Simply rely on type inference for this op.  (Notably, GenericOpPattern
-    // does not do this, instead it assigns the default layout to the ins and
-    // outs.)
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::JoinOp>(
                       op, adaptor.getLhs(), adaptor.getRhs()),
                   adaptor.getAttributes());
@@ -385,18 +349,8 @@ struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
     int rank = srcEnc.getOrder().size();
     auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
 
-    // The operand to split must have:
-    //  - a blocked layout, with
-    //  - sizePerThread = 2 in the last dimension,
-    //  - threadsPerWarp, warpsPerCTA, and CTAsPerCGA = 1 in the last dim, and
-    //  - the last dimension minor.
-    // If that's not the case, add a convert before the split.
     if (!srcEnc || srcEnc.getSizePerThread().back() != 2 ||
         srcEnc.getOrder().front() != rank - 1) {
-      // If we take the default encoding for the op's result (i.e. post-split)
-      // and add 1 to the end of each dim, that gives us what we want.  Other
-      // than making a legal src encoding, our choice of layout doesn't matter;
-      // it'll get fixed by RemoveLayoutConversions.
       auto defaultEnc = getDefaultBlockedEncoding(
           getContext(),
           cast<RankedTensorType>(op.getResult(0).getType()).getShape(),
@@ -415,18 +369,18 @@ struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
         return res;
       };
 
+      auto layout = defaultEnc.getCGALayout().getLinearLayout();
+      auto kBlock = StringAttr::get(getContext(), "block");
+      auto newDim = standardOutDimNames(getContext(), rank)[rank - 1];
+      layout *= LinearLayout::identity1D(1, kBlock, newDim);
       srcEnc = BlockedEncodingAttr::get(
           getContext(), append(defaultEnc.getSizePerThread(), 2),
           append(defaultEnc.getThreadsPerWarp(), 1),
           append(defaultEnc.getWarpsPerCTA(), 1),
           prepend(defaultEnc.getOrder(), rank - 1),
-          CTALayoutAttr::get(getContext(),
-                             append(defaultEnc.getCTAsPerCGA(), 1),
-                             append(defaultEnc.getCTASplitNum(), 1),
-                             prepend(defaultEnc.getCTAOrder(), rank - 1)));
-      srcTy = RankedTensorType::get(srcTy.getShape(), srcTy.getElementType(),
-                                    srcEnc);
-      src = rewriter.create<ConvertLayoutOp>(op.getLoc(), srcTy, src);
+          CGAEncodingAttr::get(getContext(), std::move(layout)));
+      srcTy = srcTy.cloneWithEncoding(srcEnc);
+      src = ConvertLayoutOp::create(rewriter, op.getLoc(), srcTy, src);
     }
 
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::SplitOp>(op, src),
@@ -456,7 +410,6 @@ struct TritonBroadcastPattern
     : public OpConversionPattern<triton::BroadcastOp> {
   using OpConversionPattern::OpConversionPattern;
 
-  // This creates a tensor with the new shape but the argument's layout
   LogicalResult
   matchAndRewrite(BroadcastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -464,9 +417,7 @@ struct TritonBroadcastPattern
     auto srcEncoding = srcType.getEncoding();
     if (!srcEncoding)
       return failure();
-    Type retType = RankedTensorType::get(
-        op.getType().getShape(), op.getType().getElementType(), srcEncoding);
-    // Type retType = this->getTypeConverter()->convertType(op.getType());
+    Type retType = op.getType().cloneWithEncoding(srcEncoding);
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::BroadcastOp>(
                       op, retType, adaptor.getOperands()),
                   adaptor.getAttributes());
@@ -480,8 +431,8 @@ struct TritonReducePattern : public OpConversionPattern<triton::ReduceOp> {
   LogicalResult
   matchAndRewrite(triton::ReduceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto newReduce = rewriter.create<triton::ReduceOp>(
-        op.getLoc(), adaptor.getOperands(), adaptor.getAxis());
+    auto newReduce = triton::ReduceOp::create(
+        rewriter, op.getLoc(), adaptor.getOperands(), adaptor.getAxis());
     addNamedAttrs(newReduce, adaptor.getAttributes());
 
     auto &newCombineOp = newReduce.getCombineOp();
@@ -498,8 +449,9 @@ struct TritonScanPattern : public OpConversionPattern<triton::ScanOp> {
   LogicalResult
   matchAndRewrite(triton::ScanOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto newScan = rewriter.create<triton::ScanOp>(
-        op.getLoc(), adaptor.getOperands(), adaptor.getAxis(), op.getReverse());
+    auto newScan =
+        triton::ScanOp::create(rewriter, op.getLoc(), adaptor.getOperands(),
+                               adaptor.getAxis(), op.getReverse());
     addNamedAttrs(newScan, adaptor.getAttributes());
 
     auto &newCombineOp = newScan.getCombineOp();
@@ -510,51 +462,28 @@ struct TritonScanPattern : public OpConversionPattern<triton::ScanOp> {
   }
 };
 
-class TritonFuncOpPattern : public OpConversionPattern<triton::FuncOp> {
-public:
+struct TritonMapElementwisePattern
+    : public OpConversionPattern<triton::MapElementwiseOp> {
   using OpConversionPattern::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(triton::FuncOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::MapElementwiseOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto converter = getTypeConverter();
-    TypeConverter::SignatureConversion result(op.getNumArguments());
-    auto newOp = rewriter.replaceOpWithNewOp<triton::FuncOp>(
-        op, op.getName(), op.getFunctionType());
-    addNamedAttrs(newOp, adaptor.getAttributes());
-    rewriter.inlineRegionBefore(op.getBody(), newOp.getBody(),
-                                newOp.getBody().end());
-    // Convert just the entry block. The remaining unstructured control flow is
-    // converted by br patterns.
-    if (!newOp.getBody().empty())
-      rewriter.applySignatureConversion(&newOp.getBody().front(), result,
-                                        converter);
-    return success();
-  }
-};
+    SmallVector<Type> resultTys;
+    auto err = converter->convertTypes(op.getResults().getType(), resultTys);
+    if (failed(err)) {
+      return err;
+    }
 
-class TritonCallOpPattern : public OpConversionPattern<triton::CallOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
+    auto newMapOp = triton::MapElementwiseOp::create(
+        rewriter, op.getLoc(), resultTys, adaptor.getOperands(), op.getPack());
+    addNamedAttrs(newMapOp, adaptor.getAttributes());
 
-  LogicalResult
-  matchAndRewrite(triton::CallOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto newOp = rewriter.replaceOpWithNewOp<triton::CallOp>(
-        op, op.getCallee(), op.getResultTypes(), adaptor.getOperands());
-    addNamedAttrs(newOp, adaptor.getAttributes());
-    return success();
-  }
-};
-
-class TritonReturnOpPattern : public OpConversionPattern<ReturnOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(ReturnOp op, ReturnOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<ReturnOp>(op, adaptor.getOperands());
+    auto &newScalarOp = newMapOp.getScalarOp();
+    rewriter.cloneRegionBefore(op.getScalarOp(), newScalarOp,
+                               newScalarOp.end());
+    rewriter.replaceOp(op, newMapOp.getResult());
     return success();
   }
 };
@@ -562,17 +491,15 @@ public:
 void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
                             RewritePatternSet &patterns, unsigned numCTAs) {
   MLIRContext *context = patterns.getContext();
-  patterns.insert< // TODO: view should have custom pattern that views the
-                   // layout
+  patterns.insert<
       // clang-format off
-      GenericOpPattern<triton::AdvanceOp>,
-      GenericOpPattern<triton::MakeTensorPtrOp>,
       GenericOpPattern<triton::ReshapeOp>,
       GenericOpPattern<triton::BitcastOp>,
       GenericOpPattern<triton::FpToFpOp>,
       GenericOpPattern<triton::IntToPtrOp>,
       GenericOpPattern<triton::PtrToIntOp>,
       GenericOpPattern<triton::SplatOp>,
+      GenericOpPattern<triton::UnsplatOp>,
       GenericOpPattern<triton::AddPtrOp>,
       TritonBroadcastPattern,
       TritonCatPattern,
@@ -591,6 +518,7 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       TritonExpandDimsPattern,
       TritonTransPattern,
       TritonDotPattern,
+      TritonMapElementwisePattern,
       GatherScatterOpPattern<DescriptorGatherOp>,
       GatherScatterOpPattern<DescriptorScatterOp>,
       GenericOpPattern<triton::LoadOp>,
@@ -606,18 +534,14 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::DescriptorStoreOp>,
       GenericOpPattern<triton::DescriptorReduceOp>,
       // this assumes the right layout will be set later for dot scaled.
-      GenericOpPattern<triton::DotScaledOp>,
-      GenericOpPattern<triton::CallOp>,
-      GenericOpPattern<ReturnOp>,
-      TritonFuncOpPattern
+      GenericOpPattern<triton::DotScaledOp>
       // clang-format on
       >(typeConverter, context);
 }
-// Proton patterns
-// NOTE: Because Proton's inputs are scalars and not tensors this conversion
-// isn't strictly necessary however you could envision a case where we pass in
-// tensors in for Triton object specific tracing operations in which case we
-// would need to fill in the OpConversionPattern
+
+// ---------------------------------------------------------------------------
+// Proton patterns (Triton-distributed extension)
+// ---------------------------------------------------------------------------
 void populateProtonPatterns(TritonGPUTypeConverter &typeConverter,
                             RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
@@ -625,7 +549,9 @@ void populateProtonPatterns(TritonGPUTypeConverter &typeConverter,
                                                            context);
 }
 
-// Distributed patterns
+// ---------------------------------------------------------------------------
+// Distributed patterns (Triton-distributed extension)
+// ---------------------------------------------------------------------------
 void populateDistributedPatterns(TritonGPUTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
@@ -648,7 +574,7 @@ Value promoteToShared(Value val, RewriterBase &rewriter, Location loc) {
   Value alloc = rewriter.create<triton::gpu::LocalAllocOp>(loc, newMemDescType);
   rewriter.create<triton::gpu::LocalStoreOp>(loc, val, alloc);
   return alloc;
-};
+}
 
 struct SIMTExecRegionPattern
     : public OpConversionPattern<simt::SIMTExecRegionOp> {
@@ -733,11 +659,8 @@ void populateTensorPatterns(TritonGPUTypeConverter &typeConverter,
 //
 // SCF patterns
 //
-// This is borrowed from ConvertForOpTypes in
-//    SCF/Transforms/StructuralTypeConversions.cpp
 struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
   using OpConversionPattern::OpConversionPattern;
-  // Ref: ConvertForOpTypes
   LogicalResult
   matchAndRewrite(scf::ForOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -745,22 +668,11 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
         cast<scf::ForOp>(rewriter.cloneWithoutRegions(*op.getOperation()));
     rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
                                 newOp.getRegion().end());
-
-    // Now, update all the types.
-
-    // Convert the types of block arguments within the given region. This
-    // replaces each block with a new block containing the updated signature.
-    // The entry block may have a special conversion if `entryConversion` is
-    // provided. On success, the new entry block to the region is returned for
-    // convenience. Otherwise, failure is returned.
     if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
                                            *getTypeConverter()))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
-    // Change the clone to use the updated operands. We could have cloned with
-    // a IRMapping, but this seems a bit more direct.
     newOp->setOperands(adaptor.getOperands());
-    // Update the result types to the new converted types.
     SmallVector<Type> newResultTypes;
     for (Type type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
@@ -777,24 +689,12 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
   }
 };
 
-// This is borrowed from ConvertFIfOpTypes in
-//    SCF/Transforms/StructuralTypeConversions.cpp
 class SCFIfPattern : public OpConversionPattern<scf::IfOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
   matchAndRewrite(scf::IfOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // TODO: Generalize this to any type conversion, not just 1:1.
-    //
-    // We need to implement something more sophisticated here that tracks which
-    // types convert to which other types and does the appropriate
-    // materialization logic.
-    // For example, it's possible that one result type converts to 0 types and
-    // another to 2 types, so newResultTypes would at least be the right size to
-    // not crash in the llvm::zip call below, but then we would set the the
-    // wrong type on the SSA values! These edge cases are also why we cannot
-    // safely use the TypeConverter::convertTypes helper here.
     SmallVector<Type> newResultTypes;
     for (auto type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
@@ -803,8 +703,6 @@ public:
       newResultTypes.push_back(newType);
     }
 
-    // See comments in the ForOp pattern for why we clone without regions and
-    // then inline.
     scf::IfOp newOp =
         cast<scf::IfOp>(rewriter.cloneWithoutRegions(*op.getOperation()));
     rewriter.inlineRegionBefore(op.getThenRegion(), newOp.getThenRegion(),
@@ -812,7 +710,6 @@ public:
     rewriter.inlineRegionBefore(op.getElseRegion(), newOp.getElseRegion(),
                                 newOp.getElseRegion().end());
 
-    // Update the operands and types.
     newOp->setOperands(adaptor.getOperands());
     for (auto t : llvm::zip(newOp.getResults(), newResultTypes))
       std::get<0>(t).setType(std::get<1>(t));
@@ -821,8 +718,6 @@ public:
   }
 };
 
-// This is borrowed from ConvertFIfOpTypes in
-//    SCF/Transforms/StructuralTypeConversions.cpp
 class SCFWhilePattern : public OpConversionPattern<scf::WhileOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -836,8 +731,8 @@ public:
     if (failed(converter->convertTypes(op.getResultTypes(), newResultTypes)))
       return failure();
 
-    auto newOp = rewriter.create<scf::WhileOp>(op.getLoc(), newResultTypes,
-                                               adaptor.getOperands());
+    auto newOp = scf::WhileOp::create(rewriter, op.getLoc(), newResultTypes,
+                                      adaptor.getOperands());
     for (auto i : {0u, 1u}) {
       auto &dstRegion = newOp.getRegion(i);
       rewriter.inlineRegionBefore(op.getRegion(i), dstRegion, dstRegion.end());
@@ -916,7 +811,14 @@ void populateCFPatterns(TritonGPUTypeConverter &typeConverter,
   MLIRContext *context = patterns.getContext();
   patterns.add<CFCondBranchPattern, CFBranchPattern>(typeConverter, context);
 }
+
+// ---------------------------------------------------------------------------
+// SIMT region promotion (Triton-distributed extension)
 //
+// A second conversion phase: for register tensors that are produced/consumed
+// inside a `simt.simt_exec_region`, promote them to shared memory descriptors
+// so the region body operates on shared memory.
+// ---------------------------------------------------------------------------
 
 Value unrealizedCastMaterialization(OpBuilder &builder, Type type,
                                     ValueRange inputs, Location loc) {
@@ -932,10 +834,7 @@ public:
         numCTAs(numCTAs) {
     addConversion([](Type type) { return type; });
 
-    // Add encoding for tensor
     addConversion([this](RankedTensorType tensorType) -> MemDescType {
-      // types with encoding are already in the right format
-      // TODO: check for layout encodings more specifically
       if (!tensorType.getEncoding()) {
         ArrayRef<int64_t> shape = tensorType.getShape();
         triton::gpu::BlockedEncodingAttr encoding =
@@ -953,15 +852,11 @@ public:
       return memDescType;
     });
 
-    // Add encoding for tensor pointer
     addConversion([this](triton::PointerType ptrType) -> triton::PointerType {
-      // Check whether tensor pointer `tt.ptr<tensor<>>`
       auto pointeeTensorType =
           dyn_cast<RankedTensorType>(ptrType.getPointeeType());
       if (pointeeTensorType == nullptr)
         return ptrType;
-
-      // Add layout into the tensor
       auto convertedTensorType = convertType(pointeeTensorType);
       return triton::PointerType::get(convertedTensorType,
                                       ptrType.getAddressSpace());
@@ -996,7 +891,6 @@ struct TensorExtractPromotionPattern
 
     auto isValueOutOfRegion = [&](Value value) -> bool {
       Region *defRegion;
-
       if (auto blockArg = dyn_cast<BlockArgument>(value)) {
         Block *block = blockArg.getOwner();
         defRegion = block->getParent();
@@ -1023,17 +917,13 @@ struct TensorExtractPromotionPattern
     {
       OpBuilder::InsertionGuard g(rewriter);
       rewriter.setInsertionPoint(simtExecRegionOp);
-      // some tensors that are only read by op within simt region are not
-      // captured by SIMTExecRegionOp
       if (isValueOutOfRegion(adaptor.getTensor())) {
-        // promote the origin tensor, not the converted.
         src = promoteToShared(op.getTensor(), rewriter, op->getLoc());
       } else {
         src = adaptor.getTensor();
       }
     }
 
-    SmallVector<Type> retTypes;
     auto srcType = src.getType();
     if (auto memDescType = dyn_cast<MemDescType>(srcType)) {
       auto newOp = rewriter.create<simt::LoadSharedOp>(op->getLoc(), src,
@@ -1055,11 +945,10 @@ struct TensorInsertPromotionPattern
   matchAndRewrite(tensor::InsertOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto srcType = adaptor.getDest().getType();
-    SmallVector<Type> retTypes;
     if (auto memDescType = dyn_cast<MemDescType>(srcType)) {
-      auto newOp = rewriter.create<simt::StoreSharedOp>(
-          op->getLoc(), adaptor.getScalar(), adaptor.getDest(),
-          adaptor.getIndices());
+      rewriter.create<simt::StoreSharedOp>(op->getLoc(), adaptor.getScalar(),
+                                           adaptor.getDest(),
+                                           adaptor.getIndices());
       rewriter.replaceOp(op, adaptor.getDest());
     } else {
       return failure();
@@ -1068,10 +957,8 @@ struct TensorInsertPromotionPattern
   }
 };
 
-// This is borrowed from SCFForOpPattern
 struct SCFForOpPromotionPattern : public OpConversionPattern<scf::ForOp> {
   using OpConversionPattern::OpConversionPattern;
-  // Ref: ConvertForOpTypes
   LogicalResult
   matchAndRewrite(scf::ForOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1079,22 +966,11 @@ struct SCFForOpPromotionPattern : public OpConversionPattern<scf::ForOp> {
         cast<scf::ForOp>(rewriter.cloneWithoutRegions(*op.getOperation()));
     rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
                                 newOp.getRegion().end());
-
-    // Now, update all the types.
-
-    // Convert the types of block arguments within the given region. This
-    // replaces each block with a new block containing the updated signature.
-    // The entry block may have a special conversion if `entryConversion` is
-    // provided. On success, the new entry block to the region is returned for
-    // convenience. Otherwise, failure is returned.
     if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
                                            *getTypeConverter()))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
-    // Change the clone to use the updated operands. We could have cloned with
-    // a IRMapping, but this seems a bit more direct.
     newOp->setOperands(adaptor.getOperands());
-    // Update the result types to the new converted types.
     SmallVector<Type> newResultTypes;
     for (Type type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
@@ -1110,7 +986,6 @@ struct SCFForOpPromotionPattern : public OpConversionPattern<scf::ForOp> {
   }
 };
 
-// This is borrowed from SCFIfOpPattern
 class SCFIfOpPromotionPattern : public OpConversionPattern<scf::IfOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -1143,11 +1018,9 @@ public:
 struct SIMTExecRegionPromotionPattern
     : public OpConversionPattern<simt::SIMTExecRegionOp> {
   using OpConversionPattern::OpConversionPattern;
-  // Ref: ConvertForOpTypes
   LogicalResult
   matchAndRewrite(simt::SIMTExecRegionOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // move to SIMTExecRegionPattern?
     IRMapping mapping;
     SmallVector<int64_t> argMapIndices;
     SmallVector<Value> newInitArgs;
@@ -1176,8 +1049,6 @@ struct SIMTExecRegionPromotionPattern
     }
     // Erase the empty block that was inserted by the builder.
     rewriter.eraseBlock(&newRegion.front());
-    // Clone the loop body and remap the block arguments of the collapsed loops
-    // (inlining does not support a cancellable block argument mapping).
     rewriter.cloneRegionBefore(op.getRegion(), newOp.getRegion(),
                                newOp.getRegion().begin(), mapping);
     if (auto yieldOp =
@@ -1190,28 +1061,12 @@ struct SIMTExecRegionPromotionPattern
       rewriter.setInsertionPoint(yieldOp);
       rewriter.replaceOpWithNewOp<simt::BlockYieldOp>(yieldOp, yieldResult);
     }
-    // region.cloneInto(&newRegion, bvm);
-    // rewriter.cloneRegionBefore(op.getRegion(), newOp.getRegion(),
-    //                            newOp.getRegion().end(), bvm);
-    // auto newOp = cast<simt::SIMTExecRegionOp>(
-    //     rewriter.cloneWithoutRegions(*op.getOperation()));
-    // rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
-    //                             newOp.getRegion().end());
 
-    // Now, update all the types.
-
-    // Convert the types of block arguments within the given region. This
-    // replaces each block with a new block containing the updated signature.
-    // The entry block may have a special conversion if `entryConversion` is
-    // provided. On success, the new entry block to the region is returned for
-    // convenience. Otherwise, failure is returned.
     if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
                                            *getTypeConverter()))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
 
-    // Change the clone to use the updated operands. We could have cloned with
-    // a IRMapping, but this seems a bit more direct.
     rewriter.replaceOp(op, newResults);
 
     return success();
@@ -1224,24 +1079,24 @@ void populateSIMTReigonPromotionPattern(SIMTRegionTypeConverter &typeConverter,
   // tensor dialect
   patterns.add<TensorInsertPromotionPattern, TensorExtractPromotionPattern>(
       typeConverter, context);
-
   // scf dialect
   patterns.add<SCFForOpPromotionPattern, GenericOpPattern<scf::YieldOp>,
                SCFIfOpPromotionPattern>(typeConverter, context);
-
   // simt dialect
   patterns.add<SIMTExecRegionPromotionPattern,
                GenericOpPattern<simt::BlockYieldOp>>(typeConverter, context);
 }
 
-// Modified from the upstream ConvertTritonToTritonGPU, add simt and distributed
-// extensions
+// ---------------------------------------------------------------------------
+// Pass
+// ---------------------------------------------------------------------------
 class ConvertTritonDistributedToTritonGPU
-    : public ConvertTritonDistributedToTritonGPUBase<
+    : public mlir::triton::impl::ConvertTritonDistributedToTritonGPUBase<
           ConvertTritonDistributedToTritonGPU> {
 public:
-  ConvertTritonDistributedToTritonGPU() = default;
-  // constructor with some parameters set explicitly.
+  using ConvertTritonDistributedToTritonGPUBase::
+      ConvertTritonDistributedToTritonGPUBase;
+
   ConvertTritonDistributedToTritonGPU(const std::string &target, int numWarps,
                                       int threadsPerWarp, int numCTAs,
                                       bool enableSourceRemat) {
@@ -1254,20 +1109,20 @@ public:
 
   void runOnOperation() override {
     if (target.getValue().empty()) {
-      mlir::emitError(
-          getOperation().getLoc(),
-          "'convert-triton-to-tritongpu' requires 'target' option to be set");
+      mlir::emitError(getOperation().getLoc(),
+                      "'convert-triton-distributed-to-tritongpu' requires "
+                      "'target' option to be set");
       return signalPassFailure();
     }
 
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
-    // type converter
     TritonGPUTypeConverter typeConverter(context, numWarps, threadsPerWarp,
                                          numCTAs, enableSourceRemat);
     TritonGPUConversionTarget target(*context, typeConverter);
 
-    // triton distributed extension
+    // triton distributed extension: tensor / simt / distributed ops are legal
+    // once their regions and operands type-check.
     target.addDynamicallyLegalDialect<tensor::TensorDialect,
                                       triton::simt::SIMTDialect,
                                       triton::distributed::DistributedDialect>(
@@ -1276,29 +1131,25 @@ public:
           for (auto &region : op->getRegions()) {
             hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
           }
-          if (hasLegalRegions && typeConverter.isLegal(op)) {
-            return true;
-          }
-          return false;
+          return hasLegalRegions && typeConverter.isLegal(op);
         });
 
-    // rewrite patterns
     RewritePatternSet patterns(context);
-    // add rules
     populateArithPatternsAndLegality(typeConverter, patterns, target);
     populateMathPatternsAndLegality(typeConverter, patterns, target);
+    // Triton 3.7.1's populateFunctionTypeConversions registers FuncOp signature
+    // + tt.call/tt.return type conversions directly. (The FuncArgRenamer
+    // overload is a 3.8-only addition for argument-name preservation and is
+    // unavailable here; the two-arg form is the upstream 3.7.1 signature.)
+    populateFunctionTypeConversions(typeConverter, patterns);
     populateTritonPatterns(typeConverter, patterns, numCTAs);
     populateProtonPatterns(typeConverter, patterns);
     populateDistributedPatterns(typeConverter, patterns);
     populateTensorPatterns(typeConverter, patterns);
     populateSIMTPatterns(typeConverter, patterns);
-    // TODO: can we use
-    //    mlir::scf::populateSCFStructurealTypeConversionsAndLegality(...) here?
     populateSCFPatterns(typeConverter, patterns);
     populateCFPatterns(typeConverter, patterns);
     patterns.insert<GenericOpPattern<ub::PoisonOp>>(typeConverter, context);
-
-    auto inti = llvm::APSInt(32, false);
 
     Builder b(&getContext());
     mod->setAttr(AttrNumWarpsName, b.getI32IntegerAttr(numWarps));
@@ -1309,20 +1160,11 @@ public:
     if (failed(applyPartialConversion(mod, target, std::move(patterns))))
       return signalPassFailure();
 
-    // update layouts
-    //  broadcast src => multicast, dst => broadcasted
-    // if (failed(target.refineLayouts(mod, numWarps)))
-    //   return signalPassFailure();
-
-    LLVM_DEBUG({ DBGS() << "after TritonGPUConversion = \n" << mod << "\n"; });
-
     // promote memory space in simt region to ttg.memdesc
     {
       ConversionTarget target(*context);
       target.addLegalDialect<triton::gpu::TritonGPUDialect>();
       target.addLegalOp<UnrealizedConversionCastOp>();
-
-      // Some ops from SCF are illegal
       target.addIllegalOp<scf::ExecuteRegionOp, scf::ParallelOp, scf::ReduceOp,
                           scf::ReduceReturnOp>();
 
@@ -1341,10 +1183,7 @@ public:
         for (auto &region : op->getRegions()) {
           hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
         }
-        if (hasLegalRegions && typeConverter.isLegal(op)) {
-          return true;
-        }
-        return false;
+        return hasLegalRegions && typeConverter.isLegal(op);
       });
 
       RewritePatternSet patterns(context);
@@ -1355,12 +1194,9 @@ public:
       }
     }
 
-    LLVM_DEBUG({ DBGS() << "after simt promotion = \n" << mod << "\n"; });
-
-    // clean up: ForOp/IfOp dead arg elimination
+    // clean up: ForOp/IfOp dead arg elimination via canonicalization.
     {
       RewritePatternSet cleanUpPatterns(context);
-      populateForOpDeadArgumentElimination(cleanUpPatterns);
       scf::ForOp::getCanonicalizationPatterns(cleanUpPatterns, context);
       scf::IfOp::getCanonicalizationPatterns(cleanUpPatterns, context);
       ConvertLayoutOp::getCanonicalizationPatterns(cleanUpPatterns, context);

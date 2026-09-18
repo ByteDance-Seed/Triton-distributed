@@ -199,7 +199,7 @@ def exchange_split_offset_2d_intra_node(
     barrier_all_intra_node_atomic_cas_block(rank, rank, world_size, symm_signal_ptr)
 
 
-@triton_dist.jit(do_not_specialize=["num_expert_per_rank"])
+@triton_dist.jit
 def all_to_all_v_2d_kernel(
     profiler_buf,
     in_splits_offsets,  # (2, nsplits), symmetric
@@ -293,7 +293,7 @@ def all_to_all_v_2d_kernel(
     profiler = profiler.record(is_start=False, task_type=3)
 
 
-@triton_dist.jit(do_not_specialize=["num_expert_per_rank", "stage"])
+@triton_dist.jit(do_not_specialize=["stage"])
 def all_to_all_v_2d_kernel_v2(
         profiler_buf, input, output, input_splits,  # (nsplits,), local
         output_splits,  # (nsplits,), local

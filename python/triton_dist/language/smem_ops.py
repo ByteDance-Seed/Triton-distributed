@@ -27,6 +27,7 @@ import math
 import triton.language as tl
 from triton.language import core as tlc
 from triton.language.core import builtin, constexpr
+from triton_dist._plugin import require_ext_module as _ext
 
 # MLIR/NVVM generic AS for pointers from shared memdesc (matches LLVM ptr addrspace(0)).
 SMEM_GENERIC_POINTER_ADDR_SPACE = 0
@@ -71,6 +72,15 @@ class SharedMemoryDesc(tlc.tensor):
             int(per_phase),
             int(max_phase),
         )
+        # Cache the concrete ttg.MemDescType ir.type from the handle so that
+        # passing this desc across a nested @jit boundary (which needs the type
+        # for the tt.func signature) does not require rebuilding it / resolving
+        # the MLIRContext. Every SharedMemoryDesc is backed by a handle whose
+        # type IS the memdesc type.
+        try:
+            self.type._ir_type = handle.get_type()
+        except Exception:  # pragma: no cover - defensive (proxy handles)
+            pass
         self.dtype = element_ty
         self.shape = tuple(constexpr(s) for s in shape)
         self.numel = constexpr(math.prod(shape))
@@ -90,7 +100,7 @@ class SharedMemoryDesc(tlc.tensor):
 class SharedMemDescType(tlc.base_type):
     """Frontend type for ``ttg`` shared memdesc (matches ``local_alloc`` / subview)."""
 
-    __slots__ = ("element_ty", "shape", "alloc_shape", "vec", "per_phase", "max_phase")
+    __slots__ = ("element_ty", "shape", "alloc_shape", "vec", "per_phase", "max_phase", "_ir_type")
 
     def __init__(
         self,
@@ -107,6 +117,10 @@ class SharedMemDescType(tlc.base_type):
         self.vec = int(vec)
         self.per_phase = int(per_phase)
         self.max_phase = int(max_phase)
+        # Concrete ttg.MemDescType ir.type, cached from the backing handle when
+        # available (see SharedMemoryDesc.__init__). Excluded from eq/hash/mangle
+        # since it is per-compilation context state, not type identity.
+        self._ir_type = None
 
     @staticmethod
     def is_block() -> bool:
@@ -149,12 +163,11 @@ class SharedMemDescType(tlc.base_type):
         return f"M{elt}S{sh}A{ah}V{self.vec}_{self.per_phase}_{self.max_phase}M"
 
     def _flatten_ir_types(self, builder, out):
-        rank = len(self.shape)
-        order = list(range(rank - 1, -1, -1))
-        elem_ir_ty = self.element_ty.to_ir(builder)
-        layout = builder.get_swizzled_shared_layout(self.vec, self.per_phase, self.max_phase, order)
-        memdesc_ty = builder.get_shared_mem_desc_ty(elem_ir_ty, list(self.shape), layout, list(self.alloc_shape))
-        out.append(memdesc_ty)
+        if self._ir_type is None:
+            raise RuntimeError("SharedMemDescType has no cached ir.type; a shared memdesc must be "
+                               "created via allocate_smem/smem_index (which carry the handle) before "
+                               "being passed across a @jit boundary.")
+        out.append(self._ir_type)
 
     def _unflatten_ir(self, handles, cursor):
         v = SharedMemoryDesc(
@@ -237,15 +250,20 @@ def allocate_smem(element_ty, shape, vec: constexpr = constexpr(1), per_phase: c
     pp_val = per_phase.value if isinstance(per_phase, constexpr) else per_phase
     mp_val = max_phase.value if isinstance(max_phase, constexpr) else max_phase
 
-    rank = len(shape)
-    order = list(range(rank - 1, -1, -1))
-
     builder = _semantic.builder
     elem_ir_ty = element_ty.to_ir(builder)
-    layout = builder.get_swizzled_shared_layout(vec_val, pp_val, mp_val, order)
     alloc_shape = list(shape)
-    memdesc_ty = builder.get_shared_mem_desc_ty(elem_ir_ty, shape, layout, alloc_shape)
-    handle = builder.create_local_alloc(memdesc_ty)
+    # The element type is carried by a (dead) poison value of that type; the
+    # swizzle params and shape are i32 constants. The plugin's `local_alloc`
+    # builder reconstructs the swizzled ttg.MemDescType in C++.
+    elem_carrier = builder.create_poison(elem_ir_ty)
+    operands = [
+        elem_carrier,
+        builder.get_int32(vec_val),
+        builder.get_int32(pp_val),
+        builder.get_int32(mp_val),
+    ] + [builder.get_int32(s) for s in shape]
+    handle = _ext().distributed_local_alloc(builder, operands)
     return SharedMemoryDesc(
         handle,
         element_ty,
@@ -284,14 +302,10 @@ def smem_index(smem, index, _semantic=None):
 
     sub_shape = smem.smem_shape[1:]
     sub_alloc_shape = sub_shape
-    elem_ir_ty = smem.element_ty.to_ir(builder)
-    rank = len(sub_shape)
-    order = list(range(rank - 1, -1, -1))
-    layout = builder.get_swizzled_shared_layout(1, 1, 1, order)
-    sub_memdesc_ty = builder.get_shared_mem_desc_ty(elem_ir_ty, sub_shape, layout, sub_alloc_shape)
-
-    offsets = [idx_val] + [builder.get_int32(0)] * (len(smem.smem_shape) - 1)
-    handle = builder.create_memdesc_subview(sub_memdesc_ty, smem.handle, offsets)
+    # ttg.memdesc_index: index the leading dim, dropping it. The result
+    # sub-descriptor type (sub_shape, swizzle 1/1/1) is reconstructed by the
+    # plugin's `memdesc_subview` builder from the parent memdesc type.
+    handle = _ext().distributed_memdesc_subview(builder, [smem.handle, idx_val])
     return SharedMemoryDesc(
         handle,
         smem.element_ty,
@@ -308,7 +322,7 @@ def smem_load(smem, indices, _semantic=None):
     """Load a scalar element from shared memory at given indices."""
     handle, element_ty = _memdesc_handle_and_element_ty(smem, "smem_load")
     idx_handles = [_to_ir_index(i, _semantic) for i in indices]
-    result = _semantic.builder.create_load_shared(handle, idx_handles)
+    result = _ext().distributed_load_shared(_semantic.builder, [handle, *idx_handles])
     return tlc.tensor(result, element_ty)
 
 
@@ -323,7 +337,7 @@ def smem_store(smem, value, indices, _semantic=None):
     handle, _ = _memdesc_handle_and_element_ty(smem, "smem_store")
     val_handle = _to_ir_stored_scalar(value, _semantic)
     idx_handles = [_to_ir_index(i, _semantic) for i in indices]
-    _semantic.builder.create_store_shared(val_handle, handle, idx_handles)
+    _ext().distributed_store_shared(_semantic.builder, [val_handle, handle, *idx_handles])
 
 
 @builtin
@@ -336,7 +350,10 @@ def smem_get_ptr(smem, indices=None, _semantic=None):
     builder = _semantic.builder
     idx_handles = [_to_ir_index(i, _semantic) for i in (indices or [])]
     ptr_ty = _smem_generic_ptr_ty(element_ty)
-    result = builder.create_memdesc_to_ptr(handle, idx_handles, ptr_ty.to_ir(builder))
+    # The builder derives the pointer element type from the memdesc and the
+    # address space from this i32 constant.
+    addr_space = builder.get_int32(SMEM_GENERIC_POINTER_ADDR_SPACE)
+    result = _ext().distributed_memdesc_to_ptr(builder, [handle, addr_space, *idx_handles])
     return tlc.tensor(result, ptr_ty)
 
 
@@ -354,7 +371,8 @@ def get_smem_shared_address_u32(smem, indices=None, _semantic=None):
     builder = _semantic.builder
     idx_handles = [_to_ir_index(i, _semantic) for i in (indices or [])]
     ptr_ty = _smem_generic_ptr_ty(element_ty)
-    ptr_handle = builder.create_memdesc_to_ptr(handle, idx_handles, ptr_ty.to_ir(builder))
+    addr_space = builder.get_int32(SMEM_GENERIC_POINTER_ADDR_SPACE)
+    ptr_handle = _ext().distributed_memdesc_to_ptr(builder, [handle, addr_space, *idx_handles])
     generic_ptr = tlc.tensor(ptr_handle, ptr_ty)
     ptr_u64 = tl.cast(generic_ptr, tl.uint64, bitcast=True, _semantic=_semantic)
     return tl.inline_asm_elementwise(
@@ -385,7 +403,7 @@ def smem_dealloc(smem, _semantic=None):
     compiler inserts deallocs automatically.
     """
     handle, _ = _memdesc_handle_and_element_ty(smem, "smem_dealloc")
-    _semantic.builder.create_local_dealloc(handle)
+    _ext().distributed_local_dealloc(_semantic.builder, [handle])
 
 
 __all__ = [

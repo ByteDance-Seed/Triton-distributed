@@ -221,6 +221,7 @@ def _prebuild_ep_overlap(args: argparse.Namespace) -> None:
     if rank == 0:
         print(json.dumps(kernels.cutedsl_cache.stats(), indent=2, sort_keys=True))
     torch.distributed.barrier()
+    kernels.finalize()
     torch.distributed.destroy_process_group()
 
 

@@ -22,6 +22,8 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+import importlib
+
 from .ep_a2a_intra_node import (
     kernel_dispatch_token_intra_node,
     kernel_skipped_token_local_dispatch_intra_node,
@@ -31,18 +33,20 @@ from .ep_a2a_intra_node import (
 )
 from .low_latency_all_to_all import create_all_to_all_context, fast_all_to_all, all_to_all_post_process
 
-try:
-    from .allgather_gemm import ag_gemm_intra_node, create_ag_gemm_intra_node_context
-    from .gemm_reduce_scatter import gemm_rs_intra_node, create_gemm_rs_intra_node_context
-except ImportError as e:
-    import warnings
-    warnings.warn(f"allgather_gemm/gemm_reduce_scatter unavailable (pyrocshmem not installed): {e}")
+# The AG-GEMM / GEMM-RS kernels are rocshmem-specific (they import ``pyrocshmem``
+# at module load). Import them lazily (PEP 562) so that merely importing this
+# package -- e.g. for a backend-agnostic kernel like ``common_ops`` (grid
+# barriers) -- does NOT drag in a hard ``pyrocshmem`` dependency. Accessing an
+# AG-GEMM/GEMM-RS symbol still loads its module (and requires rocshmem), which is
+# the correct behaviour: those kernels are unusable without the rocshmem backend.
+_LAZY_SUBMODULES = {
+    "ag_gemm_intra_node": "allgather_gemm",
+    "create_ag_gemm_intra_node_context": "allgather_gemm",
+    "gemm_rs_intra_node": "gemm_reduce_scatter",
+    "create_gemm_rs_intra_node_context": "gemm_reduce_scatter",
+}
 
-__all__ = [
-    "ag_gemm_intra_node",
-    "create_ag_gemm_intra_node_context",
-    "gemm_rs_intra_node",
-    "create_gemm_rs_intra_node_context",
+__all__ = list(_LAZY_SUBMODULES) + [
     "kernel_dispatch_token_intra_node",
     "kernel_skipped_token_local_dispatch_intra_node",
     "kernel_skipped_token_inplace_local_combine_intra_node",
@@ -53,6 +57,9 @@ __all__ = [
     "all_to_all_post_process",
 ]
 
+# The fused intra-node EP dispatch/combine kernels are mori_shmem-based; import
+# them eagerly but tolerate a missing mori_shmem backend (warn, don't fail) so
+# the package stays importable on non-AMD hosts.
 try:
     from .ep_all2all_fused import (
         create_ep_a2a_fused_context,
@@ -75,3 +82,15 @@ try:
 except ImportError as e:
     import warnings
     warnings.warn(f"ep_all2all_fused unavailable (mori_shmem not installed): {e}")
+
+
+def __getattr__(name):
+    submod = _LAZY_SUBMODULES.get(name)
+    if submod is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(f".{submod}", __name__)
+    return getattr(module, name)
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + __all__)

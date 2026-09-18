@@ -140,6 +140,24 @@ def test_token_within_expert_offset_intranode(*, num_experts: int, topk: int, nu
     if num_token <= 0:
         raise ValueError(f"num_token must be > 0, got {num_token}")
 
+    # Empty local ranks are valid in EP.  The CUDA entry point must return
+    # empty offsets/histogram and zero expert counts without launching a
+    # zero-sized cooperative grid.
+    empty_indices = torch.empty((0, topk), device="cuda", dtype=torch.int32)
+    empty_offsets, empty_hist, empty_counts = (_ep.compute_stable_local_token_within_expert_offset_and_expert_counts(
+        empty_indices, num_experts, num_sm))
+    empty_offsets_only, empty_hist_only = (_ep.compute_stable_local_token_within_expert_offset(
+        empty_indices, num_experts, num_sm))
+    assert empty_offsets.shape == (0, topk)
+    assert empty_hist.shape == (0, num_experts + 1)
+    assert empty_offsets_only.shape == (0, topk)
+    assert empty_hist_only.shape == (0, num_experts + 1)
+    torch.testing.assert_close(empty_counts, torch.zeros_like(empty_counts), atol=0, rtol=0)
+    provided_counts = torch.full((num_experts + 1, ), 7, device="cuda", dtype=torch.int32)
+    _, _, provided_counts_out = (_ep.compute_stable_local_token_within_expert_offset_and_expert_counts(
+        empty_indices, num_experts, num_sm, provided_counts))
+    torch.testing.assert_close(provided_counts_out, torch.zeros_like(provided_counts_out), atol=0, rtol=0)
+
     # Profile behavior: local_num_token fixed to num_token.
     # Non-profile behavior: randomly pick token count in [1, num_token] each run.
     if do_profile:

@@ -1,3 +1,7 @@
+//
+// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+//
+
 #ifdef USE_MACA
 #include "TritonDistributed/Conversion/TritonDistributedToLLVM/TritonDistributedToLLVMPass.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"

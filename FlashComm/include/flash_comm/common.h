@@ -23,6 +23,12 @@
 
 #pragma once
 
+// Generated internode instantiation TUs receive one hidden size directly and
+// intentionally avoid this list dependency, so adding a size does not rebuild
+// every existing shard.
+#if !defined(FLASH_COMM_INTERNODE_INSTANTIATION)
+#include "flash_comm/ep/hidden_sizes.h"
+#endif
 #include <cstdlib>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -164,20 +170,7 @@ private:
   }
 
 #define SUPPORTED_HIDDEN_SIZES(OP, ...)                                        \
-  OP(1024, __VA_ARGS__)                                                        \
-  OP(1536, __VA_ARGS__)                                                        \
-  OP(2048, __VA_ARGS__)                                                        \
-  OP(2304, __VA_ARGS__)                                                        \
-  OP(2816, __VA_ARGS__)                                                        \
-  OP(3328, __VA_ARGS__)                                                        \
-  OP(3584, __VA_ARGS__)                                                        \
-  OP(3840, __VA_ARGS__)                                                        \
-  OP(4096, __VA_ARGS__)                                                        \
-  OP(5120, __VA_ARGS__)                                                        \
-  OP(6144, __VA_ARGS__)                                                        \
-  OP(7168, __VA_ARGS__)                                                        \
-  OP(8192, __VA_ARGS__)                                                        \
-  OP(12288, __VA_ARGS__)
+  FLASH_COMM_SUPPORTED_HIDDEN_SIZES(OP, __VA_ARGS__)
 
 // Token types: only BFloat16 for now
 #define SUPPORTED_TOKEN_TYPES(OP, ...)                                         \

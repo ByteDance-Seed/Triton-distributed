@@ -1,3 +1,7 @@
+//
+// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+//
+
 #include "c10/cuda/CUDAGuard.h"
 #include <ATen/ops/from_blob.h>
 #include <c10/core/ScalarType.h>

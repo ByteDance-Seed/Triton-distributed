@@ -486,41 +486,58 @@ def fence(semantic="monotonic", scope="agent", _semantic=None):
     )
 
 
-def _str_to_gpu_shfl_mode(mode_str):
-    # Must match mlir::gpu::ShuffleMode enum order:
-    #   XOR = 0, DOWN = 1, UP = 2, IDX = 3
-    ALL_SHFL_MODES = ["xor", "down", "up", "idx"]
+@core.extern
+def _mbcnt_lo(mask, base, _semantic=None):
+    return core.extern_elementwise("", "", [mask, base], {
+        (core.dtype("int32"), core.dtype("int32")): ("llvm.amdgcn.mbcnt.lo", core.dtype("int32")),
+    }, is_pure=True, _semantic=_semantic)
 
-    if mode_str not in ALL_SHFL_MODES:
-        raise RuntimeError(f"unexpected gpu shuffle mode, expected: {ALL_SHFL_MODES}, but got: {mode_str}")
 
-    return ALL_SHFL_MODES.index(mode_str)
+@core.extern
+def _mbcnt_hi(mask, base, _semantic=None):
+    return core.extern_elementwise("", "", [mask, base], {
+        (core.dtype("int32"), core.dtype("int32")): ("llvm.amdgcn.mbcnt.hi", core.dtype("int32")),
+    }, is_pure=True, _semantic=_semantic)
 
 
 @core.extern
 def laneid(_semantic=None):
-    return core.tensor(_semantic.builder.create_laneid(), core.int32)
+    # Lane id (0..wavefront-1) without a builder op (stock Triton 3.7.1 exposes no
+    # ``create_laneid``): count active lanes below this one via the ROCDL
+    # ``mbcnt.hi(-1, mbcnt.lo(-1, 0))`` idiom. Equivalent to the fork's
+    # ``gpu.lane_id`` -> ``arith.index_cast`` to i32.
+    lo = _mbcnt_lo(core.constexpr(-1), core.constexpr(0), _semantic=_semantic)
+    return _mbcnt_hi(core.constexpr(-1), lo, _semantic=_semantic)
 
 
 @core.extern
-def __shfl_sync_with_mode_i32(
-    value,
-    offset,
-    mode: core.constexpr = "up",
-    width: int = 64,
-    _semantic=None,
-):
-    shfl_mode = _str_to_gpu_shfl_mode(mode.value)
-    if isinstance(offset, core.constexpr):
-        offset = core.to_tensor(offset, _semantic=_semantic)
+def _ds_bpermute_i32(byte_addr, value, _semantic=None):
+    # Reads ``value`` from the lane addressed by ``byte_addr`` (= srcLane * 4).
+    return core.extern_elementwise("", "", [byte_addr, value], {
+        (core.dtype("int32"), core.dtype("int32")): ("llvm.amdgcn.ds.bpermute", core.dtype("int32")),
+    }, is_pure=True, _semantic=_semantic)
 
-    return core.tensor(
-        _semantic.builder.create_warp_shuffle(
-            value.handle,
-            offset.handle,
-            core.to_tensor(width, _semantic=_semantic).handle,
-            shfl_mode,
-        ), value.dtype)
+
+@triton.jit
+def __shfl_sync_with_mode_i32(value, offset, mode: tl.constexpr = "up", width: tl.constexpr = 64):
+    # Warp shuffle via the ``ds_bpermute`` intrinsic (stock Triton 3.7.1 exposes
+    # no ``create_warp_shuffle`` builder op). Every CUDA shuffle mode reduces to an
+    # absolute source-lane index, which bpermute consumes as a byte address
+    # (srcLane * 4). ``width`` is the wavefront width the callers operate on (64);
+    # up/down callers pre-clamp the source lane and dispatch through "idx".
+    lid = laneid()
+    if mode == "idx":
+        src = offset
+    elif mode == "xor":
+        src = lid ^ offset
+    elif mode == "up":
+        src = lid - offset
+    elif mode == "down":
+        src = lid + offset
+    else:
+        tl.static_assert(False, "unexpected gpu shuffle mode, expected one of: xor/down/up/idx")
+        src = offset
+    return _ds_bpermute_i32(src * 4, value)
 
 
 @triton.jit
@@ -578,10 +595,15 @@ def atomic_add_per_warp(barrier_ptr, value, scope: core.constexpr, semantic: cor
 
 @core.extern
 def load_v4_b32(ptr, _semantic=None):
-
+    # extern_call carries string attributes (lib/path/symbol) that the OpInfo
+    # plugin ABI cannot marshal, so it is built through the companion module
+    # (libtriton_dist_ext) rather than the removed builder.create_extern_call.
+    from triton_dist._plugin import require_ext_module
+    ext = require_ext_module()
     i32_ir = tl.int32.to_ir(_semantic.builder)
     ptr_val = _semantic.to_tensor(ptr)
-    op = _semantic.builder.create_extern_call("", "", "__triton_hip_load_v4_b32", [ptr_val.handle], [i32_ir] * 4, False)
+    op = ext.create_extern_call(_semantic.builder, "", "", "__triton_hip_load_v4_b32", [ptr_val.handle], [i32_ir] * 4,
+                                False)
     return (
         tl.tensor(op.get_result(0), tl.int32),
         tl.tensor(op.get_result(1), tl.int32),

@@ -224,6 +224,14 @@ def sort_topk_ids_align_block_size(
                                             device="cuda")  # this will be used as counter. zero before use.
     ntiles_by_expert_by_stage_acc = torch.empty((num_experts, num_ranks), dtype=torch.int32, device="cuda")
 
+    ntiles_next_pow_of_2 = triton.next_power_of_2(ntiles_pad_approx)
+    # The kernel does block-wide cross-lane reductions (cumsum/atomic_add over the
+    # full [ntiles_next_pow_of_2] and [num_experts, num_ranks] vectors). It must be
+    # launched with enough warps to cover those lanes, otherwise the per-stage
+    # histogram/offsets are computed on a truncated lane set and the tile->slot map
+    # is neither surjective nor injective (leaving output slots unwritten with stale
+    # garbage -> OOB expert ids / hangs downstream). Match threadblock_swizzle_ag_moe_triton.
+    swizzle_num_warps = max(ntiles_next_pow_of_2, 32) // 32
     threadblock_swizzle_ag_moe_kernel[(1, )](
         ntokens_by_rank_by_expert,
         # output
@@ -241,9 +249,10 @@ def sort_topk_ids_align_block_size(
         num_experts,
         num_ranks,
         num_local_ranks,
-        triton.next_power_of_2(ntiles_pad_approx),
+        ntiles_next_pow_of_2,
         BLOCK_SIZE_M=block_size,
         DEBUG=False,
+        num_warps=swizzle_num_warps,
     )
 
     return sorted_gather_index, expert_idx, tile_index, segment_start, segment_end, ntiles_pad_gpu

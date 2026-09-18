@@ -39,8 +39,10 @@ __forceinline__ __device__ void initialize_barrier(
         1) // Thread count expected to arrive/wait on this barrier
 {
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(smem_int_ptr),
-               "r"(thread_count));
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n"
+               :
+               : "r"(smem_int_ptr), "r"(thread_count)
+               : "memory");
 }
 
 // Set the number of bytes transferred per transaction and perform an arrive
@@ -50,9 +52,10 @@ __forceinline__ __device__ void mbar_arrive_and_set_barrier_transaction_bytes(
     uint32_t bytes) // Number of bytes transferred by per TMA transaction
 {
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
-  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
-                   smem_int_ptr),
-               "r"(bytes));
+  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared.b64 _, [%0], %1;\n"
+               :
+               : "r"(smem_int_ptr), "r"(bytes)
+               : "memory");
 }
 
 // Barrier wait
@@ -64,12 +67,15 @@ wait_barrier(uint64_t *smem_barrier_ptr, // 64 bits user-managed barrier in smem
   asm volatile("{\n"
                ".reg .pred                P1;\n"
                "LAB_WAIT:\n"
-               "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+               "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, "
+               "[%0], %1;\n"
                "@P1                       bra DONE;\n"
                "bra                   LAB_WAIT;\n"
                "DONE:\n"
-               "}\n" ::"r"(smem_int_ptr),
-               "r"(phase_bit));
+               "}\n"
+               :
+               : "r"(smem_int_ptr), "r"(phase_bit)
+               : "memory");
 }
 
 // Barrier arrive
@@ -79,8 +85,11 @@ __forceinline__ __device__ void arrive_barrier(
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(smem_barrier_ptr);
   asm volatile("{\n"
                ".reg .b64 state; \n"
-               "mbarrier.arrive.shared::cta.b64   state, [%0];\n"
-               "}\n" ::"r"(smem_int_ptr));
+               "mbarrier.arrive.release.cta.shared.b64 state, [%0];\n"
+               "}\n"
+               :
+               : "r"(smem_int_ptr)
+               : "memory");
 }
 
 __forceinline__ __device__ void
@@ -92,7 +101,7 @@ named_barrier_arrive_and_wait(uint32_t num_threads, uint32_t barrier_id) {
 }
 
 __forceinline__ __device__ void fence_async_shared() {
-  asm volatile("fence.proxy.async.shared::cta;");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
 __forceinline__ __device__ uint32_t elect_one_sync() {

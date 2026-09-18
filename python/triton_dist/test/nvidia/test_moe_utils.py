@@ -124,7 +124,8 @@ def test_reduce_topk(ntokens, topk, N, dtype: torch.dtype, n_split):
 
 
 def _triton_warmup():
-    triton.compiler.compiler.triton_key()  # warmup. don't include this into torch.profiler.
+    from triton.runtime.cache import triton_key
+    triton_key()  # warmup. don't include this into torch.profiler.
 
 
 if __name__ == "__main__":

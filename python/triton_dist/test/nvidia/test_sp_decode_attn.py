@@ -267,7 +267,6 @@ def perf_decode(args):
                 iters=100,
             )
         torch.distributed.barrier(args.default_group)
-        ths_op.finalize()
         dist_print(f"rank: {args.rank} KV len={kv_lens_per_rank[0]} Performance is {time_ms} ms", allowed_ranks="all",
                    need_sync=True)
         ths_op.finalize()

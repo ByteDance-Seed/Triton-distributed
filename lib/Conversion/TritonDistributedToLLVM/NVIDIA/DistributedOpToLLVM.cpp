@@ -194,18 +194,39 @@ struct WaitOpConversion
     // we only consider warp sync now
     // so numBarriers should be <= WARP_SIZE
     // otherwise, the behavior is undefined
+    // When a (software-pipeline) predicate is present, guard the entire
+    // spin-wait: if the predicate is false, skip straight to the warp sync.
+    // The i1 predicate is zero-extended to i32 and tested with setp inside the
+    // PTX (NVPTX inline asm has no portable predicate-register constraint).
+    Value predVal = adaptor.getPred();
+    const bool hasPred = static_cast<bool>(predVal);
+    Value predI32;
+    if (hasPred)
+      predI32 = rewriter.create<LLVM::ZExtOp>(loc, i32_ty, predVal);
+    const std::string predGuard =
+        hasPred
+            ? "setp.ne.u32 %p1, $3, 0;                               \n\t"s +
+                  "@!%p1 bra.uni skipLoop;                           \n\t"s
+            : ""s;
     const std::string ptx =
         "{                                                              \n\t"s +
         ".reg .pred %p<2>;                                              \n\t"s +
         ".reg .b32 %th<2>;                                              \n\t"s +
         ".reg .u64 %addr<2>;                                            \n\t"s +
         ".reg .b"s + bit_w + " %tmp<1>;                                 \n\t"s +
+        predGuard +
         "mov.u32 %th1, $1;                                              \n\t"s +
         "mov.u32 %th0, %tid.x;                                          \n\t"s +
         "rem.u32 %th0, %th0, 32;                                        \n\t"s +
         "mul.wide.s32 %addr1, %th0, "s + byte_w + ";                    \n\t"s +
         "add.u64 %addr0, $0, %addr1;                                    \n\t"s +
-        "setp.lt.u32 %p0, %th0, %th1;                                   \n\t"s +
+        // Signed compare: numBarriers ($1) may be <= 0 for a padding/degenerate
+        // tile (segment_start > segment_end => segment_end-segment_start+1 <=
+        // 0), which must be a no-op. An unsigned compare would treat the
+        // negative count as ~4.29e9, making every lane spin-wait on
+        // out-of-range barrier slots that are never signalled (hang). See
+        // DistributedOps `wait`.
+        "setp.lt.s32 %p0, %th0, %th1;                                   \n\t"s +
         "@!%p0 bra.uni skipLoop;                                        \n\t"s +
         "waitLoop:                                                      \n\t"s +
         "  "s + ld_ptx + " %tmp0, [%addr0];                             \n\t"s +
@@ -216,11 +237,14 @@ struct WaitOpConversion
         "}                                                              \n\t"s;
 
     std::string regTy = barrier_width == 64 ? "l" : "r";
+    llvm::SmallVector<mlir::triton::PTXInstr::Operand *> ptxOperands = {
+        ptxBuilder.newOperand(adaptor.getBarrierPtr(), "l"),
+        ptxBuilder.newOperand(adaptor.getNumBarriers(), "r"),
+        ptxBuilder.newOperand(adaptor.getWaitValue(), regTy)};
+    if (hasPred)
+      ptxOperands.push_back(ptxBuilder.newOperand(predI32, "r"));
     auto &waitOp = *ptxBuilder.create<>(ptx);
-    waitOp({ptxBuilder.newOperand(adaptor.getBarrierPtr(), "l"),
-            ptxBuilder.newOperand(adaptor.getNumBarriers(), "r"),
-            ptxBuilder.newOperand(adaptor.getWaitValue(), regTy)},
-           /*onlyAttachMLIRArgs=*/true);
+    waitOp(ptxOperands, /*onlyAttachMLIRArgs=*/true);
     auto voidTy = void_ty(op->getContext());
     ptxBuilder.launch(rewriter, loc, voidTy);
     rewriter.eraseOp(op);

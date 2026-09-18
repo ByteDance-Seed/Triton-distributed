@@ -24,7 +24,9 @@
 ################################################################################
 
 import argparse
+import os
 import random
+from contextlib import ExitStack
 from typing import Dict
 
 import torch
@@ -76,6 +78,19 @@ def make_topk_weights(args, token_num: int) -> torch.Tensor:
     )
 
 
+def zero_inter_combine_rail(ep_kernels) -> None:
+    ctx = getattr(ep_kernels, "overlap_context", None)
+    if ctx is None:
+        ctx = getattr(ep_kernels, "ep_context", None)
+    layout = getattr(ctx, "rdma_rail_send_layout", None)
+    buf = getattr(ctx, "rdma_rail_send_buf", None)
+    if layout is None or buf is None:
+        return
+    combine_start = layout.outgoing_slot_base * layout.slot_stride_bytes
+    combine_end = layout.num_slots * layout.slot_stride_bytes
+    buf[combine_start:combine_end].zero_()
+
+
 def prepare_dispatch(args, ep_kernels: EPOverlapKernels, B_fc1, input_data, exp_indices, topk_weights=None) -> Dict:
     """Untimed dispatch + FC1 setup for the combine perf/correctness loop.
 
@@ -117,7 +132,8 @@ def prepare_dispatch(args, ep_kernels: EPOverlapKernels, B_fc1, input_data, exp_
     # Clone layout tensors so successive cases do not alias each other's
     # symmetric metadata slices.
     for attr in ("token_src_rank_topk_and_indices", "recv_token_count", "recv_aligned_token_count",
-                 "recv_expert_counts", "topk_indices"):
+                 "recv_expert_counts", "topk_indices", "node_topk_indices", "node_topk_send_mask",
+                 "node_token_dst_scatter_indices"):
         v = getattr(layout_desc, attr, None)
         if isinstance(v, torch.Tensor):
             setattr(layout_desc, attr, v.clone())
@@ -152,6 +168,13 @@ def prepare_dispatch(args, ep_kernels: EPOverlapKernels, B_fc1, input_data, exp_
 def make_baseline_runners(args, ep_kernels: EPOverlapKernels, prep: Dict, B_fc2, scratch_C: torch.Tensor,
                           prebuilt_C: torch.Tensor, *, record_fused_call: bool = False) -> Dict[str, callable]:
     layout_desc = prep["layout"]
+    dispatched_weights = prep.get("dispatch_weights")
+    standalone_dispatched_weights = None
+    sequential_C = scratch_C
+    if WORLD_SIZE > args.local_world_size:
+        standalone_dispatched_weights = dispatched_weights
+        # Let standalone FC2 produce directly into the peer-visible buffer.
+        sequential_C = ep_kernels.overlap_context.dispatch_output_buf[:scratch_C.shape[0], :scratch_C.shape[1]]
 
     def gemm_only():
         return ep_kernels.group_gemm(
@@ -171,12 +194,14 @@ def make_baseline_runners(args, ep_kernels: EPOverlapKernels, prep: Dict, B_fc2,
             tile_m=args.combine_tile_m,
             tile_n=args.combine_tile_n,
             comm_num_sm=args.comm_num_sm,
+            dispatched_weights=standalone_dispatched_weights,
         )
 
     def reduce_only():
         return ep_kernels.topk_reduce_only(
             topk_indices=layout_desc.topk_indices,
             use_ggc_staging=True,
+            num_tokens=int(layout_desc.token_within_expert_offset.shape[0]),
         )
 
     def sequential():
@@ -185,7 +210,7 @@ def make_baseline_runners(args, ep_kernels: EPOverlapKernels, prep: Dict, B_fc2,
             prep["A"],
             B_fc2,
             prep["expert_counts"],
-            output=scratch_C,
+            output=sequential_C,
             gemm_num_sm=args.gemm_num_sm,
         )
         return ep_kernels.combine_cutedsl(
@@ -195,14 +220,13 @@ def make_baseline_runners(args, ep_kernels: EPOverlapKernels, prep: Dict, B_fc2,
             tile_m=args.combine_tile_m,
             tile_n=args.combine_tile_n,
             comm_num_sm=args.comm_num_sm,
+            dispatched_weights=standalone_dispatched_weights,
         )
 
-    # Threading optional dispatched_weights through the two fused
-    # runners so timing/correctness paths both exercise the
-    # ``has_weight`` side channel when --has_weight is set. We always
-    # pull the captured 1D weight vector from ``prep`` (None when
-    # disabled), so the runner closures stay stable across perf rounds.
-    dispatched_weights = prep.get("dispatch_weights")
+    # Thread optional dispatched_weights through the weight-capable runners so
+    # timing/correctness paths exercise the ``has_weight`` side channel when
+    # --has_weight is set. Standalone combine only accepts the side channel for
+    # inter-node runs; fused combine keeps the existing intranode behavior.
 
     def fused_kernel():
         # Fused kernel only -- skip the post-push NVL barrier + reduce.
@@ -295,6 +319,41 @@ def run_torch_cuda_e2e_reference(args, cuda_kernels: _CudaEPKernels, ep_kernels:
     buf = cuda_kernels.get_combine_buffer(C.shape[0], dtype=C.dtype)
     buf.copy_(C)
     layout_desc.token_topk_send_mask.fill_(1)
+    out, _ = cuda_kernels.combine(buf, layout_desc)
+    return out
+
+
+def run_inter_cuda_combine_reference(args, cuda_kernels: _CudaEPKernels, ep_kernels: EPOverlapKernels,
+                                     B_fc2: torch.Tensor, prep: Dict):
+    """Inter-node bring-up reference: same dispatch/FC2 data, CUDA combine only."""
+    scratch_C = torch.empty(
+        prep["total_padded"],
+        args.hidden_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    C = ep_kernels.group_gemm(
+        prep["A"],
+        B_fc2,
+        prep["expert_counts"],
+        output=scratch_C,
+        gemm_num_sm=args.gemm_num_sm,
+    )
+    layout_desc = EPCommLayoutDesc()
+    layout_desc.__dict__.update(prep["layout"].__dict__)
+    # Master's internode C++ combine consumes node_* (receiver-view) metadata.
+    # Match the pre-rebase bring-up reference: force an all-ones send mask so the
+    # CUDA combine path is a stable oracle against CuTeDSL sequential/fused.
+    if layout_desc.node_topk_send_mask is not None:
+        layout_desc.node_topk_send_mask = layout_desc.node_topk_send_mask.clone()
+        layout_desc.node_topk_send_mask.fill_(1)
+    if layout_desc.token_topk_send_mask is not None:
+        layout_desc.token_topk_send_mask = layout_desc.token_topk_send_mask.clone()
+        layout_desc.token_topk_send_mask.fill_(1)
+
+    zero_inter_combine_rail(cuda_kernels)
+    buf = cuda_kernels.get_combine_buffer(C.shape[0], dtype=C.dtype)
+    buf.copy_(C)
     out, _ = cuda_kernels.combine(buf, layout_desc)
     return out
 
@@ -428,8 +487,8 @@ def run_check(args, ep_kernels, cuda_kernels, B_fc1, B_fc2, B_fc1_raw, B_fc2_raw
             topk_weights = (make_topk_weights(args, token_num) if args.has_weight else None)
             case_inputs.append((case_idx, token_num, input_data, exp_indices, topk_weights))
 
-        def _run_baseline(name):
-            outs, weight_outs, padded = [], [], []
+        def _run_baseline(name, *, return_preps: bool = False):
+            outs, weight_outs, padded, preps = [], [], [], []
             for (case_idx, token_num, input_data, exp_indices, topk_weights) in case_inputs:
                 torch.distributed.barrier()
                 prep = prepare_dispatch(
@@ -455,47 +514,71 @@ def run_check(args, ep_kernels, cuda_kernels, B_fc1, B_fc2, B_fc1_raw, B_fc2_raw
                     prebuilt_C=scratch_C,
                 )
                 result = runners[name]()
-                # ``fused_e2e`` with weights returns
-                # ``(output, combine_weights)``; other paths return a
-                # bare output tensor.
+                # Weight-capable paths return ``(output, combine_weights)``;
+                # other paths return a bare output tensor.
                 if isinstance(result, tuple):
                     out, weights = result
-                    weight_outs.append(weights.clone())
+                    weight_outs.append(weights.clone() if weights is not None else None)
                 else:
                     weight_outs.append(None)
                     out = result
                 outs.append(out.clone())
                 padded.append(prep["total_padded"])
+                if return_preps:
+                    preps.append(prep)
             torch.cuda.synchronize()
             torch.distributed.barrier()
+            if return_preps:
+                return outs, weight_outs, padded, preps
             return outs, weight_outs, padded
 
         # Phase A: ``sequential`` -- the byte-exact target for fused_e2e
         # and torch_cuda_ref.
-        seq_outs, _, padded_M = _run_baseline("sequential")
-        # Phase B: ``fused_e2e`` (apples-to-apples with sequential).
-        fused_outs, fused_weights, _ = _run_baseline("fused_e2e")
+        if WORLD_SIZE > args.local_world_size:
+            seq_outs, seq_weights, padded_M, seq_preps = _run_baseline("sequential", return_preps=True)
+        else:
+            seq_outs, seq_weights, padded_M = _run_baseline("sequential")
+            seq_preps = None
+        # Phase B: ``fused_e2e`` (apples-to-apples with sequential) when
+        # requested.  Inter-node Kernel 3 validation commonly runs with only
+        # ``--baselines sequential`` because Kernel 4 is a separate follow-up.
+        check_fused_e2e = "fused_e2e" in args.baselines
+        if check_fused_e2e:
+            fused_outs, fused_weights, _ = _run_baseline("fused_e2e")
+        else:
+            fused_outs = [None] * len(seq_outs)
+            fused_weights = [None] * len(seq_outs)
         # Phase C: independent torch+CUDA reference.
         torch_cuda_outs = []
-        for case_idx, _, input_data, exp_indices, _ in case_inputs:
+        for ref_idx, (case_idx, _, input_data, exp_indices, _) in enumerate(case_inputs):
             torch.distributed.barrier()
-            torch_cuda_outs.append(
-                run_torch_cuda_e2e_reference(
-                    args,
-                    cuda_kernels,
-                    ep_kernels,
-                    B_fc1_raw,
-                    B_fc2_raw,
-                    input_data,
-                    exp_indices,
-                ).clone())
+            if WORLD_SIZE > args.local_world_size:
+                torch_cuda_outs.append(
+                    run_inter_cuda_combine_reference(
+                        args,
+                        cuda_kernels,
+                        ep_kernels,
+                        B_fc2,
+                        seq_preps[ref_idx],
+                    ).clone())
+            else:
+                torch_cuda_outs.append(
+                    run_torch_cuda_e2e_reference(
+                        args,
+                        cuda_kernels,
+                        ep_kernels,
+                        B_fc1_raw,
+                        B_fc2_raw,
+                        input_data,
+                        exp_indices,
+                    ).clone())
         torch.cuda.synchronize()
         torch.distributed.barrier()
 
         # Phase D: unified bit-exact comparison.
-        for ((case_idx, token_num, _, exp_indices, topk_weights), seq_out, fused_out, torch_out, fused_w,
-             pm) in zip(case_inputs, seq_outs, fused_outs, torch_cuda_outs, fused_weights, padded_M):
-            if not bitwise_equal(seq_out, fused_out):
+        for ((case_idx, token_num, _, exp_indices, topk_weights), seq_out, seq_w, fused_out, torch_out, fused_w,
+             pm) in zip(case_inputs, seq_outs, seq_weights, fused_outs, torch_cuda_outs, fused_weights, padded_M):
+            if check_fused_e2e and not bitwise_equal(seq_out, fused_out):
                 diff = (seq_out.float() - fused_out.float()).abs()
                 rel = (diff / (seq_out.float().abs() + 1e-9)).max().item()
                 raise AssertionError(f"FAIL fused_e2e rank={RANK} round={round_idx} "
@@ -508,16 +591,27 @@ def run_check(args, ep_kernels, cuda_kernels, B_fc1, B_fc2, B_fc1_raw, B_fc2_raw
                                      f"case={case_idx} tokens={token_num} "
                                      f"max_abs={diff.max().item():.6e} max_rel={rel:.6e}")
             weight_tag = ""
-            if args.has_weight and fused_w is not None:
-                _verify_combine_weights(
-                    f"rank={RANK} round={round_idx} "
-                    f"case={case_idx} tokens={token_num}",
-                    expected=topk_weights,
-                    got=fused_w,
-                    exp_indices=exp_indices,
-                    drop_sentinel=args.num_experts,
-                )
-                weight_tag = "  combine_weights=bitwise=PASS"
+            if args.has_weight:
+                if seq_w is not None:
+                    _verify_combine_weights(
+                        f"sequential rank={RANK} round={round_idx} "
+                        f"case={case_idx} tokens={token_num}",
+                        expected=topk_weights,
+                        got=seq_w,
+                        exp_indices=exp_indices,
+                        drop_sentinel=args.num_experts,
+                    )
+                    weight_tag = "  combine_weights=bitwise=PASS"
+                if check_fused_e2e and fused_w is not None:
+                    _verify_combine_weights(
+                        f"fused_e2e rank={RANK} round={round_idx} "
+                        f"case={case_idx} tokens={token_num}",
+                        expected=topk_weights,
+                        got=fused_w,
+                        exp_indices=exp_indices,
+                        drop_sentinel=args.num_experts,
+                    )
+                    weight_tag = "  combine_weights=bitwise=PASS"
             if RANK == 0:
                 print(f"round {round_idx} case {case_idx}: "
                       f"tokens={token_num}  total_padded={pm}  "
@@ -540,6 +634,8 @@ def compute_metrics(args, prep, *, num_local_tokens, dtype_bytes=2):
     valid_M = int(prep["expert_counts"].sum().item())
     padded_M = prep["gemm_actual_padded"]
     recv_unpadded = prep["recv_unpadded"]
+    nnodes = WORLD_SIZE // args.local_world_size
+    reduce_inputs = nnodes if nnodes > 1 else args.topk
     return {
         "num_local_tokens": num_local_tokens,
         "valid_M": valid_M,
@@ -552,8 +648,9 @@ def compute_metrics(args, prep, *, num_local_tokens, dtype_bytes=2):
         "gemm_flops": 2 * valid_M * args.hidden_size * args.intermediate_size,
         # Per-rank combine bytes = received rows we push back * hidden * 2B.
         "combine_bytes": recv_unpadded * args.hidden_size * dtype_bytes,
-        # Reduce reads ``num_local * topk`` rows and writes ``num_local`` rows.
-        "reduce_bytes": num_local_tokens * (args.topk + 1) * args.hidden_size * dtype_bytes,
+        # Inter-node reduce reads one partial per node; intra-node reads one
+        # row per top-k choice. Both write one dense output row.
+        "reduce_bytes": num_local_tokens * (reduce_inputs + 1) * args.hidden_size * dtype_bytes,
     }
 
 
@@ -793,6 +890,8 @@ def parse_args():
     parser.add_argument("--num_experts", type=int, default=160)
     parser.add_argument("--topk", type=int, default=8)
     parser.add_argument("--drop_ratio", type=float, default=0.1)
+    parser.add_argument("--local_world_size", type=int, default=LOCAL_WORLD_SIZE,
+                        help="GPUs per NVL domain (default: torchrun LOCAL_WORLD_SIZE).")
     # Kernel / runtime knobs.
     parser.add_argument(
         "--gemm_num_sm", type=int, default=None, help="Per-call GEMM scheduler SM budget. None (default)"
@@ -863,85 +962,91 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.local_world_size <= 0 or WORLD_SIZE % args.local_world_size != 0:
+        raise ValueError("local_world_size must be positive and divide WORLD_SIZE")
+    os.environ["NCCL_LSA_TEAM_SIZE"] = str(args.local_world_size)
     ep_group = init_dist()
+    with ExitStack() as cleanup:
+        cleanup.callback(torch.distributed.destroy_process_group)
+        cleanup.callback(torch.distributed.destroy_process_group, ep_group)
 
-    assert args.num_experts % WORLD_SIZE == 0
-    experts_per_rank = args.num_experts // WORLD_SIZE
-    fc1_n_out = 2 * args.intermediate_size
-    expert_alignment = EPOverlapKernels.cluster_tile_m
+        assert args.num_experts % WORLD_SIZE == 0
+        experts_per_rank = args.num_experts // WORLD_SIZE
+        fc1_n_out = 2 * args.intermediate_size
+        expert_alignment = EPOverlapKernels.cluster_tile_m
 
-    if RANK == 0:
-        print(f"args = {args}")
-        print(f"experts_per_rank={experts_per_rank}  fc1_n_out=2*I={fc1_n_out}  "
-              f"expert_alignment={expert_alignment}  "
-              f"gemm_num_sm={args.gemm_num_sm}")
+        if RANK == 0:
+            print(f"args = {args}")
+            print(f"experts_per_rank={experts_per_rank}  fc1_n_out=2*I={fc1_n_out}  "
+                  f"expert_alignment={expert_alignment}  "
+                  f"gemm_num_sm={args.gemm_num_sm}")
 
-    ep_kernels = EPOverlapKernels(
-        max_m=args.num_tokens,
-        hidden=args.hidden_size,
-        topk=args.topk,
-        num_experts=args.num_experts,
-        local_world_size=LOCAL_WORLD_SIZE or WORLD_SIZE,
-        ep_group=ep_group,
-        num_worst_tokens=args.num_worst_tokens,
-        expert_alignment=expert_alignment,
-    )
-    cuda_kernels = _CudaEPKernels(
-        max_m=args.num_tokens,
-        hidden=args.hidden_size,
-        topk=args.topk,
-        num_experts=args.num_experts,
-        local_world_size=LOCAL_WORLD_SIZE or WORLD_SIZE,
-        ep_group=ep_group,
-        num_sm=args.comm_num_sm if args.comm_num_sm is not None else 16,
-        num_worst_tokens=args.num_worst_tokens,
-        expert_alignment=expert_alignment,
-    )
+        ep_kernels = EPOverlapKernels(
+            max_m=args.num_tokens,
+            hidden=args.hidden_size,
+            topk=args.topk,
+            num_experts=args.num_experts,
+            local_world_size=args.local_world_size,
+            ep_group=ep_group,
+            num_worst_tokens=args.num_worst_tokens,
+            expert_alignment=expert_alignment,
+        )
+        cleanup.callback(ep_kernels.finalize)
+        cuda_kernels = _CudaEPKernels(
+            max_m=args.num_tokens,
+            hidden=args.hidden_size,
+            topk=args.topk,
+            num_experts=args.num_experts,
+            local_world_size=args.local_world_size,
+            ep_group=ep_group,
+            num_sm=args.comm_num_sm if args.comm_num_sm is not None else 16,
+            num_worst_tokens=args.num_worst_tokens,
+            expert_alignment=expert_alignment,
+        )
+        cleanup.callback(cuda_kernels.finalize)
 
-    torch.manual_seed(42 + RANK)
-    # FC2 weight per MoE convention: (E, H, I) -> permute to (N, K, L) = (H, I, E).
-    # The permuted view is K-major (strides (K, 1, N*K)); the kernel
-    # explicitly rejects ``.contiguous()`` repacks because that flips
-    # the leading dim to E and silently breaks the GEMM (see
-    # ``_validate_gemm_B`` and ``_b_layout_probe.py``).  We keep both
-    # the K-major view (consumed by the kernel) AND the human-readable
-    # ``(E, N, K)`` source (consumed by ``torch.matmul`` per expert in
-    # the independent torch + CUDA reference path).
-    B_fc2_raw = torch.randn(
-        experts_per_rank,
-        args.hidden_size,
-        args.intermediate_size,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    B_fc2 = B_fc2_raw.permute(1, 2, 0)
-    B_fc1_raw = torch.randn(
-        experts_per_rank,
-        fc1_n_out,
-        args.hidden_size,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    B_fc1 = B_fc1_raw.permute(1, 2, 0)
+        torch.manual_seed(42 + RANK)
+        # FC2 weight per MoE convention: (E, H, I) -> permute to (N, K, L) = (H, I, E).
+        # The permuted view is K-major (strides (K, 1, N*K)); the kernel
+        # explicitly rejects ``.contiguous()`` repacks because that flips
+        # the leading dim to E and silently breaks the GEMM (see
+        # ``_validate_gemm_B`` and ``_b_layout_probe.py``).  We keep both
+        # the K-major view (consumed by the kernel) AND the human-readable
+        # ``(E, N, K)`` source (consumed by ``torch.matmul`` per expert in
+        # the independent torch + CUDA reference path).
+        B_fc2_raw = torch.randn(
+            experts_per_rank,
+            args.hidden_size,
+            args.intermediate_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        B_fc2 = B_fc2_raw.permute(1, 2, 0)
+        B_fc1_raw = torch.randn(
+            experts_per_rank,
+            fc1_n_out,
+            args.hidden_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        B_fc1 = B_fc1_raw.permute(1, 2, 0)
 
-    if args.check:
-        run_check(args, ep_kernels, cuda_kernels, B_fc1, B_fc2, B_fc1_raw, B_fc2_raw)
-        if args.gemm_num_sm_sweep:
-            run_gemm_num_sm_sweep(args, ep_kernels, B_fc1, B_fc2)
-        if args.skip_perf_after_check:
-            torch.distributed.destroy_process_group(ep_group)
-            return
+        if args.check:
+            run_check(args, ep_kernels, cuda_kernels, B_fc1, B_fc2, B_fc1_raw, B_fc2_raw)
+            if args.gemm_num_sm_sweep:
+                run_gemm_num_sm_sweep(args, ep_kernels, B_fc1, B_fc2)
+            if args.skip_perf_after_check:
+                return
 
-    for round_id in range(args.rounds):
-        if round_id > 0:
-            cool_down(args.cooldown_s * 4)
-        run_perf_round(args, ep_kernels, B_fc1, B_fc2, round_id, profile=args.profile, baselines=args.baselines)
+        for round_id in range(args.rounds):
+            if round_id > 0:
+                cool_down(args.cooldown_s * 4)
+            run_perf_round(args, ep_kernels, B_fc1, B_fc2, round_id, profile=args.profile, baselines=args.baselines)
 
-    torch.cuda.synchronize()
-    torch.distributed.barrier()
-    if RANK == 0:
-        print("\nFused GroupGEMM+Combine test completed.")
-    torch.distributed.destroy_process_group(ep_group)
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
+        if RANK == 0:
+            print("\nFused GroupGEMM+Combine test completed.")
 
 
 if __name__ == "__main__":

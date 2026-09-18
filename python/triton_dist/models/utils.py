@@ -114,7 +114,18 @@ def init_model_cpu(model_name: str, dtype: torch.dtype):
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype,
                                                          attn_implementation="flash_attention_2")
-            model.to_empty(device="cuda")
+            # Keep the mock model on CPU (as the function name implies and as the
+            # pre-trained branch does). Materialising a full large model on every
+            # rank's GPU exhausts device memory; callers move only the sub-module
+            # under test (e.g. one layer's MLP) to CUDA.
+            model.to_empty(device="cpu")
+            # to_empty() leaves uninitialized (garbage) storage; on CPU that garbage
+            # may be NaN/inf/huge and would poison the forward for any tensor that
+            # init_weights() does not overwrite. Zero everything first so uncovered
+            # tensors stay benign, then let init_weights() apply the proper random
+            # init to the parameters it manages.
+            for _t in list(model.parameters()) + list(model.buffers()):
+                _t.data.zero_()
             model.init_weights()
             return model
 

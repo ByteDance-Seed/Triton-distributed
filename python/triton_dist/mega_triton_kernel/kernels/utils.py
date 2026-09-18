@@ -33,7 +33,7 @@ def tanh(x):
 
 
 # copy from triton
-@tl.constexpr_function
+@triton.constexpr_function
 def next_power_of_2(n: tl.constexpr):
     """Return the smallest power of 2 greater than or equal to n"""
     n -= 1

@@ -95,13 +95,23 @@ class PipelineState:
         self.phase = phase
         self.num_stages = num_stages
 
+    # Triton 3.7.1's kernel global-reference scanner (JITFunction.record_reference)
+    # rejects plain functions; it marks *auto-generated* aggregate __init__s as
+    # __triton_builtin__ but not user-defined ones (which land in hash_attrs).
+    # Mark ours the same way so referencing this aggregate inside a kernel is
+    # accepted (the flag only affects the scanner, not construction).
+    __init__.__triton_builtin__ = True
+
     @triton.jit
     def advance(self):
-        """Advance to the next stage; flip phase parity on wrap-around."""
+        """Advance to the next stage; flip phase parity on wrap-around.
+
+        Triton 3.7.1 aggregates are immutable (in-kernel ``self.field = ...`` is
+        unsupported), so return a freshly constructed state instead of mutating
+        in place. Callers rebind: ``p = p.advance()``."""
         new_index = (self.index + 1) % self.num_stages
-        self.phase = tl.where(new_index == 0, self.phase ^ 1, self.phase)
-        self.index = new_index
-        return self
+        new_phase = tl.where(new_index == 0, self.phase ^ 1, self.phase)
+        return PipelineState(new_index, new_phase, self.num_stages)
 
 
 # ===================================================================
@@ -138,6 +148,10 @@ class TmaPipeline:
         self.empty_bars = empty_bars
         self.bufs = bufs
         self.num_stages = num_stages
+
+    # See PipelineState.__init__ above: mark builtin so the kernel reference
+    # scanner accepts this aggregate when used inside a @triton.jit kernel.
+    __init__.__triton_builtin__ = True
 
     @triton.jit
     def init_barriers(self, count):

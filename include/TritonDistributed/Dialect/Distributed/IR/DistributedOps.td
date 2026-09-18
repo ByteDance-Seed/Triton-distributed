@@ -52,6 +52,11 @@ def TT_WaitOp : TT_Distributed_Op<"wait", [
     The operator creates a wait node that represents a spin lock waiting
     for a list of signals pointed by the `barrierPtr` to be set ready (set to 1).
 
+    The optional scalar `pred` operand makes the wait conditional: when present
+    and false, the spin-wait is skipped entirely. (Upstream Triton 3.7.1 does not
+    expose `PredicatedOpInterface`, which only landed in 3.8; the operand is kept
+    so the op can carry a predicate when one is supplied by lowering.)
+
     Example:
 
     ```mlir
@@ -64,7 +69,8 @@ def TT_WaitOp : TT_Distributed_Op<"wait", [
     TT_IntLike:$numBarriers,
     TT_Int: $waitValue,
     DefaultValuedAttr<TT_MemSyncScopeAttr, "MemSyncScope::GPU">:$scope,
-    DefaultValuedAttr<TT_MemSemanticAttr, "MemSemantic::ACQUIRE">:$semantic
+    DefaultValuedAttr<TT_MemSemanticAttr, "MemSemantic::ACQUIRE">:$semantic,
+    Optional<I1>:$pred
   );
 
   let results = (outs TT_IntLike:$token);
@@ -72,6 +78,7 @@ def TT_WaitOp : TT_Distributed_Op<"wait", [
   let assemblyFormat = [{
       $barrierPtr `,` $numBarriers `,` $waitValue `,`
       `scope` `=` $scope `semantic` `=` $semantic
+      (`pred` `=` $pred^)?
       attr-dict `:` type($barrierPtr) `,` type($numBarriers) `,` type($waitValue) `->` type($token)
     }];
 }

@@ -1,0 +1,53 @@
+# Linker version script applied to libtriton.so when it is built with
+# TRITON_EXT_ENABLED=1 (the plugin-compatible build, which exports Triton/MLIR/
+# LLVM symbols with default visibility so out-of-tree plugins can resolve them).
+#
+# Problem it solves
+# -----------------
+# Triton loads a plugin via llvm::DynamicLibrary::getPermanentLibrary ->
+# dlopen(RTLD_LAZY|RTLD_GLOBAL). The plugin DT_NEEDEDs libtriton.so, so that
+# dlopen also promotes libtriton's symbols into the GLOBAL symbol scope. An
+# EXT-enabled libtriton was compiled WITHOUT -fvisibility=hidden, so it exports
+# not only Triton's API but also the incidental, weak C++ template
+# instantiations the compiler emits for libstdc++ types
+# (std::__cxx11::basic_string, std::vector, std::__detail regex internals, ...).
+#
+# Once those weak symbols are global they interpose the host process's identical
+# symbols. PyTorch's pip wheels are built with the OLD libstdc++ ABI
+# (_GLIBCXX_USE_CXX11_ABI=0) and against a different gcc than Triton's LLVM
+# toolchain, so torch's std::regex (used by at::cuda::parseChosenWorkspaceSize to
+# read CUBLAS_WORKSPACE_CONFIG) ends up calling libtriton's incompatible
+# std::__cxx11::basic_string::_M_replace_aux on a torch-allocated string -> the
+# SSO/heap bookkeeping disagrees and the first cuBLAS gemm aborts with
+# `free(): invalid pointer`.
+#
+# Fix
+# ---
+# Keep exporting everything Triton needs for plugins, but force libtriton's
+# libstdc++/libc++abi template instantiations to LOCAL binding so they can never
+# interpose the host's. A version script with only a `local:` section leaves all
+# other (Triton/MLIR/LLVM) symbols at their default (exported) binding.
+#
+# NOTE: only member/free FUNCTION instantiations are localized. We deliberately
+# do NOT localize std:: typeinfo / vtable symbols (_ZTISt*, _ZTSSt*, _ZTVSt*):
+# those identify exception types across shared-library boundaries (RTTI is
+# matched by symbol address), and hiding them would break catching std
+# exceptions thrown across the libtriton boundary.
+{
+  local:
+    # std:: member/free functions (both the C++11 __cxx11 and the legacy COW
+    # "Ss" manglings); excludes _ZTISt*/_ZTSSt*/_ZTVSt* (RTTI) by construction.
+    _ZNSt*;
+    _ZNKSt*;
+    _ZSt*;
+    _ZNSs*;
+    _ZNKSs*;
+    _ZStL*;
+    # __gnu_cxx:: helpers
+    _ZN9__gnu_cxx*;
+    _ZNK9__gnu_cxx*;
+    # libstdc++ basic_string helpers (the specific interposers we observed)
+    *_M_replace_aux*;
+    *_M_create*;
+    *_M_mutate*;
+};

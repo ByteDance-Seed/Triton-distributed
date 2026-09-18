@@ -181,7 +181,7 @@ def allgather_strided_chunked_kernel(
         barrier_all_kernel(rank, num_ranks, group_barrier_ptr)
 
 
-@triton.jit(do_not_specialize=["pid", "npid", "rank"])
+@triton.jit(do_not_specialize=["pid", "npid"])
 def allgather_strided_chunked_pull_kernel(
     pid,
     npid,
@@ -312,7 +312,7 @@ def make_2x_ptrs(val0, val1):
     return vals
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton.jit
 def allgather_strided_chunked_pull_packed_kernel(
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
     M_per_rank,
@@ -398,7 +398,7 @@ def allgather_strided_chunked_pull_packed_kernel(
             tl.store(dst_ptrs[None, :, None] + offs[:, None, :], val, mask=mask[:, None, :])
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton.jit
 def allgather_strided_chunked_pull_ctx_wrapper_kernel(
     ctx,
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks
@@ -434,7 +434,7 @@ def allgather_strided_chunked_pull_ctx_wrapper_kernel(
         barrier_all_kernel(rank, num_ranks, group_barrier_ptr)
 
 
-@triton.jit(do_not_specialize=["rank"])
+@triton.jit
 def allgather_strided_chunked_pull_fused_kernel(
     ctx,
     symm_ptr,  # (M, N), M = M_per_rank * num_ranks

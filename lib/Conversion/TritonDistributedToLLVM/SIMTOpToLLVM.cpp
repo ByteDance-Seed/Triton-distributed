@@ -33,6 +33,7 @@
 #include "TritonDistributed/Dialect/SIMT/IR/Dialect.h"
 
 #include "third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/Utility.h"
+#include <optional>
 #include <string>
 
 using namespace mlir;
@@ -41,6 +42,59 @@ using namespace std::literals;
 
 namespace {
 #ifndef USE_MACA
+
+// Compute element-wise linear strides for a trivial (vec=perPhase=maxPhase=1)
+// swizzled shared-memory buffer. `SharedMemoryObject::getStrides` was removed
+// upstream when shared layouts moved to the LinearLayout model, so we
+// reconstruct the exact strides from the buffer's shape and shared encoding.
+//
+// Two encoding conventions reach this lowering and BOTH must be handled:
+//   1. SIMT-region promotion buffers carry a FULL-rank order (a permutation of
+//      all dims), e.g. `order=[0,1]` (dim 0 contiguous == column-major). The
+//      physical stride is order-driven and must be honored -- treating these as
+//      row-major transposes the tile and corrupts the result.
+//   2. Frontend makeSwizzledMemDescType buffers give a rank>1 buffer a rank-1
+//      shared encoding (leading dims are multibuffer/batch indices), so `order`
+//      covers only the trailing `order.size()` dims, e.g. `order=[0]` on a
+//      rank-2 shape.
+//
+// General rule: assign order-driven contiguous strides within the trailing
+// encoded block (fastest dim first), then row-major strides to the leading
+// batch dims on top of that block. This reproduces the removed getStrides for
+// full-rank orders and stays in-bounds for short (multibuffer) orders.
+SmallVector<Value> computeSharedStrides(triton::gpu::MemDescType sharedTy,
+                                        Location loc, RewriterBase &rewriter) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto shape = sharedTy.getShape();
+  auto order = triton::gpu::getOrder(sharedTy);
+  unsigned rank = shape.size();
+  unsigned encRank = order.size();
+  assert(encRank <= rank && encRank >= 1 &&
+         "shared encoding rank must be in [1, buffer rank]");
+  unsigned batch = rank - encRank; // leading (un-encoded) multibuffer dims
+
+  SmallVector<int64_t> strideInt(rank, 1);
+  int64_t running = 1;
+  // Trailing encoded block: `order` lists its dims fastest-first, indexed
+  // relative to the block, so the absolute buffer dim is `batch + order[k]`.
+  for (unsigned k = 0; k < encRank; ++k) {
+    unsigned absDim = batch + order[k];
+    assert(absDim < rank && "encoding order out of range");
+    strideInt[absDim] = running;
+    running *= shape[absDim];
+  }
+  // Leading batch dims stack row-major (outermost slowest) above the block.
+  for (int d = static_cast<int>(batch) - 1; d >= 0; --d) {
+    strideInt[d] = running;
+    running *= shape[d];
+  }
+
+  SmallVector<Value> strides(rank);
+  for (unsigned i = 0; i < rank; ++i)
+    strides[i] = b.i32_val(strideInt[i]);
+  return strides;
+}
+
 Value getSharedMemAddress(RewriterBase &rewriter,
                           const SharedMemoryObject &smemObj,
                           const SmallVector<Value> &indices,
@@ -52,7 +106,7 @@ Value getSharedMemAddress(RewriterBase &rewriter,
   auto smemBase = smemObj.getBase();
   auto smemOffsets = smemObj.getOffsets();
   assert(smemOffsets.size() == indices.size());
-  auto smemStrides = smemObj.getStrides(sharedTy, loc, rewriter);
+  auto smemStrides = computeSharedStrides(sharedTy, loc, rewriter);
   for (size_t i = 0; i < smemOffsets.size(); ++i) {
     smemOffsets[i] = b.add(smemOffsets[i], indices[i]);
   }
@@ -86,8 +140,17 @@ struct LoadSharedOpPattern
     Value addr = getSharedMemAddress(rewriter, smemObj, adaptor.getIndices(),
                                      srcTy, elemLlvmTy, loc);
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    Value val = targetInfo.loadDShared(rewriter, loc, addr, std::nullopt,
-                                       elemLlvmTy, /*pred=*/b.true_val());
+    // ctaId is std::optional<Value> in Triton 3.7.1: pass std::nullopt for a
+    // local (non-remote) access. Passing Value() would wrap a *null* Value in a
+    // non-empty optional, wrongly taking the remote `mapa` path and producing
+    // invalid IR (silent ConvertTritonDistributedToLLVM failure).
+    // NOTE (AMD): targetInfo.loadDShared emits a triton::amdgpu::MaskedLoadOp
+    // intermediate; the AMD conversion pass must also run
+    // populateMaskedOpsToLLVMPatterns to lower it (see
+    // ConvertAMDDistributedToLLVM).
+    Value val =
+        targetInfo.loadDShared(rewriter, loc, addr, /*ctaId=*/std::nullopt,
+                               elemLlvmTy, /*pred=*/b.true_val());
     rewriter.replaceOp(op, val);
     return success();
   }
@@ -118,7 +181,9 @@ struct StoreSharedOpPattern
     Value addr = getSharedMemAddress(rewriter, smemObj, adaptor.getIndices(),
                                      srcTy, elemLlvmTy, loc);
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    targetInfo.storeDShared(rewriter, loc, addr, std::nullopt,
+    // ctaId is std::optional<Value> in Triton 3.7.1: std::nullopt = local
+    // store.
+    targetInfo.storeDShared(rewriter, loc, addr, /*ctaId=*/std::nullopt,
                             adaptor.getValue(),
                             /*pred=*/b.true_val());
     rewriter.eraseOp(op);

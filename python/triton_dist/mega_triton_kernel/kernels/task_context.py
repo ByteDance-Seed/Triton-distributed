@@ -35,6 +35,12 @@ class TensorDesc:
     def __init__(self, base_ptr):
         self.base_ptr = base_ptr
 
+    # Triton only auto-flags the *generated* aggregate __init__ as a builtin; a
+    # user-defined one is rejected by the kernel reference scanner
+    # (JITFunction.record_reference). Ours is a plain field-assigning constructor,
+    # so flag it the same way (affects the scanner only, not construction).
+    __init__.__triton_builtin__ = True
+
     @triton.jit
     def data_ptr(self, dtype):
         buf_ptr = self.base_ptr.to(tl.pointer_type(tl.uint64))
@@ -77,6 +83,9 @@ class TaskBaseInfo:
         self.is_tile_wise = is_tile_wise
         self.INT_PER_TENSOR = self.MAX_NUM_TENSOR_DIMS + 2  # (data_ptr, shape[0], shape[1], ..., shape[MAX_NUM_TENSOR_DIMS - 1])
 
+    # See TensorDesc: flag the user-defined __init__ so record_reference accepts it.
+    __init__.__triton_builtin__ = True
+
     @triton.jit
     def get_tensor(self, idx):
         return TensorDesc(self.io_tensors_ptr + idx * self.INT_PER_TENSOR)
@@ -107,6 +116,9 @@ class Scoreboard:
         self.TILE_READY_SIGNAL = TILE_READY_SIGNAL
         self.NUM_THREADS = NUM_THREADS
         self.WARP_SIZE = tl.constexpr(32)
+
+    # See TensorDesc: flag the user-defined __init__ so record_reference accepts it.
+    __init__.__triton_builtin__ = True
 
     @triton.jit
     def wait_deps(self, task_base_info: TaskBaseInfo):

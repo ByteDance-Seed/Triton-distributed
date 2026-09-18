@@ -23,6 +23,6 @@
 #
 ################################################################################
 
-from .symmetric import SymmetricBuffer, SymmetricTensor, BlockBackend
+from .symmetric import SymmetricBuffer, SymmetricTensor, BlockBackend, free_symmetric_tensors
 
-__all__ = ["SymmetricBuffer", "SymmetricTensor", "BlockBackend"]
+__all__ = ["SymmetricBuffer", "SymmetricTensor", "BlockBackend", "free_symmetric_tensors"]

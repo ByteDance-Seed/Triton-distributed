@@ -35,10 +35,37 @@ fi
 
 rocm_systems_tag=hip-version_7.12.60610
 
+clone_rocm_systems() {
+  local dest="$1"
+  local tag="$2"
+  local attempt
+  local clone_cmd=(git clone "https://github.com/ROCm/rocm-systems.git" -b "${tag}" --depth 1 --filter=blob:none --sparse "${dest}")
+  # A hung GitHub fetch previously burned 23+ minutes. Kill idle/slow clones
+  # quickly and retry instead of holding the whole AMD job.
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_HTTP_LOW_SPEED_LIMIT=1024
+  export GIT_HTTP_LOW_SPEED_TIME=30
+  for attempt in 1 2 3; do
+    rm -rf "${dest}"
+    if command -v timeout >/dev/null 2>&1; then
+      if timeout 90 "${clone_cmd[@]}"; then
+        return 0
+      fi
+    elif "${clone_cmd[@]}"; then
+      return 0
+    fi
+    echo "rocm-systems clone attempt ${attempt} failed or timed out, retrying"
+  done
+  return 1
+}
+
 if ! [ -d "${ROCSHMEM_SRC_DIR}" ]; then
   echo "Creating sparse checkout"
   pushd "${PROJECT_ROOT}/../.."
-  git clone "https://github.com/ROCm/rocm-systems.git" -b "${rocm_systems_tag}" --depth 1 --sparse "${sys_path}"
+  if ! clone_rocm_systems "${sys_path}" "${rocm_systems_tag}"; then
+    echo "error: failed to clone rocm-systems" >&2
+    exit 1
+  fi
   popd
   pushd "${sys_path}"
   git config core.sparseCheckoutCone true
@@ -57,12 +84,94 @@ ROCSHMEM_BUILD_DIR=${PROJECT_ROOT}/rocshmem_build
 ROCSHMEM_INSTALL_DIR=${ROCSHMEM_BUILD_DIR}/install
 OMPI_INSTALL_DIR="${OMPI_INSTALL_DIR:-/opt/ompi_build}"
 
-# build ompi, ucx
-if [ ! -e "${OMPI_INSTALL_DIR}" ]; then
-    # prepare for building ompi, ucx
-    BUILD_DIR=${OMPI_INSTALL_DIR} bash ${ROCSHMEM_SRC_DIR}/scripts/install_dependencies.sh
-else
+# GitHub runners already install distro Open MPI. rocSHMEM's
+# install_dependencies.sh otherwise clones Open MPI from source and hits
+# submodule SHAs that are no longer on any advertised ref.
+# Resolve a distro MPI compiler without using the staging prefix. build.sh
+# prepends ${prefix}/bin to PATH, so `command -v mpicc` would otherwise return
+# the staging symlink and `ln -sfn` would rewrite it into a self-loop.
+# Keep the wrapper path (e.g. /usr/bin/mpicc). `readlink -f` lands on
+# opal_wrapper, which ignores --showme unless argv[0] is mpicc/mpicxx.
+resolve_distro_mpi_bin() {
+    local name="$1"
+    local prefix="$2"
+    local saved="${PATH}"
+    local cand
+    PATH="$(printf '%s' "${saved}" | tr ':' '\n' | grep -vx "${prefix}/bin" | paste -sd: -)"
+    export PATH
+    cand="$(command -v "${name}" || true)"
+    PATH="${saved}"
+    export PATH
+    [ -n "${cand}" ] && [ -x "${cand}" ] || return 1
+    printf '%s\n' "${cand}"
+}
+
+stage_ompi_includes() {
+    local prefix="$1"
+    local d
+    shift
+    for d in "$@"; do
+        [ -n "${d}" ] || continue
+        if [ -f "${d}/mpi.h" ]; then
+            ln -sfn "${d}/mpi.h" "${prefix}/include/mpi.h"
+        fi
+        ln -sfn "${d}"/*.h "${prefix}/include/" 2>/dev/null || true
+        if [ -d "${d}/openmpi" ]; then
+            ln -sfn "${d}/openmpi" "${prefix}/include/openmpi"
+        fi
+    done
+}
+
+stage_system_ompi() {
+    local prefix="${OMPI_INSTALL_DIR}/install/ompi"
+    local libdir d mpicc_bin mpicxx_bin
+    mkdir -p "${prefix}/bin" "${prefix}/include" "${prefix}/lib"
+    mpicc_bin="$(resolve_distro_mpi_bin mpicc "${prefix}")" || return 1
+    ln -sfn "${mpicc_bin}" "${prefix}/bin/mpicc"
+    if mpicxx_bin="$(resolve_distro_mpi_bin mpicxx "${prefix}")"; then
+        ln -sfn "${mpicxx_bin}" "${prefix}/bin/mpicxx"
+    elif mpicxx_bin="$(resolve_distro_mpi_bin mpic++ "${prefix}")"; then
+        ln -sfn "${mpicxx_bin}" "${prefix}/bin/mpicxx"
+    fi
+    # mpicc --showme:incdirs is a space-separated list. Ubuntu's mpi.h pulls
+    # openmpi/ompi/mpi/cxx/mpicxx.h from a nested include dir, so stage every
+    # reported prefix (and the nested openmpi/ tree), not just mpi.h.
+    while read -r d; do
+        stage_ompi_includes "${prefix}" "${d}"
+    done < <("${mpicc_bin}" --showme:incdirs 2>/dev/null | tr ' ' '\n')
+    # Debian/Ubuntu libopenmpi-dev keeps mpi.h under the multiarch tree, not
+    # /usr/include. Probe those paths when --showme is empty (opal_wrapper).
+    stage_ompi_includes "${prefix}" \
+        /usr/include \
+        /usr/lib/x86_64-linux-gnu/openmpi/include \
+        /usr/lib/aarch64-linux-gnu/openmpi/include
+    if [ ! -e "${prefix}/include/openmpi" ]; then
+        if [ -d /usr/include/openmpi ]; then
+            ln -sfn /usr/include/openmpi "${prefix}/include/openmpi"
+        elif [ -d /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi ]; then
+            ln -sfn /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi "${prefix}/include/openmpi"
+        elif [ -d /usr/lib/aarch64-linux-gnu/openmpi/include/openmpi ]; then
+            ln -sfn /usr/lib/aarch64-linux-gnu/openmpi/include/openmpi "${prefix}/include/openmpi"
+        fi
+    fi
+    libdir="$("${mpicc_bin}" --showme:libdirs 2>/dev/null | awk '{print $1}')"
+    if [ -n "${libdir}" ]; then
+        ln -sfn "${libdir}"/libmpi.so* "${prefix}/lib/" 2>/dev/null || true
+        ln -sfn "${libdir}"/libopen-rte.so* "${prefix}/lib/" 2>/dev/null || true
+        ln -sfn "${libdir}"/libopen-pal.so* "${prefix}/lib/" 2>/dev/null || true
+    fi
+    [ -e "${prefix}/include/mpi.h" ] && [ -x "${prefix}/bin/mpicc" ]
+}
+
+# Prefer restaging distro Open MPI whenever mpicc is present so a previous
+# incomplete prefix (mpi.h without cxx headers) is repaired. Fall back to
+# rocSHMEM's from-source Open MPI only when no usable distro prefix exists.
+if command -v mpicc >/dev/null 2>&1 && stage_system_ompi; then
+    echo "Using distro Open MPI at ${OMPI_INSTALL_DIR}/install/ompi"
+elif [ -e "${OMPI_INSTALL_DIR}/install/ompi/include/mpi.h" ] && [ -x "${OMPI_INSTALL_DIR}/install/ompi/bin/mpicc" ]; then
     echo "ompi exists, skip building ompi and ucx"
+else
+    BUILD_DIR=${OMPI_INSTALL_DIR} bash ${ROCSHMEM_SRC_DIR}/scripts/install_dependencies.sh
 fi
 
 if [ ! -e "$OMPI_INSTALL_DIR" ]; then

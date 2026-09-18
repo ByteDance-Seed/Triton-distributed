@@ -60,7 +60,7 @@ def SIMTExecRegionOp : TT_SIMT_Op<"simt_exec_region", [
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins CArg<"ValueRange", "std::nullopt">:$initArgs)>
+    OpBuilder<(ins CArg<"ValueRange", "{}">:$initArgs)>
   ];
 
   let hasVerifier = 0;

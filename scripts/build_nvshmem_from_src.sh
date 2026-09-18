@@ -1,4 +1,12 @@
 #!/bin/bash
+# Build NVSHMEM from source (used when the pip nvidia-nvshmem-cu12 wheel is not
+# enough -- e.g. you need the device bitcode libnvshmem_device.bc or IBGDA).
+#
+# Downloads the pinned NVSHMEM release, builds it into
+# ${NVSHMEM_SRC_DIR:-~/.cache/nvshmem_src}/build; scripts/setenv.sh then picks
+# that up automatically via NVSHMEM_SRC_HOME.
+#
+# Usage: bash scripts/build_nvshmem_from_src.sh [--arch <sm>] [--jobs N]
 set -x
 set -e
 

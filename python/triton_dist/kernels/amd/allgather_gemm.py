@@ -1095,11 +1095,17 @@ def ag_gemm_intra_node_op(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, ctx
             NUM_SMS = torch.cuda.get_device_properties(
                 0).multi_processor_count - ctx.comm_sms if ctx.use_copy_kernel else torch.cuda.get_device_properties(
                     0).multi_processor_count
-            # TODO(houqi.1993) this may be tuned
-            BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
-            BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
-            total_tiles = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N_per_rank, BLOCK_SIZE_N)
-            NUM_SMS = min(NUM_SMS, total_tiles)
+            # kernel_consumer_gemm_persistent remaps program ids across XCDs as
+            # `pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)`,
+            # which is only a bijection over [0, NUM_SMS) when exactly NUM_SMS
+            # programs launch AND NUM_SMS is a multiple of NUM_XCDS. Clamping the
+            # launch to min(NUM_SMS, total_tiles) (small shapes) makes the count
+            # non-aligned, so the remap collides/gaps and silently drops output
+            # tiles (stale results). Launch the full, XCD-aligned NUM_SMS instead;
+            # surplus programs simply fall through the persistent loop.
+            NUM_XCDS = gemm_config.kwargs.get("NUM_XCDS", 1)
+            if NUM_XCDS > 1:
+                NUM_SMS = (NUM_SMS // NUM_XCDS) * NUM_XCDS
             grid = (NUM_SMS, )
             full_input = ctx.workspace_tensors[ctx.rank][:M]
 
@@ -1152,10 +1158,13 @@ def gemm_only(A: torch.Tensor, B: torch.Tensor, ctx: AllGatherGEMMTensorParallel
     C = torch.empty([ctx.num_ranks * M_per_rank, N_per_rank], dtype=A.dtype, device=A.device)
 
     M = M_per_rank * ctx.num_ranks
-    BLOCK_SIZE_M = gemm_config.kwargs["BLOCK_SIZE_M"]
-    BLOCK_SIZE_N = gemm_config.kwargs["BLOCK_SIZE_N"]
-    total_tiles = triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N_per_rank, BLOCK_SIZE_N)
-    grid = (min(NUM_SMS, total_tiles), )
+    # See kernel_consumer_gemm_persistent launch above: the XCD program-id remap
+    # requires launching the full, XCD-aligned NUM_SMS. min(NUM_SMS, total_tiles)
+    # breaks the bijection for small shapes and silently skips output tiles.
+    NUM_XCDS = gemm_config.kwargs.get("NUM_XCDS", 1)
+    if NUM_XCDS > 1:
+        NUM_SMS = (NUM_SMS // NUM_XCDS) * NUM_XCDS
+    grid = (NUM_SMS, )
     full_input = ctx.workspace_tensors[ctx.rank][:M]
 
     kernel_consumer_gemm_persistent[grid](full_input, B, C, M, N_per_rank, K,

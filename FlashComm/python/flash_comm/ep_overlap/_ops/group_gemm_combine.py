@@ -41,6 +41,7 @@ class CuTeDSLGroupGemmCombineOp(CuTeDSLEPOverlapOpBase):
 
     def _compile(self, dtype: torch.dtype, experts_per_rank: int, n_out: int, hidden_in: int, topk: int, num_sm: int,
                  weight_dtype: torch.dtype, has_weight: bool):
+        arch_major, arch_minor = torch.cuda.get_device_capability(torch.cuda.current_device())
         variant_args = (
             dtype,
             int(experts_per_rank),
@@ -52,10 +53,13 @@ class CuTeDSLGroupGemmCombineOp(CuTeDSLEPOverlapOpBase):
             int(num_sm),
             weight_dtype,
             bool(has_weight),
+            int(arch_major),
+            int(arch_minor),
         )
 
         def factory():
-            return self._build(dtype, experts_per_rank, n_out, hidden_in, topk, num_sm, weight_dtype, has_weight)
+            return self._build(dtype, experts_per_rank, n_out, hidden_in, topk, num_sm, weight_dtype, has_weight,
+                               arch_major, arch_minor)
 
         opt_level = resolve_nvcc_opt_level()
         return self._get_cached_kernel(
@@ -65,19 +69,31 @@ class CuTeDSLGroupGemmCombineOp(CuTeDSLEPOverlapOpBase):
         )
 
     def _build(self, dtype: torch.dtype, experts_per_rank: int, n_out: int, hidden_in: int, topk: int, num_sm: int,
-               weight_dtype: torch.dtype, has_weight: bool):
+               weight_dtype: torch.dtype, has_weight: bool, arch_major: int, arch_minor: int):
         import cutlass
         import cutlass.cute as cute
         import cutlass.torch as cutlass_torch
         import cutlass.utils as utils
 
-        from ..kernels.cutedsl_group_gemm_combine import MegaMoEGroupGEMMCombine
-
         self._assert_supported_dtype(dtype, "MegaMoEGroupGEMMCombine")
 
-        mma_tiler = (256, 256)
-        cluster = (2, 2)
-        use_2cta = True
+        if arch_major >= 10:
+            from ..kernels.cutedsl_group_gemm_combine import MegaMoEGroupGEMMCombine
+
+            mma_tiler = (256, 256)
+            cluster = (2, 2)
+            use_2cta = True
+        elif arch_major == 9:
+            from ..kernels.cutedsl_group_gemm_combine_sm90 import MegaMoEGroupGEMMCombine
+
+            mma_tiler = (128, 256)
+            # Match GEMM_CLUSTER_TILE_M=256 used by dispatch packing.
+            cluster = (2, 1)
+            use_2cta = False
+        else:
+            raise RuntimeError(
+                f"CuTeDSL group_gemm_combine requires Hopper (sm90) or newer, got sm{arch_major}{arch_minor}")
+
         ab_dtype = cutlass.BFloat16 if dtype == torch.bfloat16 else cutlass.Float16
         c_dtype = ab_dtype
 

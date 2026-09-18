@@ -67,7 +67,7 @@ def _ptx_suffix_to_constraint(suffix: core.constexpr, _semantic=None):
         tl.static_assert(False, "unsupported dtype", _semantic=_semantic)
 
 
-@core.constexpr_function
+@triton.constexpr_function
 def tl_type_to_ptx_suffix(dtype: core.constexpr):
     if dtype == tl.uint32:
         return "u32"

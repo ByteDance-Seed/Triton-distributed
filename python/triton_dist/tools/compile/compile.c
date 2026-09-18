@@ -89,7 +89,7 @@ CUresult {kernel_name}(CUstream stream, {signature}) {{
     unsigned int gZ = {gridZ};
 
     {global_scratch_def};
-
+    {scalar_conversions}
     void *args[{num_args}] = {{ {arg_pointers} }};
     // TODO: shared memory
     if(gX * gY * gZ > 0)

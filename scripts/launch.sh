@@ -124,6 +124,9 @@ function set_nvshmem_home() {
   fi
 }
 
+source "$(dirname "${BASH_SOURCE[0]}")/setenv.sh"
+
+set_triton_dist_plugin
 set_nvshmem_home
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-0}

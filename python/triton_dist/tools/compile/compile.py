@@ -143,13 +143,18 @@ def kernel_name_suffix(
 ):
     meta_sig = f"warps{num_warps}xstages{num_stages}"
     sig_hash = hash_signature(list(signature.values()) + [const_sig] + [meta_sig])
+    # Sparse suffix: emit an entry ONLY for specialization-hinted args (``c`` for
+    # equal-to-1, ``d`` for divisible-by-16), matching upstream Triton's
+    # tools/compile.py. The dense variant (every index, incl. unhinted constexpr
+    # params) is incompatible with upstream tools/link.py's _match_suffix, which
+    # iterates only over the non-constexpr C-signature args and would leave the
+    # trailing constexpr indices unconsumed (e.g. "...131415").
     suffix = ''
     for i, ty in enumerate(signature.values()):
-        suffix += str(i)
         if hints.get((i, ), None) == 1:
-            suffix += 'c'
+            suffix += f'{i}c'
         if hints.get((i, ), None) == 16:
-            suffix += 'd'
+            suffix += f'{i}d'
     return f"{sig_hash}_{suffix}"
 
 
@@ -178,18 +183,29 @@ def _make_const_sig(src: triton.compiler.ASTSource) -> str:
 
 
 def get_global_scratch_def(ccinfo: triton.compiler.CompiledKernel) -> str:
-    global_scratch_size = ccinfo.metadata.global_scratch_size
+    # Triton 3.7.1 kernels take two trailing scratch pointers -- global_scratch and
+    # profile_scratch (the proton profiler buffer) -- after the user args. Both must
+    # be materialized and passed; omitting profile_scratch leaves the cubin reading
+    # one parameter past the args[] array, i.e. an uninitialized stack slot, which
+    # faults inside cuLaunchKernel (observed as a SIGSEGV launching the gdn AOT
+    # kernels). Allocate either if its size is non-zero (defensive; upstream's
+    # tools/compile.py instead refuses such kernels).
     res = "CUdeviceptr global_scratch = 0"
-    if global_scratch_size > 0:
-        res += f";\nCUDA_CHECK(cuMemAlloc(&global_scratch,{global_scratch_size}))"
+    if ccinfo.metadata.global_scratch_size > 0:
+        res += f";\nCUDA_CHECK(cuMemAlloc(&global_scratch,{ccinfo.metadata.global_scratch_size}))"
+    res += ";\nCUdeviceptr profile_scratch = 0"
+    if getattr(ccinfo.metadata, "profile_scratch_size", 0) > 0:
+        res += f";\nCUDA_CHECK(cuMemAlloc(&profile_scratch,{ccinfo.metadata.profile_scratch_size}))"
     return res
 
 
 def get_exit_cleanup(ccinfo: triton.compiler.CompiledKernel) -> str:
+    cleanups = []
     if ccinfo.metadata.global_scratch_size > 0:
-        return "CUDA_CHECK(cuMemFree(global_scratch))"
-    else:
-        return ""
+        cleanups.append("CUDA_CHECK(cuMemFree(global_scratch))")
+    if getattr(ccinfo.metadata, "profile_scratch_size", 0) > 0:
+        cleanups.append("CUDA_CHECK(cuMemFree(profile_scratch))")
+    return ";\n".join(cleanups)
 
 
 def materialize_c_params(
@@ -225,6 +241,34 @@ def materialize_c_params(
             arg_names += [kernel.arg_names[i]]
             arg_types += [signature[i]]
 
+    # Upstream Triton 3.7.1's ``ty_to_cpp`` maps every float kind (fp16/bf16/fp32/
+    # fp64) to C ``double`` -- it is only used to *receive* the Python scalar via
+    # PyFloat_AsDouble in the JIT launcher. The cubin parameter ABI, however, is
+    # the kernel's *native* width: fp32 -> 4-byte float, fp64 -> 8-byte double
+    # (see driver.c: ``float f32 = (float)temp_double``). The JIT launcher casts
+    # double->native before packing; the AOT launcher must do the same. Passing
+    # ``&sm_scale`` (an 8-byte double) where the cubin reads a 4-byte float feeds
+    # it the low 4 bytes of the IEEE-754 double -- i.e. garbage -- which is why
+    # the gqa decode AOT kernels produced all-NaN output. Emit a narrowing local
+    # for each float scalar arg and point the launch at that instead.
+    _NATIVE_FLOAT_C = {"fp16": None, "bf16": None, "fp32": "float", "f32": "float", "fp64": "double"}
+    scalar_conv_lines = []
+    arg_ptr_names = []
+    for name, ty in zip(arg_names, arg_types):
+        if ty in _NATIVE_FLOAT_C:
+            native = _NATIVE_FLOAT_C[ty]
+            if native is None:
+                raise NotImplementedError(
+                    f"AOT launcher cannot pass a {ty} scalar argument ({name!r}) by value: its "
+                    "cubin ABI is a packed 16-bit half, which the C stub does not yet narrow. "
+                    "No current distributed kernel needs this; add half-packing here if one does.")
+            if native != "double":
+                conv = f"__triton_aot_{name}"
+                scalar_conv_lines.append(f"{native} {conv} = ({native}){name};")
+                arg_ptr_names.append(f"&{conv}")
+                continue
+        arg_ptr_names.append(f"&{name}")
+
     # dump C stub code
     hex_ = str(binascii.hexlify(ccinfo.asm["cubin"]))[2:-1]
     has_shmem = "nvshmem" in ccinfo.asm['ttgir'] or "distributed." in ccinfo.asm['ttgir']
@@ -249,9 +293,11 @@ def materialize_c_params(
         "exit_cleanup":
         get_exit_cleanup(ccinfo),
         "arg_pointers":
-        ", ".join([f"&{arg}" for arg in arg_names] + ["&global_scratch"]),
+        ", ".join(arg_ptr_names + ["&global_scratch", "&profile_scratch"]),
+        "scalar_conversions":
+        "\n    ".join(scalar_conv_lines),
         "num_args":
-        len(arg_names) + 1,
+        len(arg_names) + 2,  # +2 for the trailing global_scratch / profile_scratch
         "kernel_docstring":
         doc_string,
         "shared":

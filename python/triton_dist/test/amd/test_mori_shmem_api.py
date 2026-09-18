@@ -25,6 +25,7 @@
 
 import os
 import sys
+
 import torch
 
 # Set default environment variables
@@ -46,9 +47,9 @@ _triton_python_path = os.path.join(_workspace_root, "3rdparty/triton/python")
 if os.path.exists(_triton_python_path):
     sys.path.insert(0, _triton_python_path)
 
-from triton_dist.utils import initialize_distributed, finalize_distributed, get_triton_dist_world  # noqa: E402
 import mori.shmem as mori_shmem  # noqa: E402
 from mori.shmem import mori_shmem_create_tensor  # noqa: E402
+from triton_dist.utils import finalize_distributed, get_triton_dist_world, initialize_distributed  # noqa: E402
 
 
 def test_mori_shmem_basic():
@@ -80,9 +81,9 @@ def test_mori_shmem_basic():
 
     try:
         torch.testing.assert_close(comm_buf, torch.tensor([mype, npes], dtype=torch.int32, device="cuda"))
-    except Exception as e:
+    except Exception:
         print(f"❌ _mori_shmem_basic #{mype} failed")
-        raise e
+        raise
     else:
         print(f"✅ _mori_shmem_basic #{mype} pass")
 
@@ -112,6 +113,16 @@ def test_mori_shmem_device():
         peer = (mype + 1) % npes
 
         libshmem_device.int_p(ptr, mype, peer)
+        libshmem_device.fence()
+        libshmem_device.quiet()
+        libshmem_device.barrier_all_block()
+
+    @triton_dist.jit
+    def _mori_shmem_warp_put(send_ptr, recv_ptr):
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+        libshmem_device.putmem_warp(recv_ptr, send_ptr, 4, peer)
 
     @triton_dist.jit
     def _mori_shmem_put_signal_block(send_ptr, recv_ptr, sig_ptr):
@@ -121,17 +132,30 @@ def test_mori_shmem_device():
         libshmem_device.putmem_signal_nbi_block(
             recv_ptr,
             send_ptr,
-            tl.full([], 4, tl.uint64),
+            4,
             sig_ptr,
-            tl.full([], 1, tl.uint64),
+            1,
             libshmem_device.MORI_SIGNAL_SET,
             peer,
-            0,
         )
 
     @triton_dist.jit
+    def _mori_shmem_signal_put(data_ptr, sig_ptr):
+        mype = libshmem_device.my_pe()
+        npes = libshmem_device.n_pes()
+        peer = (mype + 1) % npes
+        libshmem_device.int_p(data_ptr, mype, peer)
+        libshmem_device.fence()
+        libshmem_device.signal_op(sig_ptr, 1, libshmem_device.MORI_SIGNAL_SET, peer)
+
+    @triton_dist.jit
     def _mori_shmem_wait_signal(sig_ptr):
-        _ = libshmem_device.uint64_wait_until_equals(sig_ptr, tl.full([], 1, tl.uint64))
+        libshmem_device.signal_wait_until(sig_ptr, libshmem_device.MORI_CMP_EQ, 1)
+
+    @triton_dist.jit
+    def _mori_shmem_block_barrier(result_ptr):
+        libshmem_device.barrier_all_block()
+        tl.store(result_ptr, 1)
 
     @triton_dist.jit
     def _mori_shmem_get_put_symm_at(local_ptr):
@@ -167,9 +191,9 @@ def test_mori_shmem_device():
 
     try:
         torch.testing.assert_close(comm_buf, torch.tensor([mype, npes], dtype=torch.int32, device="cuda"))
-    except Exception as e:
+    except Exception:
         print(f"❌ _mori_shmem_device #{mype} failed")
-        raise e
+        raise
     else:
         print(f"✅ _mori_shmem_device #{mype} pass")
 
@@ -201,9 +225,9 @@ def test_mori_shmem_device():
 
     try:
         assert actual_value == expected_value, f"Ring put failed: expected {expected_value}, got {actual_value}"
-    except Exception as e:
+    except Exception:
         print(f"❌ _mori_shmem_ring_put #{mype} failed")
-        raise e
+        raise
     else:
         print(f"✅ _mori_shmem_ring_put #{mype} pass")
 
@@ -211,56 +235,102 @@ def test_mori_shmem_device():
     if hasattr(put_buf, '_mori_ptr'):
         mori_shmem.shmem_free(put_buf._mori_ptr)
 
-    # Test putmem_signal_nbi_block
-    print("**test_mori_shmem_put_signal_block start!")
+    # Test cooperative warp put
+    print("**test_mori_shmem_warp_put start!")
 
     send_buf = mori_shmem_create_tensor((1, ), torch.int32)
     recv_buf = mori_shmem_create_tensor((1, ), torch.int32)
-    sig_buf = mori_shmem_create_tensor((1, ), torch.uint64)
-
     send_buf.fill_(mype)
     recv_buf.fill_(-1)
-    sig_buf.fill_(0)
 
     torch.distributed.barrier()
     mori_shmem.shmem_barrier_all()
-
-    _mori_shmem_put_signal_block[(1, )](send_buf, recv_buf, sig_buf)
-    _mori_shmem_wait_signal[(1, )](sig_buf)
-
+    _mori_shmem_warp_put[(1, )](send_buf, recv_buf, num_warps=1)
     torch.distributed.barrier()
     mori_shmem.shmem_barrier_all()
     torch.cuda.synchronize()
 
     expected_value = (mype - 1 + npes) % npes
     actual_value = recv_buf[0].item()
-    actual_signal = sig_buf[0].item()
+    assert actual_value == expected_value, f"Warp put failed: expected {expected_value}, got {actual_value}"
+    print(f"✅ _mori_shmem_warp_put #{mype} pass")
 
-    print(f"mype#{mype} put_signal_block result: recv={actual_value}, expected={expected_value}, sig={actual_signal}")
-
-    try:
-        assert actual_value == expected_value, (
-            f"putmem_signal_nbi_block failed: expected {expected_value}, got {actual_value}")
-        assert actual_signal == 1, f"signal value mismatch: expected 1, got {actual_signal}"
-    except Exception as e:
-        print(f"❌ _mori_shmem_put_signal_block #{mype} failed")
-        raise e
-    else:
-        print(f"✅ _mori_shmem_put_signal_block #{mype} pass")
-
-    # Cleanup
     if hasattr(send_buf, '_mori_ptr'):
         mori_shmem.shmem_free(send_buf._mori_ptr)
     if hasattr(recv_buf, '_mori_ptr'):
         mori_shmem.shmem_free(recv_buf._mori_ptr)
-    if hasattr(sig_buf, '_mori_ptr'):
-        mori_shmem.shmem_free(sig_buf._mori_ptr)
+
+    # Test cooperative block put-with-signal and compatibility wait API
+    print("**test_mori_shmem_put_signal_block start!")
+
+    send_buf = mori_shmem_create_tensor((1, ), torch.int32)
+    recv_buf = mori_shmem_create_tensor((1, ), torch.int32)
+    sig_buf = mori_shmem_create_tensor((1, ), torch.uint64)
+    send_buf.fill_(mype)
+    recv_buf.fill_(-1)
+    sig_buf.fill_(0)
+
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    _mori_shmem_put_signal_block[(1, )](send_buf, recv_buf, sig_buf, num_warps=1)
+    _mori_shmem_wait_signal[(1, )](sig_buf, num_warps=1)
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    torch.cuda.synchronize()
+
+    actual_value = recv_buf[0].item()
+    actual_signal = sig_buf[0].item()
+    assert actual_value == expected_value, (
+        f"Block put-with-signal failed: expected {expected_value}, got {actual_value}")
+    assert actual_signal == 1, f"Block signal mismatch: expected 1, got {actual_signal}"
+    print(f"✅ _mori_shmem_put_signal_block #{mype} pass")
+
+    for tensor in (send_buf, recv_buf, sig_buf):
+        if hasattr(tensor, '_mori_ptr'):
+            mori_shmem.shmem_free(tensor._mori_ptr)
+
+    # Test explicit fence + remote signal operation ordering
+    print("**test_mori_shmem_signal_op start!")
+
+    data_buf = mori_shmem_create_tensor((1, ), torch.int32)
+    sig_buf = mori_shmem_create_tensor((1, ), torch.uint64)
+    data_buf.fill_(-1)
+    sig_buf.fill_(0)
+
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    _mori_shmem_signal_put[(1, )](data_buf, sig_buf, num_warps=1)
+    _mori_shmem_wait_signal[(1, )](sig_buf, num_warps=1)
+    torch.distributed.barrier()
+    mori_shmem.shmem_barrier_all()
+    torch.cuda.synchronize()
+
+    actual_value = data_buf[0].item()
+    actual_signal = sig_buf[0].item()
+    assert actual_value == expected_value, f"Signal op data mismatch: expected {expected_value}, got {actual_value}"
+    assert actual_signal == 1, f"Signal op mismatch: expected 1, got {actual_signal}"
+    print(f"✅ _mori_shmem_signal_op #{mype} pass")
+
+    for tensor in (data_buf, sig_buf):
+        if hasattr(tensor, '_mori_ptr'):
+            mori_shmem.shmem_free(tensor._mori_ptr)
+
+    # Test collective block barrier in a uniform one-block launch
+    print("**test_mori_shmem_block_barrier start!")
+    barrier_result = mori_shmem_create_tensor((1, ), torch.int32)
+    barrier_result.zero_()
+    _mori_shmem_block_barrier[(1, )](barrier_result, num_warps=1)
+    torch.cuda.synchronize()
+    assert barrier_result[0].item() == 1
+    print(f"✅ _mori_shmem_block_barrier #{mype} pass")
+    if hasattr(barrier_result, '_mori_ptr'):
+        mori_shmem.shmem_free(barrier_result._mori_ptr)
 
     # Test dl.symm_at() for remote memory access
     print("**test_mori_shmem_symm_at start!")
 
     # Check if running in multi-node environment
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
     is_multinode = world_size > local_world_size
 
@@ -297,11 +367,11 @@ def test_mori_shmem_device():
 
     try:
         torch.testing.assert_close(symm_buf, ref_tensor, atol=0, rtol=0)
-    except Exception as e:
+    except Exception:
         print(f"❌ _mori_shmem_get_put_symm_at #{mype} failed")
         print(f"   Expected: {ref_tensor}")
         print(f"   Got:      {symm_buf}")
-        raise e
+        raise
     else:
         print(f"✅ _mori_shmem_get_put_symm_at #{mype} pass - dl.symm_at() works correctly!")
 

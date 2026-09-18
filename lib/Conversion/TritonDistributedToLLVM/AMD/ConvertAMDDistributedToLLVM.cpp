@@ -45,8 +45,11 @@
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
-#include "third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
+// triton::amdgpu::InstructionSchedHint moved into the TritonAMDGPU dialect in
+// 3.7.x; the legacy internal SchedInstructions.h header is gone, so include the
+// exported dialect header that declares the op.
+#include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Analysis/Allocation.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Membar.h"
@@ -143,10 +146,17 @@ struct ConvertAMDDistributedToLLVM
                                               targetInfo, commonBenefit);
     AMD::populateSPMDOpToLLVMPattern(typeConverter, patterns, AMDBenefit);
 
-    mlir::triton::AMD::populateTritonAMDGPUToLLVMPatterns(typeConverter,
-                                                          patterns, AMDBenefit);
+    mlir::triton::AMD::populateTritonAMDGPUToLLVMPatterns(
+        typeConverter, patterns, targetInfo, AMDBenefit);
     mlir::triton::AMD::populateUpcastMXFPToLLVMPatterns(typeConverter, patterns,
                                                         targetInfo, AMDBenefit);
+    // AMD's loadDShared/storeDShared (used by the SIMT load_shared/store_shared
+    // lowering) emit triton::amdgpu::MaskedLoadOp/MaskedStoreOp intermediates.
+    // The standard TritonGPU->LLVM conversion lowers them in-pass; since this
+    // is a separate conversion, add the same patterns so those ops don't
+    // survive as illegal (which rolls back the SIMT op as "failed to
+    // legalize").
+    mlir::triton::AMD::populateMaskedOpsToLLVMPatterns(patterns, targetInfo);
 
     // TODO(thomas): this should probably be done in a separate step to not
     // interfere with our own lowering of arith ops. Add arith/math's patterns

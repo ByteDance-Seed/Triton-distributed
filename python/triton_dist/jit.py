@@ -114,20 +114,25 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
     kernel_cache = jit_function.device_caches[device][0]
     kernel = kernel_cache.get(key, None)
     assert kernel is not None, f"kernel is None for key = {key}"
-    kernel._init_handles()
-    kernel_module = kernel.module
 
+    # This is a *global* post-compile hook (fires for every compiled kernel in the
+    # process, including plain ``@triton.jit`` ones). Only load the module onto the
+    # device (``_init_handles``) when there is actual SHMEM state to initialise --
+    # otherwise leave handle init lazy (upstream behaviour) and stay a no-op.
     if is_cuda():
         from triton_dist.utils import is_shmem_initialized
         has_shmem = "nvshmem" in kernel.asm['ptx']
         if has_shmem and is_shmem_initialized():
             import nvshmem.bindings.nvshmem as pynvshmem
-            pynvshmem.cumodule_init(kernel_module)
+            kernel._init_handles()
+            pynvshmem.cumodule_init(kernel.module)
     elif is_hip():
         import torch
         from hip import hip
         from triton_dist.utils import get_shmem_backend
 
+        kernel._init_handles()
+        kernel_module = kernel.module
         backend = get_shmem_backend()
 
         if backend == 'rocshmem':
@@ -155,17 +160,23 @@ def shmem_kernel_module_init_hook(*args, **kwargs) -> None:
             else:
                 hip.hipGetLastError()  # Discard the last error
         elif backend == 'mori_shmem':
-            if "mori_shmem" in kernel.asm.get('llir', ''):
+            # Initialize mori_shmem device symbols in this kernel module -- but only
+            # once SHMEM is actually up (a distributed run). Single-GPU kernels that
+            # use no shmem must skip this: calling shmem_module_init before mori is
+            # initialized aborts in mori's CheckStatusValid(). Mirrors the CUDA
+            # (is_shmem_initialized) and rocshmem (module-has-ctx) guards above.
+            from triton_dist.utils import is_shmem_initialized
+            if "mori_shmem" in kernel.asm.get('llir', '') and is_shmem_initialized():
                 import mori.shmem as mori_shmem
                 mori_shmem.shmem_module_init(kernel_module)
     elif is_maca():
         if "mxshmem" in kernel.asm['ttir']:
             import triton.pymxshmem as pymxshmem
-            pymxshmem.mxshmemx_mcmodule_init(kernel_module)
+            kernel._init_handles()
+            pymxshmem.mxshmemx_mcmodule_init(kernel.module)
     elif is_ascend():
         pass
-    else:
-        raise ValueError("Unsupported device type for shmem kernel module init hook.")
+    # Unknown backend: nothing to initialise -- do not break compilation.
 
 
 def get_shmem_extern_lib() -> Dict[str, str]:
@@ -269,12 +280,149 @@ class TritonDistJITFunction(KernelInterface[T]):
         return self.run(grid=grid, warmup=True, *map(MockTensor.wrap_dtype, args), **kwargs)
 
 
+def _dist_make_llir(self, src, metadata, options, capability):
+    """Faithful re-implementation of the upstream NVIDIA ``CUDABackend.make_llir``
+    that injects the plugin pass ``convert_triton_distributed_to_llvm`` right
+    after the standard TritonGPU->LLVM conversion (``add_to_llvmir``), matching
+    the placement used by the legacy intrusive fork.
+
+    Distributed/SIMT ops survive ``add_to_llvmir`` (they are not in TritonGPU)
+    and are lowered here, after shared-memory allocation and the global_smem
+    symbol have been materialised. This must track the pinned Triton 3.7.1
+    ``make_llir`` body; it lives entirely in triton_dist (no Triton source patch)."""
+    from triton._C.libtriton import ir, passes, llvm, nvidia
+    from triton.backends.nvidia.compiler import (sm_arch_from_capability, get_features, get_ptx_version_from_options,
+                                                 CUDABackend)
+
+    ptx_version = get_ptx_version_from_options(options, self.target.arch)
+
+    mod = src
+    pm = ir.pass_manager(mod.context)
+    pm.enable_debug()
+
+    passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+    passes.ttgpuir.add_allocate_warp_groups(pm)
+    passes.convert.add_scf_to_cf(pm)
+    passes.gluon.add_inliner(pm)
+    nvidia.passes.ttgpuir.add_allocate_shared_memory_nv(pm, capability, ptx_version)
+    nvidia.passes.ttnvgpuir.add_allocate_tensor_memory(pm)
+    nvidia.passes.ttnvgpuir.add_check_matmul_two_cta(pm)
+    if "consan" in options.instrumentation_mode:
+        passes.ttgpuir.add_concurrency_sanitizer(pm)
+    passes.ttgpuir.add_allocate_global_scratch_memory(pm)
+    nvidia.passes.ttnvgpuir.add_proxy_fence_insertion(pm, capability)
+    if CUDABackend.instrumentation:
+        CUDABackend.instrumentation.patch("ttgpuir_to_llvmir", pm, mod.context)
+    nvidia.passes.ttgpuir.add_to_llvmir(pm, capability, ptx_version)
+    # TritonDistributed Extension: Distributed/SIMT Dialect -> LLVM (plugin pass).
+    # Placed immediately after the standard TritonGPU->LLVM conversion so the
+    # Distributed/SIMT ops (which survive add_to_llvmir) are lowered while the
+    # global_smem symbol and shared-memory allocation are still materialised --
+    # the same placement the legacy intrusive fork used.
+    passes.plugin.convert_triton_distributed_to_llvm(pm, [str(capability), str(ptx_version)])
+    passes.common.add_canonicalizer(pm)
+    passes.common.add_cse(pm)
+    nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
+    nvidia.passes.ttnvgpuir.add_warp_specialize_to_llvm(pm)
+    passes.common.add_canonicalizer(pm)
+    passes.common.add_cse(pm)
+    passes.common.add_symbol_dce(pm)
+    passes.convert.add_nvvm_to_llvm(pm)
+
+    if not knobs.compilation.disable_line_info and not knobs.compilation.dump_ir_extract_di_local_variables:
+        passes.llvmir.add_di_scope(pm)
+
+    if CUDABackend.instrumentation:
+        CUDABackend.instrumentation.patch("llvmir_to_llvm", pm, mod.context)
+
+    pm.run(mod, 'make_llir')
+
+    if knobs.compilation.dump_ir_extract_di_local_variables:
+        if not knobs.compilation.disable_line_info:
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            passes.llvmir.add_di_scope(pm)
+            pm.run(mod, 'make_llir.disable_line_info')
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.llvmir.add_di_local_variable(pm)
+        pm.run(mod, 'make_llir.dump_ir_extract_di_local_variables')
+
+    # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
+    llvm.init_targets()
+    context = llvm.context()
+    if knobs.compilation.enable_asan:
+        raise RuntimeError("Address Sanitizer Error: Address sanitizer is currently only supported on the AMD backend")
+    llvm_mod = llvm.to_module(mod, context)
+    proc = sm_arch_from_capability(capability)
+    features = get_features(options, self.target.arch)
+    triple = 'nvptx64-nvidia-cuda'
+    nvidia.set_short_ptr()
+    llvm.attach_datalayout(llvm_mod, triple, proc, features)
+    if options.enable_reflect_ftz:
+        nvidia.set_nvvm_reflect_ftz(llvm_mod)
+
+    # Link extern device bitcode. The SHMEM device library (e.g.
+    # libnvshmem_device.bc) must be linked whenever the module references SHMEM
+    # symbols -- including for plain ``@triton.jit`` kernels that use distributed
+    # ops but do not go through ``TritonDistJITFunction`` (which would inject it via
+    # extern_libs). The legacy fork linked it unconditionally for such kernels; we
+    # add it on demand here so unresolved ``nvshmem_*`` symbols never reach ptxas.
+    extern_libs = list(options.extern_libs or [])
+    if nvidia.has_extern_deps(llvm_mod):
+        if "nvshmem" in str(llvm_mod):
+            have = {name for (name, _path) in extern_libs}
+            for name, path in get_shmem_extern_lib().items():
+                if name not in have:
+                    extern_libs.append((name, path))
+        if extern_libs:
+            paths = [path for (_name, path) in extern_libs]
+            llvm.link_extern_libs(llvm_mod, paths)
+
+    llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
+
+    total_num_warps = src.get_int_attr("ttg.total-num-warps")
+    if total_num_warps is not None:
+        metadata["num_warps"] = total_num_warps
+    metadata["shared"] = src.get_int_attr("ttg.shared")
+    metadata["tmem_size"] = src.get_int_attr("ttg.tensor_memory_size")
+    metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size") or 0
+    metadata["global_scratch_align"] = src.get_int_attr("ttg.global_scratch_memory_alignment") or 1
+    metadata["profile_scratch_size"] = src.get_int_attr("ttg.profile_scratch_memory_size") or 0
+    metadata["profile_scratch_align"] = src.get_int_attr("ttg.profile_scratch_memory_alignment") or 1
+    ret = str(llvm_mod)
+    del llvm_mod
+    del context
+    return ret
+
+
 def nvidia_stages_inspection_hook(self, stages, options, language, capability):
+    from triton._C.libtriton import ir, passes
     from triton.backends.nvidia.compiler import sm_arch_from_capability, get_ptxas
     from triton_dist.nv_utils import NVSHMEMHelper, get_nvlink
 
+    # --- TTIR stage: inject Distributed/SIMT -> TritonGPU conversion -----------
+    # The plugin conversion is a drop-in superset of the standard
+    # convert-triton-to-tritongpu, run right after make_ttir so the subsequent
+    # standard make_ttgir optimisation pipeline operates on TTGIR (mirrors utlx).
+    original_make_ttir = self.make_ttir
+
+    def make_ttir_wrapper(mod, metadata, opt, cap):
+        mod = original_make_ttir(mod, metadata, opt, cap)
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.plugin.convert_triton_distributed_to_tritongpu(
+            pm, [f"cuda:{cap}", str(opt.num_warps), '32', str(opt.num_ctas)])
+        pm.run(mod, 'dist_ttir_conversion')
+        return mod
+
+    stages["ttir"] = lambda src, metadata: make_ttir_wrapper(src, metadata, options, capability)
+
+    # --- LLIR stage: inject Distributed/SIMT -> LLVM after add_to_llvmir -------
+    stages["llir"] = lambda src, metadata: _dist_make_llir(self, src, metadata, options, capability)
+
     def make_cubin(self, src, metadata, opt, capability):
-        ptxas = get_ptxas().path
+        ptxas = get_ptxas(capability).path
         with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ptx') as fsrc, \
             tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
             fsrc.write(src)
@@ -335,11 +483,19 @@ def nvidia_stages_inspection_hook(self, stages, options, language, capability):
                     fbin_combined,
                 ]
                 try:
-                    subprocess.run(nvlink_cmds, check=True, close_fds=False, stderr=flog)
-                except Exception as e:
-                    import logging
-                    logging.error(f"error runing nvlink: {nvlink_cmds}")
-                    logging.exception(e)
+                    subprocess.run(nvlink_cmds, check=True, close_fds=False, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+                except subprocess.CalledProcessError as e:
+                    # Surface the real linker error instead of letting execution fall
+                    # through to a misleading FileNotFoundError on the (never-produced)
+                    # combined cubin. Clean up partial outputs first.
+                    for _p in (fbin, fbin_combined):
+                        if os.path.exists(_p):
+                            os.remove(_p)
+                    nvlink_log = e.stderr.decode("utf-8", "replace") if e.stderr else ""
+                    raise PTXASError(f"`nvlink` failed with error code {e.returncode}\n"
+                                     f"`nvlink` stderr:\n{nvlink_log}\n"
+                                     f'Repro command: {" ".join(nvlink_cmds)}\n') from e
             if has_nvshmem_wrapper:
                 with open(fbin_combined, "rb") as f:
                     cubin = f.read()
@@ -356,17 +512,225 @@ def nvidia_stages_inspection_hook(self, stages, options, language, capability):
     stages["cubin"] = lambda src, metadata: make_cubin(self, src, metadata, options, self.target.arch)
 
 
-def stages_inspection_hook(self, stages, options, language, capability):
+def _amd_make_llir(self, src, metadata, options):
+    """AMD analog of ``_dist_make_llir``.
+
+    Rather than copy ``HIPBackend.make_llir`` verbatim (it is long and drifts with
+    the AMD pipeline), run the stock one but temporarily swap the two AMD pass
+    calls it makes so the distributed lowering is spliced in at the right places:
+
+      * ``add_to_llvmir`` -> the standard pass followed by
+        ``convert_amd_distributed_to_llvm``, which lowers the remaining
+        Distributed/SIMT ops (the standard pass lowers tt/ttgpu -- incl. tt.func
+        and tt.extern_elementwise -- and leaves the distributed ops untouched;
+        the distributed pass then legalizes those). This matches the NVIDIA path
+        (``add_to_llvmir`` then ``convert_triton_distributed_to_llvm``).
+      * ``add_builtin_func_to_llvmir`` -> the standard pass followed by
+        ``convert_builtin_func_to_llvmir_ext``, which lowers the distributed
+        ``__triton_hip_*`` extern calls (ld/st/atomic/syncthreads/v4_b32).
+
+    This mirrors the fork's intrusive HIP ``compiler.py`` edits
+    (``add_distributed_to_llvm`` / ``add_builtin_func_to_llvmir_ext`` -- see the
+    removed ``python/src/passes.cc``) without a Triton source patch. The swap is
+    scoped to this call and restored in ``finally``. For plain kernels (no
+    distributed ops) the superset conversion is functionally identical to the
+    standard one and the ``_ext`` pass is a no-op."""
+    from triton._C.libtriton import amd as _amd, passes as _passes
+    _ttgpuir = _amd.passes.ttgpuir
+    _orig_to_llvmir = _ttgpuir.add_to_llvmir
+    _orig_builtin = _ttgpuir.add_builtin_func_to_llvmir
+
+    def _dist_to_llvmir(pm, arch, ftz):
+        _orig_to_llvmir(pm, arch, ftz)
+        _passes.plugin.convert_amd_distributed_to_llvm(pm, [arch, "1" if ftz else "0"])
+
+    def _dist_builtin(pm, arch, ftz):
+        _orig_builtin(pm, arch, ftz)
+        _passes.plugin.convert_builtin_func_to_llvmir_ext(pm, ["1" if ftz else "0"])
+
+    _ttgpuir.add_to_llvmir = _dist_to_llvmir
+    _ttgpuir.add_builtin_func_to_llvmir = _dist_builtin
+    try:
+        return self.make_llir(src, metadata, options)
+    finally:
+        _ttgpuir.add_to_llvmir = _orig_to_llvmir
+        _ttgpuir.add_builtin_func_to_llvmir = _orig_builtin
+
+
+def amd_stages_inspection_hook(self, stages, options, language):
+    """AMD counterpart of ``nvidia_stages_inspection_hook``.
+
+    Splices the distributed lowering into the stock AMD pipeline by swapping the
+    two conversion entry points ``make_ttgir`` / ``make_llir`` call:
+
+      * ``passes.ttir.add_convert_to_ttgpuir`` -> the distributed superset
+        ``convert_triton_distributed_to_tritongpu``. This *replaces* (rather than
+        runs before) the standard TTIR->TTGIR conversion, so there is exactly ONE
+        conversion. Running the standard convert a second time on already-TTGIR IR
+        leaves dangling 0-operand ``unrealized_conversion_cast`` ops that the AMD
+        AxisInfo passes (e.g. ``convert-buffer-ops``) crash on.
+
+    The llir stage is handled by ``_amd_make_llir`` (distributed LLVM lowering).
+    Only the Triton-language path is wrapped -- Gluon has no distributed frontend
+    here. The swaps are scoped to each stage call and restored in ``finally``."""
+    from triton._C.libtriton import passes as _passes
+    from triton.backends.compiler import Language
+
+    if language == Language.TRITON:
+
+        def _amd_make_ttgir(src, metadata, opt):
+            _ttir = _passes.ttir
+            _orig_convert = _ttir.add_convert_to_ttgpuir
+
+            def _dist_convert(pm, target, num_warps, warp_size, num_ctas):
+                _passes.plugin.convert_triton_distributed_to_tritongpu(
+                    pm, [target, str(num_warps), str(warp_size), str(num_ctas)])
+
+            # AMD's block-level pointer/buffer-op passes (tritonamdgpu-canonicalize-
+            # pointers + convert-buffer-ops, newer than the 3.4 fork) assume plain
+            # triton pointers derived from kernel args, and mishandle the custom
+            # distributed/SIMT ops:
+            #   * simt.simt_exec_region: the 1:N pointer conversion rewrites pointers
+            #     used inside the region (e.g. a distributed.extern_call) into
+            #     degenerate 0-operand unrealized_conversion_casts, aborting
+            #     ModuleAxisInfoAnalysis.
+            #   * distributed.symm_at / consume_token: these thread a pointer through
+            #     a remote/symmetric handle or a scheduling token, which breaks the
+            #     1:N loop-carried pointer rewrite (scf.for iter_args vs yields
+            #     mismatch) in canonicalize-pointers.
+            # None of this per-thread / remote-pointer code benefits from these
+            # block/tensor-pointer optimizations, and the 3.4 fork had no such pass,
+            # so disable buffer ops whenever the kernel uses a distributed or SIMT op.
+            # Pure-compute kernels have neither and keep buffer ops.
+            _ir = src.str_nodebug()
+            _uses_dist_ops = ("simt." in _ir) or ("distributed." in _ir)
+            _saved_buffer_ops = knobs.amd.use_buffer_ops
+            if _uses_dist_ops:
+                knobs.amd.use_buffer_ops = False
+
+            _ttir.add_convert_to_ttgpuir = _dist_convert
+            try:
+                return self.make_ttgir(src, metadata, opt)
+            finally:
+                _ttir.add_convert_to_ttgpuir = _orig_convert
+                knobs.amd.use_buffer_ops = _saved_buffer_ops
+
+        stages["ttgir"] = lambda src, metadata: _amd_make_ttgir(src, metadata, options)
+
+    stages["llir"] = lambda src, metadata: _amd_make_llir(self, src, metadata, options)
+
+
+_HOOK_KEY = None
+_HOOK_HASH = None
+
+
+def _get_hook_cache_dims():
+    """Cache key/hash contributed by the distributed plugin so kernels compiled
+    with vs without the hook never collide. Hashes this module's source plus the
+    plugin .so mtime/path. Replaces the fork's CACHE_INVALIDATING_ENV_VARS."""
+    global _HOOK_KEY, _HOOK_HASH
+    if _HOOK_KEY is None:
+        import hashlib
+        from triton_dist import _plugin
+        parts = [Path(__file__).read_text()]
+        so = _plugin.find_plugin()
+        if so:
+            parts.append(f"{so}:{os.path.getmtime(so)}")
+        _HOOK_KEY = "\n".join(parts)
+        _HOOK_HASH = hashlib.sha256(_HOOK_KEY.encode("utf-8")).hexdigest()
+    return _HOOK_KEY, _HOOK_HASH
+
+
+def stages_inspection_hook(self=None, stages=None, options=None, language=None, capability=None):
+    # No-arg invocation: contribute to the compilation cache key only.
+    if all(a is None for a in (self, stages, options, language, capability)):
+        return _get_hook_cache_dims()
     if is_cuda():
         nvidia_stages_inspection_hook(self, stages, options, language, capability)
+    elif is_hip():
+        amd_stages_inspection_hook(self, stages, options, language)
+    return _get_hook_cache_dims()
+
+
+_CLUSTER_DIMS_PATCHED = False
+
+
+def _install_cluster_dims_support():
+    """Let the NVIDIA backend accept a ``cluster_dims`` launch option.
+
+    Upstream Triton 3.7.1's ``CUDAOptions`` only exposes ``num_ctas`` (the cluster
+    is always launched as ``[num_ctas, 1, 1]``); the legacy fork carried an
+    explicit 3D ``cluster_dims``. We restore it non-intrusively: ``parse_options``
+    consumes ``cluster_dims`` (so the runtime's strict unknown-kwarg check in
+    ``_pack_args`` accepts it), normalises it, and records it on the *frozen*
+    options object so it is serialised into the compiled kernel's metadata
+    (``metadata = {**options.__dict__, ...}``) -- which is what
+    ``TRITON_DIST_CGA_CLUSTER_SIZE`` consumers introspect. The cluster launch
+    already derives ``clusterDim.x = num_ctas`` from ``num_ctas``, so we keep
+    ``cluster_dims`` consistent with it (defaulting to ``[num_ctas, 1, 1]``)."""
+    global _CLUSTER_DIMS_PATCHED
+    if _CLUSTER_DIMS_PATCHED or not is_cuda():
+        return
+    from triton.backends.nvidia.compiler import CUDABackend
+    orig_parse_options = CUDABackend.parse_options
+    if getattr(orig_parse_options, "_triton_dist_wrapped", False):
+        _CLUSTER_DIMS_PATCHED = True
+        return
+
+    def parse_options(self, opts):
+        cluster_dims = None
+        if "cluster_dims" in opts:
+            opts = dict(opts)
+            cluster_dims = opts.pop("cluster_dims")
+        options = orig_parse_options(self, opts)
+        if cluster_dims is None:
+            cluster_dims = (options.num_ctas, 1, 1)
+        cluster_dims = tuple(int(x) for x in cluster_dims)
+        # Frozen dataclass: bypass the frozen guard to attach the field so it is
+        # serialised into metadata next to num_ctas.
+        object.__setattr__(options, "cluster_dims", list(cluster_dims))
+        return options
+
+    parse_options._triton_dist_wrapped = True
+    CUDABackend.parse_options = parse_options
+    _CLUSTER_DIMS_PATCHED = True
+
+
+# Triton release this frontend was validated against. `_dist_make_llir` mirrors
+# this release's NVIDIA `CUDABackend.make_llir` pass pipeline verbatim (to splice
+# in the distributed->LLVM pass); on a different Triton that body can silently
+# drift and produce subtly-wrong codegen. Warn loudly so the mismatch is visible.
+# See docs/refactor/MONKEYPATCH_TRACKING.md.
+_VALIDATED_TRITON_VERSION = "3.7.1"
+_VERSION_CHECKED = False
+
+
+def _check_triton_version():
+    global _VERSION_CHECKED
+    if _VERSION_CHECKED:
+        return
+    _VERSION_CHECKED = True
+    version = getattr(triton, "__version__", "") or ""
+    if not version.startswith(_VALIDATED_TRITON_VERSION):
+        warnings.warn(f"triton_dist was validated against Triton {_VALIDATED_TRITON_VERSION}, "
+                      f"but the installed Triton is {version!r}. The distributed compile hook "
+                      f"(_dist_make_llir) mirrors that release's CUDABackend.make_llir pass "
+                      f"pipeline and may drift on other versions -- verify codegen if results "
+                      f"look wrong.")
 
 
 def _install_triton_dist_hook():
+    # Warn if the installed Triton is not the validated pin (see above).
+    _check_triton_version()
+
     # shmem
     knobs.runtime.jit_post_compile_hook = shmem_kernel_module_init_hook
 
     # stages inspection
     knobs.runtime.add_stages_inspection_hook = stages_inspection_hook
+
+    # cluster_dims launch option (CGA cluster size)
+    _install_cluster_dims_support()
 
 
 def jit(

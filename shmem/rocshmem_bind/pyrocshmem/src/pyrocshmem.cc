@@ -27,6 +27,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <rocshmem/rocshmem.hpp>
+#include <sstream>
 
 namespace py = pybind11;
 

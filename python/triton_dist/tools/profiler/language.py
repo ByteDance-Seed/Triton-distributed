@@ -117,6 +117,13 @@ class Profiler:
         self.NUM_BITS_TASK_TYPE = tl.constexpr(NUM_BITS_TASK_TYPE)
         self.NUM_BITS_EVENT = tl.constexpr(NUM_BITS_EVENT)
 
+    # See other aggregates (e.g. task_context.TensorDesc): Triton only auto-flags
+    # the *generated* aggregate __init__ as a builtin; a user-defined one is
+    # rejected by the kernel reference scanner (JITFunction.record_reference) with
+    # "Unsupported function referenced". Flag it so the scanner accepts it (affects
+    # the scanner only, not construction).
+    __init__.__triton_builtin__ = True
+
     @triton.jit
     def encode_tag(self, is_start, task_type):
         """

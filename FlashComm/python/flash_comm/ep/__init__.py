@@ -23,7 +23,23 @@
 #
 ################################################################################
 
-from .ep_kernels import EPKernels, EPCommLayoutDesc
+from .chunk_plan import (
+    EPChunkPlan,
+    EPChunkPlanner,
+    build_ep_chunk_plan,
+)
+from .ep_kernels import (
+    EPKernels,
+    EPCommLayoutDesc,
+)
 from .ep_context import EPContext, EPConfig
 
-__all__ = ["EPKernels", "EPCommLayoutDesc", "EPContext", "EPConfig"]
+__all__ = [
+    "EPKernels",
+    "EPCommLayoutDesc",
+    "EPChunkPlan",
+    "EPChunkPlanner",
+    "build_ep_chunk_plan",
+    "EPContext",
+    "EPConfig",
+]

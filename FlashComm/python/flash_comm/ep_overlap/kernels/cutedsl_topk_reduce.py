@@ -47,10 +47,10 @@ class MoETopkReduceBlockPerToken:
         num_tokens: cutlass.Int32,
         stream: cuda.CUstream,
     ):
-        tile_n = self.num_threads * self.atom_v
-        assert hidden_size % tile_n == 0, (f"hidden_size={hidden_size} must be a multiple of "
-                                           f"num_threads*atom_v={tile_n}")
-        num_tiles = hidden_size // tile_n
+        assert hidden_size % self.atom_v == 0, (f"hidden_size={hidden_size} must be a multiple of "
+                                                f"atom_v={self.atom_v}")
+        num_atoms = hidden_size // self.atom_v
+        num_tiles = (num_atoms + self.num_threads - 1) // self.num_threads
         self.kernel(
             staging,
             topk_indices,
@@ -59,8 +59,8 @@ class MoETopkReduceBlockPerToken:
             topk,
             num_experts,
             num_tokens,
-            tile_n,
             num_tiles,
+            num_atoms,
         ).launch(
             grid=(num_tokens, 1, 1),
             block=(self.num_threads, 1, 1),
@@ -77,8 +77,8 @@ class MoETopkReduceBlockPerToken:
         topk: cutlass.Constexpr[int],
         num_experts: cutlass.Constexpr[int],
         num_tokens: cutlass.Int32,
-        tile_n: cutlass.Constexpr[int],
         num_tiles: cutlass.Constexpr[int],
+        num_atoms: cutlass.Constexpr[int],
     ):
         tidx, _, _ = cute.arch.thread_idx()
         bidx, _, _ = cute.arch.block_idx()
@@ -121,25 +121,26 @@ class MoETopkReduceBlockPerToken:
         for tile_idx in cutlass.range_constexpr(num_tiles):
             my_atom_idx = tile_idx * num_threads + tidx
 
-            for k in cutlass.range_constexpr(topk):
-                expert_idx = my_topk[k]
-                if expert_idx < num_experts:
-                    stage_row_idx = token_idx * topk + k
-                    cute.copy(
-                        load_atom,
-                        g_stage[(0, None), (stage_row_idx, my_atom_idx)],
-                        tCrR_per_k[k],
-                    )
+            if my_atom_idx < num_atoms:
+                for k in cutlass.range_constexpr(topk):
+                    expert_idx = my_topk[k]
+                    if expert_idx < num_experts:
+                        stage_row_idx = token_idx * topk + k
+                        cute.copy(
+                            load_atom,
+                            g_stage[(0, None), (stage_row_idx, my_atom_idx)],
+                            tCrR_per_k[k],
+                        )
 
-            tCrAcc.fill(0.0)
-            for k in cutlass.range_constexpr(topk):
-                expert_idx = my_topk[k]
-                if expert_idx < num_experts:
-                    tCrAcc.store(tCrAcc.load() + tCrR_per_k[k].load().to(cutlass.Float32))
+                tCrAcc.fill(0.0)
+                for k in cutlass.range_constexpr(topk):
+                    expert_idx = my_topk[k]
+                    if expert_idx < num_experts:
+                        tCrAcc.store(tCrAcc.load() + tCrR_per_k[k].load().to(cutlass.Float32))
 
-            tCrC.store(tCrAcc.load().to(output.element_type))
-            cute.copy(
-                store_atom,
-                tCrC,
-                g_out[(0, None), (token_idx, my_atom_idx)],
-            )
+                tCrC.store(tCrAcc.load().to(output.element_type))
+                cute.copy(
+                    store_atom,
+                    tCrC,
+                    g_out[(0, None), (token_idx, my_atom_idx)],
+                )

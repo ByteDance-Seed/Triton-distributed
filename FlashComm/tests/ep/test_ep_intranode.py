@@ -317,6 +317,8 @@ def parse_args():
     parser.add_argument("--disable-weight-dispatch", action="store_true", help="disable weight dispatch")
     parser.add_argument("--expert-alignment", default=1, type=int,
                         help="pad each expert's recv buffer to a multiple of this value (default 1 = no padding)")
+    parser.add_argument("--check-pinned-buffer-lifetime", action="store_true",
+                        help="check that dispatch layout pinned buffers remain live until the CUDA stream completes")
     return parser.parse_args()
 
 
@@ -515,9 +517,60 @@ def torch_backward_single(input, exp_indices, num_experts, enable_local_combine=
 
 
 def straggler(rank):
-    clock_rate = torch.cuda.clock_rate() * 1e6
-    cycles = random.randint(0, clock_rate * 0.0001) * (rank + 1)
+    try:
+        clock_rate = torch.cuda.clock_rate() * 1e6
+    except ModuleNotFoundError:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        clock_rate_khz = getattr(props, "clock_rate", 0)
+        clock_rate = clock_rate_khz * 1e3 if clock_rate_khz else 2.0e9
+    cycles = random.randint(0, max(0, int(clock_rate * 0.0001))) * (rank + 1)
     torch.cuda._sleep(cycles)
+
+
+def check_pinned_buffer_lifetime(ep_kernels, exp_indices):
+    torch.cuda.synchronize()
+    torch.distributed.barrier(group=EP_GROUP)
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        token_within_expert_offset, expert_counts = \
+            ep_kernels.compute_stable_local_token_within_expert_offset_and_expert_counts(exp_indices)
+        ep_kernels.ep_group_barrier()
+        # Defer layout after the stream-side group barrier. Sleeping before
+        # that barrier lets the barrier consume the delay.
+        torch.cuda._sleep(2_000_000_000)
+        layout_outputs = _ep.compute_dispatch_layout(
+            exp_indices,
+            token_within_expert_offset,
+            expert_counts,
+            ep_kernels.ep_context.full_splits_buf_ptrs,
+            ep_kernels.ep_context.nvl_barrier_buf_ptrs,
+            ep_kernels.ep_context.config.num_experts,
+            ep_kernels.ep_context.config.rank,
+            ep_kernels.ep_context.config.world_size,
+            ep_kernels.num_sm,
+            expert_alignment=128,
+        )
+
+    recv_count_tensors = (layout_outputs[3], layout_outputs[5])
+    assert all(tensor.is_pinned() for tensor in recv_count_tensors)
+    recv_count_ptrs = {tensor.data_ptr() for tensor in recv_count_tensors}
+    del recv_count_tensors, layout_outputs
+
+    assert not stream.query(), "pinned-buffer lifetime test did not leave pending CUDA work"
+    replacement_tensors = []
+    unsafe_reused_ptrs = set()
+    for _ in range(128):
+        tensor = torch.empty((WORLD_SIZE, ), dtype=torch.int32, pin_memory=True)
+        replacement_tensors.append(tensor)
+        if tensor.data_ptr() in recv_count_ptrs and not stream.query():
+            unsafe_reused_ptrs.add(tensor.data_ptr())
+
+    stream.synchronize()
+    torch.distributed.barrier(group=EP_GROUP)
+    assert not unsafe_reused_ptrs, (
+        "dispatch layout pinned recv-count buffers were reused before their CUDA stream completed: "
+        f"{sorted(unsafe_reused_ptrs)}")
 
 
 if __name__ == "__main__":
@@ -563,6 +616,16 @@ if __name__ == "__main__":
     ep_kernels = EPKernels(max_m=args.M, hidden=args.N, topk=args.topk, num_experts=args.G, local_world_size=WORLD_SIZE,
                            ep_group=EP_GROUP, num_sm=args.num_sm, num_worst_tokens=args.num_worst_tokens,
                            expert_alignment=args.expert_alignment)
+
+    if args.check_pinned_buffer_lifetime:
+        _, _, exp_indices = _make_data(min(args.M, 128))
+        check_pinned_buffer_lifetime(ep_kernels, exp_indices)
+        if RANK == 0:
+            print("Pinned dispatch recv-count buffer lifetime check passed.")
+        ep_kernels.finalize()
+        torch.distributed.destroy_process_group(EP_GROUP)
+        torch.distributed.destroy_process_group()
+        exit(0)
 
     def _run_dispatch(input, weight, exp_indices, copy_out=False):
         token_within_expert_offset, expert_counts = ep_kernels.compute_stable_local_token_within_expert_offset_and_expert_counts(

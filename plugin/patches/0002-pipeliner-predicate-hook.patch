@@ -1,0 +1,73 @@
+diff --git a/include/triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h b/include/triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h
+index 5700a366f..05c8b0dc0 100644
+--- a/include/triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h
++++ b/include/triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h
+@@ -3,6 +3,7 @@
+ 
+ #include "mlir/Dialect/SCF/IR/SCF.h"
+ #include "triton/Dialect/TritonGPU/IR/Dialect.h"
++#include <functional>
+ #include <optional>
+ #include <utility>
+ #include <vector>
+@@ -71,6 +72,21 @@ bool isOuterLoop(scf::ForOp forOp);
+ /// Function to mask operations during scheduling.
+ Operation *predicateOp(RewriterBase &rewriter, Operation *op, Value pred);
+ 
++// Out-of-tree extension hook (Triton-distributed patch; candidate upstream PR).
++//
++// `predicateOp` knows how to predicate the built-in side-effecting ops via a
++// hard-coded dyn_cast chain and report_fatal_error()s on any other *registered*
++// op. Out-of-tree dialects (Triton plugins) register a predicator here so the
++// software pipeliner can predicate their custom ops too -- the 3.7.1 analog of
++// 3.8's PredicatedOpInterface dispatch, without triton having to know the op
++// types. predicateOp consults the registered fns (in registration order) right
++// before the fatal error; the first to return a non-null Operation* handles it,
++// returning nullptr declines. Register at plugin load; not thread-safe w.r.t.
++// concurrent registration.
++using ExtraPredicateOpFn =
++    std::function<Operation *(RewriterBase &, Operation *, Value)>;
++void registerExtraPredicateOpFn(ExtraPredicateOpFn fn);
++
+ /// Wrap the operation into a MaskOp using the provided predicate, enabling high
+ /// level predication abstraction during pipelining.
+ Operation *wrapInMaskOp(RewriterBase &rewriter, Operation *op, Value pred);
+diff --git a/lib/Dialect/TritonGPU/Transforms/Pipeliner/PipeliningUtility.cpp b/lib/Dialect/TritonGPU/Transforms/Pipeliner/PipeliningUtility.cpp
+index b8170bfad..95a2d2ef0 100644
+--- a/lib/Dialect/TritonGPU/Transforms/Pipeliner/PipeliningUtility.cpp
++++ b/lib/Dialect/TritonGPU/Transforms/Pipeliner/PipeliningUtility.cpp
+@@ -29,6 +29,19 @@ namespace tt = mlir::triton;
+ namespace ttg = mlir::triton::gpu;
+ namespace ttng = mlir::triton::nvidia_gpu;
+ 
++namespace mlir::triton {
++// Triton-distributed patch: process-wide registry of out-of-tree predicators
++// (see registerExtraPredicateOpFn in PipeliningUtility.h). Consulted by
++// predicateOp before it errors on an unknown registered op.
++static std::vector<ExtraPredicateOpFn> &mutableExtraPredicateOpFns() {
++  static std::vector<ExtraPredicateOpFn> fns;
++  return fns;
++}
++void registerExtraPredicateOpFn(ExtraPredicateOpFn fn) {
++  mutableExtraPredicateOpFns().push_back(std::move(fn));
++}
++} // namespace mlir::triton
++
+ //===----------------------------------------------------------------------===//
+ // Hoisting Utilities
+ //===----------------------------------------------------------------------===//
+@@ -290,6 +303,14 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
+     return op;
+   }
+ 
++  // Triton-distributed patch: give out-of-tree dialects (plugins) a chance to
++  // predicate their custom ops before erroring (e.g. distributed.wait sets its
++  // optional `pred` operand). See registerExtraPredicateOpFn.
++  for (const auto &extra : mutableExtraPredicateOpFns()) {
++    if (Operation *handled = extra(rewriter, op, pred))
++      return handled;
++  }
++
+   op->emitOpError("pipeliner doesn't know how to predicate this op.");
+   llvm::report_fatal_error("Fatal pipeliner error");
+   return op;

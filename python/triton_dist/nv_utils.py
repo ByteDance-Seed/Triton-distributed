@@ -402,10 +402,34 @@ def is_gpu_max_performance_mode(device_id: int):
 
 
 @functools.lru_cache()
+def _triton_nvidia_bin_dir():
+    """Directory holding Triton's bundled NVIDIA tools (ptxas/nvlink/...).
+
+    Triton bundles a specific CUDA toolkit's tools here; `nvlink` MUST come from
+    the same toolkit as the `ptxas` that produced the object, otherwise nvlink
+    rejects it with `fatal: Input file ... newer than toolkit (N vs M)`. We
+    resolve this from the imported `triton.backends.nvidia` module rather than a
+    path relative to this file: after the plugin refactor Triton is a separate
+    (pip/editable) install, not a sibling under `python/`, so the old relative
+    guess pointed nowhere and nvlink silently fell back to the (older) system
+    CUDA_HOME toolkit.
+    """
+    try:
+        import triton.backends.nvidia as _nv
+        return os.path.join(os.path.dirname(_nv.__file__), "bin")
+    except Exception:
+        return ""
+
+
+@functools.lru_cache()
 def _path_to_binary(binary: str):
     binary += sysconfig.get_config_var("EXE")
     paths = [
         os.environ.get(f"TRITON_{binary.upper()}_PATH", ""),
+        # Triton's actual bundled tools (matches the bundled ptxas toolkit).
+        os.path.join(_triton_nvidia_bin_dir(), binary) if _triton_nvidia_bin_dir() else "",
+        # Legacy monorepo layout (triton as a sibling under python/); kept as a
+        # fallback for source-tree checkouts.
         os.path.join(Path(os.path.dirname(__file__)).parent, "triton/backends/nvidia/bin", binary),
     ]
 
@@ -552,7 +576,9 @@ class NVSHMEMHelper:
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f"PTX generation failed: {e}")
             fptx.flush()
-            ptxas = get_ptxas().path
+            # Triton 3.7.1's get_ptxas takes the SM capability (int) to pick the right
+            # ptxas (blackwell vs default); 3.4 took no argument.
+            ptxas = get_ptxas(capability).path
             # ptx => cubin
             ptxas_cmd = [ptxas, "-c", fptx.name, f"--gpu-name={arch}", f"-maxrregcount={maxnreg}", "-o", fbin.name]
             try:

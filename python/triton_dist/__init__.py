@@ -25,13 +25,19 @@
 # yapf: disable
 # forward import torch to load libtorch_cpu.so and libtorch_cuda.so
 import torch  # noqa: F401
-import triton  # noqa: F401
-from packaging.version import Version
+# Register the out-of-tree distributed plugin on TRITON_PLUGIN_PATHS *before*
+# Triton is imported, so libtriton dlopens it during its (one-time) init.
+from ._plugin import register_plugin as _register_plugin  # noqa: E402
+
+_register_plugin()
+import triton  # noqa: F401,E402
+from packaging.version import Version  # noqa: E402
 # yapf: enable
-from . import language  # noqa: F401
-from .jit import jit  # noqa: F401
-from .tools.monkey_inductor import apply_triton340_inductor_patch  # noqa: F401
-from .tools.monkey_inductor import TORCH_VERSION
+
+from . import language  # noqa: F401, E402
+from .jit import jit  # noqa: F401, E402
+from .tools.monkey_inductor import apply_triton340_inductor_patch  # noqa: F401, E402
+from .tools.monkey_inductor import TORCH_VERSION  # noqa: E402
 
 triton_version = Version(triton.__version__)
 require_patched_torch = (Version("2.7.0a0") <= TORCH_VERSION < Version("2.8.1"))

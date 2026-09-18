@@ -23,37 +23,35 @@
 #
 ################################################################################
 
+import dataclasses
 import datetime
 import functools
+import glob
 import hashlib
 import logging
 import os
-import glob
 import random
 import re
-import time
+import shutil
 import sysconfig
+import time
 import warnings
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple, Union, Dict
 
 import numpy as np
 import packaging.version
 import torch
 import triton
+
 import triton_dist
-import dataclasses
-import shutil
 
 
 def is_cuda():
     """Checks if 'nvidia-smi' is available on the system's PATH."""
-    if shutil.which("nvidia-smi"):
-        return True
-    else:
-        return False
+    return bool(shutil.which("nvidia-smi"))
 
 
 if is_cuda():
@@ -63,31 +61,23 @@ if is_cuda():
         from cuda.core.experimental import Device
 
     try:
-        from cuda.bindings import driver as cuda, runtime as cudart
+        from cuda.bindings import driver as cuda
+        from cuda.bindings import runtime as cudart
     except ImportError:
         from cuda import cuda, cudart
 
 
 def is_hip():
-    if shutil.which("rocm-smi"):
-        return True
-    else:
-        return False
+    return bool(shutil.which("rocm-smi"))
 
 
 def is_maca():
-    if shutil.which("mx-smi"):
-        return True
-    else:
-        return False
+    return bool(shutil.which("mx-smi"))
 
 
 def is_ascend():
     """Checks if 'npu-smi' is available on the system's PATH."""
-    if shutil.which("npu-smi"):
-        return True
-    else:
-        return False
+    return bool(shutil.which("npu-smi"))
 
 
 def get_shmem_backend():
@@ -101,7 +91,7 @@ def get_shmem_backend():
                              f"Set via: export TRITON_DIST_SHMEM_BACKEND=<backend>")
         return backend
     else:
-        raise Exception("either CUDA or HIP platform is supported")
+        raise RuntimeError("either CUDA or HIP platform is supported")
 
 
 def is_rocshmem():
@@ -117,20 +107,22 @@ def is_mori_shmem():
 if is_cuda():
     import nvshmem
     import nvshmem.core
+
     from .nv_utils import (
-        get_numa_node,
         _get_pynvml_device_id,
-        get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
+        get_max_gpu_clock_rate_in_khz,
+        get_numa_node,
         has_fullmesh_nvlink,
     )
 elif is_hip():
     from hip import hip
+
     from .amd_utils import (
-        get_numa_node,
         _get_amdsmi_device_index,
-        get_max_gpu_clock_rate_in_khz,
         get_current_gpu_clock_rate_in_khz,
+        get_max_gpu_clock_rate_in_khz,
+        get_numa_node,
     )
 
     # Dynamically import SHMEM library based on backend selection
@@ -145,11 +137,11 @@ elif is_hip():
                               "Please install mori_shmem or use rocshmem backend: "
                               "export TRITON_DIST_SHMEM_BACKEND=rocshmem")
 elif is_maca():
-    import triton.pymaca.maca as maca
+    from triton.pymaca import maca
 elif is_ascend():
     pass
 else:
-    raise Exception("either CUDA or HIP platform is supported")
+    raise RuntimeError("either CUDA or HIP platform is supported")
 
 # Some code from python/flux/util.py in flux project
 
@@ -165,7 +157,7 @@ def CUDA_CHECK(err):
         if err != cudart.cudaError_t.cudaSuccess:
             raise RuntimeError(f"Cuda Error: {err}: {cudart.cudaGetErrorString(err)}")
     else:
-        raise RuntimeError(f"Unknown error type: {err}")
+        raise RuntimeError(f"Unknown error type: {err}")  # noqa: TRY004
 
 
 def init_seed(seed=0):
@@ -176,8 +168,8 @@ def init_seed(seed=0):
     # available since torch 2.2: https://docs.pytorch.org/docs/2.2/deterministic.html
     try:
         torch.utils.deterministic.fill_uninitialized_memory = False
-    except Exception:
-        logging.warning("torch.utils.fill_uninitialized_memory is available only for torch >=2.2")
+    except Exception:  # noqa: BLE001
+        logging.warning("torch.utils.fill_uninitialized_memory is available only for torch >=2.2")  # noqa: LOG015
     torch.set_printoptions(precision=2)
     torch.manual_seed(3 + seed)
     torch.cuda.manual_seed_all(3 + seed)
@@ -262,14 +254,7 @@ def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
     return tensor
 
 
-def mori_shmem_create_tensor(shape, dtype) -> torch.Tensor:
-    # torch.cuda.synchronize()
-    tensor = mori_shmem.mori_shmem_create_tensor(shape, dtype=dtype)
-    # torch.cuda.synchronize()
-    return tensor
-
-
-def nvshmem_create_tensors(shape, dtype, rank, local_world_size) -> List[torch.Tensor]:
+def nvshmem_create_tensors(shape, dtype, rank, local_world_size) -> list[torch.Tensor]:
 
     def _get_peer_tensor(t, peer) -> torch.Tensor:
         # avoid create tensor on the same buf again. nvshmem4py can't handle multiple reference with grace. so we handle it here.
@@ -291,12 +276,6 @@ def nvshmem_free_tensor_sync(tensor):
     torch.cuda.synchronize()
     nvshmem.core.free_tensor(tensor)
     torch.cuda.synchronize()
-
-
-def mori_shmem_free_tensor_sync(tensor):
-    # torch.cuda.synchronize()
-    mori_shmem.mori_shmem_free_tensor(tensor)
-    # torch.cuda.synchronize()
 
 
 def finalize_distributed():
@@ -322,27 +301,46 @@ class TorchStreamWrapper:
         return (0, stream_id)  # Return format required by CUDA Python
 
 
-def nvshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+def nvshmem_barrier_all_on_stream(stream: torch.cuda.Stream | None = None):
     stream = stream or torch.cuda.current_stream()
     nvshmem.core.barrier(nvshmem.core.Teams.TEAM_WORLD, stream=TorchStreamWrapper(stream))
 
 
-def rocshmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
+def rocshmem_barrier_all_on_stream(stream: torch.cuda.Stream | None = None):
     stream = stream.cuda_stream or torch.cuda.current_stream().cuda_stream
     pyrocshmem.rocshmem_barrier_all_on_stream(stream)
 
 
-def mori_shmem_barrier_all_on_stream(stream: Optional[torch.cuda.Stream] = None):
-    if stream is None:
-        stream = torch.cuda.current_stream()
-    mori_shmem.shmem_barrier_on_stream(stream)
+# mori_shmem symmetric-tensor helpers used by the AMD fused-MoE path
+# (kernels/amd/ep_all2all_fused.py), implemented on the mori.shmem API
+# (mori_shmem_create_tensor / shmem_free / shmem_barrier_all).
+def mori_shmem_create_tensor(shape, dtype) -> torch.Tensor:
+    import mori.shmem as mori_shmem
+    torch.cuda.synchronize()
+    tensor = mori_shmem.mori_shmem_create_tensor(list(shape), dtype)
+    torch.cuda.synchronize()
+    return tensor
+
+
+def mori_shmem_free_tensor_sync(tensor: torch.Tensor):
+    import mori.shmem as mori_shmem
+    torch.cuda.synchronize()
+    mori_shmem.shmem_free(tensor.data_ptr())
+    torch.cuda.synchronize()
+
+
+def mori_shmem_barrier_all_on_stream(stream: torch.cuda.Stream | None = None):
+    import mori.shmem as mori_shmem
+    stream = stream or torch.cuda.current_stream()
+    with torch.cuda.stream(stream):
+        mori_shmem.shmem_barrier_all()
 
 
 def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.distributed.ProcessGroup:
-    RANK = int(os.environ.get("RANK", 0))
-    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 8))
+    RANK = int(os.environ.get("RANK", "0"))
+    LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
+    LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", "8"))
     global _TRITON_DIST_LOCAL_WORLD_SIZE
     _TRITON_DIST_LOCAL_WORLD_SIZE = LOCAL_WORLD_SIZE
     torch.cuda.set_device(LOCAL_RANK)
@@ -373,7 +371,6 @@ def initialize_distributed(seed=None, initialize_shmem: bool = True) -> torch.di
 
 
 def get_triton_dist_world():
-    global _TRITON_DIST_WORLD
     if not _TRITON_DIST_WORLD:
         warnings.warn("Using triton_dist but it has not been initialized. "
                       "This will result in Undefined Behavior.")
@@ -381,7 +378,6 @@ def get_triton_dist_world():
 
 
 def get_triton_dist_local_world_size():
-    global _TRITON_DIST_LOCAL_WORLD_SIZE
     if not _TRITON_DIST_LOCAL_WORLD_SIZE:
         warnings.warn("Using triton_dist but it has not been initialized. "
                       "This will result in Undefined Behavior.")
@@ -403,9 +399,9 @@ def is_fp8_dtype(dtype: torch.dtype) -> bool:
 
 
 def _make_tensor(
-    shape: List[Union[int, Callable[[], int]]],
+    shape: list[int | Callable[[], int]],
     dtype: torch.dtype,
-    init_args: Union[Tuple[float, float], Tuple[int, int]],
+    init_args: tuple[float, float] | tuple[int, int],
     device: str = "cuda",
 ):
     """
@@ -419,7 +415,7 @@ def _make_tensor(
     elif isinstance(shape, Callable):
         shape = shape()
     else:
-        raise ValueError(f"unsupported shape {shape}")
+        raise ValueError(f"unsupported shape {shape}")  # noqa: TRY004
 
     scale, bias = init_args
     if dtype in [torch.float16, torch.bfloat16, torch.float32]:
@@ -443,8 +439,8 @@ def generate_data(configs):
 
 
 def dist_print(*args, **kwargs):
-    rank = int(os.getenv("RANK", 0))
-    world_size = int(os.getenv("WORLD_SIZE", 1))
+    rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
     prefix = False
     if "allowed_ranks" in kwargs:
         allowed_ranks = kwargs["allowed_ranks"]
@@ -479,9 +475,8 @@ def HIP_CHECK(call_result):
     result = call_result[1:]
     if len(result) == 1:
         result = result[0]
-    if isinstance(err, hip.hipError_t):
-        if err != hip.hipError_t.hipSuccess:
-            raise RuntimeError(f"HIP Error: {str(err)}")
+    if isinstance(err, hip.hipError_t) and err != hip.hipError_t.hipSuccess:
+        raise RuntimeError(f"HIP Error: {err!s}")
     return result
 
 
@@ -490,7 +485,7 @@ def MACA_CHECK(err):
         if err != maca.mcError_t.mcSuccess:
             raise RuntimeError(f"MACA Error: {err}: {maca.mcGetErrorString(err)}")
     else:
-        raise RuntimeError(f"Unknown error type: {err}")
+        raise RuntimeError(f"Unknown error type: {err}")  # noqa: TRY004
 
 
 def get_cpu_info_linux():
@@ -508,7 +503,7 @@ def get_cpu_info_linux():
     return model_name
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_numa_node_count_in_group(pg: torch.distributed.ProcessGroup):
     nranks = pg.size()
     numa_node = get_numa_node(torch.cuda.current_device())
@@ -527,7 +522,7 @@ def get_numa_node_count_in_group(pg: torch.distributed.ProcessGroup):
     return 1
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_group_numa_world_size(pg: torch.distributed.ProcessGroup):
     """
     allgather all ranks in the process group and get the NUMA world size
@@ -535,7 +530,7 @@ def get_group_numa_world_size(pg: torch.distributed.ProcessGroup):
     return pg.size() // get_numa_node_count_in_group(pg)
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def supports_p2p_native_atomic():
     assert torch.cuda.is_available()
     count = torch.cuda.device_count()
@@ -565,7 +560,7 @@ def requires_p2p_native_atomic(fn):
     return wrapper
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_device_max_shared_memory_size(device_id):
     err, prop = cudart.cudaGetDeviceProperties(device_id)
     CUDA_CHECK(err)
@@ -577,7 +572,7 @@ def get_device_max_shared_memory_size(device_id):
 NVSHMEM_SIGNAL_DTYPE = torch.int64
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_nvshmem_home() -> Path:
     if (nvshmem_home := os.getenv("NVSHMEM_HOME")) is not None:
         return Path(nvshmem_home)
@@ -586,11 +581,11 @@ def get_nvshmem_home() -> Path:
         import nvidia.nvshmem
 
         return Path(nvidia.nvshmem.__path__[0])
-    except Exception:
+    except Exception:  # noqa: S110,BLE001
         pass
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_nvshmem_version():
     header_path = get_nvshmem_home() / "include" / "non_abi" / "nvshmem_version.h"
     version_macros = {
@@ -678,7 +673,7 @@ def get_mxshmem_hash():
 
 # Note: MORI SHMEM currently only requires a single device BC file (_get_mori_shmem_libdevice()).
 # get_mori_home() is kept for future compatibility but not currently used.
-@functools.lru_cache()
+@functools.lru_cache
 def get_mori_home() -> Path:
     if (mori_home := os.getenv("MORI_HOME")) is not None:
         return Path(mori_home)
@@ -720,7 +715,7 @@ def get_mori_shmem_hash():
     return mori_hash
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_shmem_version():
     if is_cuda():
         return get_nvshmem_version()
@@ -733,7 +728,7 @@ def get_shmem_version():
     return "unknown"
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_shmem_hash():
     if is_cuda():
         return get_nvshmem_hash()
@@ -748,21 +743,21 @@ def get_shmem_hash():
     return "unknown"
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def has_nvshmemi_bc_built():
     try:
         nvshmem_home = get_nvshmem_home()
         return Path(nvshmem_home / "lib" / "libnvshmemi_device.bc").exists()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def is_nvshmem_multimem_supported():
     if not is_cuda():
         return False
     # this is a python version of nvshmem nvshmemi_detect_nvls_support
-    err, cuda_driver_version = cuda.cuDriverGetVersion()
+    err, _cuda_driver_version = cuda.cuDriverGetVersion()
     CUDA_CHECK(err)
 
     err, is_multicast_supported = cuda.cuDeviceGetAttribute(
@@ -779,18 +774,17 @@ def is_nvshmem_multimem_supported():
     if torch.cuda.get_device_capability()[0] < 9 or not has_fullmesh_nvlink():
         return False
 
-    return all([
+    return all(
         hasattr(cuda, x) for x in [
             "cuMulticastCreate",
             "cuMulticastBindMem",
             "cuMulticastUnbind",
             "cuMulticastGetGranularity",
             "cuMulticastAddDevice",
-        ]
-    ])
+        ])
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def has_tma():
     cap_major = torch.cuda.get_device_capability()[0]
     return is_cuda() and cap_major >= 9
@@ -810,7 +804,7 @@ def requires(condition_func):
     return decorator
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def get_device_property(device_id=0):
     return torch.cuda.get_device_properties(device_id)
 
@@ -826,7 +820,7 @@ def triton_packed_version():
     return packaging.version.Version(triton.__version__)
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def support_launch_cooperative_grid():
     return triton_packed_version() >= packaging.version.Version("3.3.0")
 
@@ -849,16 +843,16 @@ def cuda_occupancy_max_activate_blocks_per_multiprocessor(triton_func, num_warps
     return ret[1]
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def torch_stream_max_priority():
     try:
         _, high = torch.cuda.current_stream().priority_range()
-    except Exception:
+    except Exception:  # noqa: BLE001
         high = -1
     return high
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def triton_dist_key():
 
     TRITON_DIST_PATH = triton_dist.__path__[0]
@@ -873,12 +867,19 @@ def triton_dist_key():
             with open(pyfile, "rb") as f:
                 contents += [hashlib.sha256(f.read()).hexdigest()]
 
-    # backend
+    # backend: hash libtriton plus the out-of-tree distributed plugin .so. The
+    # legacy intrusive build shipped a `libtriton_distributed` inside triton/_C; the
+    # plugin refactor replaces it with `libtriton_dist.so`, located via the plugin
+    # resolver (it may live outside triton/_C, e.g. plugin/build or triton_dist/lib).
     libtriton_hash = hashlib.sha256()
     ext = sysconfig.get_config_var("EXT_SUFFIX").split(".")[-1]
-    libs = ["libtriton", "libtriton_distributed"]
-    for lib in libs:
-        with open(os.path.join(triton.__path__[0], "_C", f"{lib}.{ext}"), "rb") as f:
+    so_paths = [os.path.join(triton.__path__[0], "_C", f"libtriton.{ext}")]
+    from triton_dist._plugin import find_plugin
+    plugin_so = find_plugin()
+    if plugin_so is not None:
+        so_paths.append(plugin_so)
+    for so_path in so_paths:
+        with open(so_path, "rb") as f:
             while True:
                 chunk = f.read(1024**2)
                 if not chunk:
@@ -898,7 +899,7 @@ def get_bool_env(env, default_value):
     env_value = env_value.lower()
     try:
         assert env_value in ["on", "off", "1", "0", "true", "false"]
-    except Exception:
+    except Exception:  # noqa: BLE001
         print(f"env {env} is not bool, use default value {default_value}")
         return default_value
     return env_value in ["on", "1", "true"]
@@ -910,12 +911,12 @@ def get_int_env(env, default_value):
         return default_value
     try:
         return int(env_value)
-    except Exception:
+    except Exception:  # noqa: BLE001
         print(f"env {env} is not int, use default value {default_value}")
         return default_value
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def _is_cuda_launch_blocking():
     if is_cuda():
         return get_bool_env("CUDA_LAUNCH_BLOCKING", False)
@@ -991,9 +992,8 @@ def rand_tensor(shape, dtype: torch.dtype, device: torch.device | int | str = "c
     if dtype in [torch.float16, torch.bfloat16, torch.float]:
         return torch.rand(shape, dtype=dtype, device=device) * 2 - 1
 
-    if _torch_has_fp8():
-        if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-            return (torch.rand(shape, dtype=torch.bfloat16, device=device) * 2 - 1).to(dtype)
+    if _torch_has_fp8() and dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        return (torch.rand(shape, dtype=torch.bfloat16, device=device) * 2 - 1).to(dtype)
 
     if dtype == torch.int8:
         return torch.randint(-2**7, 2**7, shape, dtype=dtype, device=device)
@@ -1008,7 +1008,7 @@ def rand_tensor(shape, dtype: torch.dtype, device: torch.device | int | str = "c
     if dtype == torch.uint32:
         return torch.randint(0, 2**32, shape, dtype=dtype, device=device)
 
-    raise Exception(f"rand for {dtype} not implemented")
+    raise RuntimeError(f"rand for {dtype} not implemented")
 
 
 ################################################################################
@@ -1068,9 +1068,9 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 class LazyTensorSpec:
     """Specification for a lazy tensor."""
     name: str
-    shape: List[int]
+    shape: list[int]
     dtype: torch.dtype
-    fill_value: Optional[float] = None  # Value to fill after allocation, None means no fill
+    fill_value: float | None = None  # Value to fill after allocation, None means no fill
 
     @property
     def numel(self) -> int:
@@ -1100,7 +1100,7 @@ class LazyTensor:
     def __init__(self, spec: LazyTensorSpec, allocator: 'LazyAllocator'):
         self._spec = spec
         self._allocator = allocator
-        self._tensor: Optional[torch.Tensor] = None
+        self._tensor: torch.Tensor | None = None
 
     @property
     def is_materialized(self) -> bool:
@@ -1131,7 +1131,7 @@ class LazyTensor:
         """Get the size in bytes (available before materialization)."""
         return self._spec.nbytes
 
-    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
+    def size(self, dim: int | None = None) -> torch.Size | int:
         """Get size like torch.Tensor.size()."""
         if dim is None:
             return self.shape
@@ -1171,7 +1171,7 @@ class LazyTensor:
         self._ensure_materialized()
         return self._tensor
 
-    def get_underlying_tensor(self) -> Optional[torch.Tensor]:
+    def get_underlying_tensor(self) -> torch.Tensor | None:
         """Get the underlying tensor, or None if not materialized."""
         return self._tensor
 
@@ -1221,7 +1221,7 @@ class LazyTensor:
             return self._tensor.dim()
         return len(self._spec.shape)
 
-    def stride(self, dim: Optional[int] = None):
+    def stride(self, dim: int | None = None):
         self._ensure_materialized()
         if dim is None:
             return self._tensor.stride()
@@ -1326,8 +1326,8 @@ class LazyAllocator:
         tensor1.fill_(0)
     """
 
-    def __init__(self, create_tensor_fn: Callable[[List[int], torch.dtype], torch.Tensor],
-                 free_tensor_fn: Optional[Callable[[torch.Tensor], None]] = None, lazy: bool = False):
+    def __init__(self, create_tensor_fn: Callable[[list[int], torch.dtype], torch.Tensor],
+                 free_tensor_fn: Callable[[torch.Tensor], None] | None = None, lazy: bool = False):
         """
         Initialize the allocator.
 
@@ -1340,7 +1340,7 @@ class LazyAllocator:
         self._create_tensor_fn = create_tensor_fn
         self._free_tensor_fn = free_tensor_fn
         self._lazy = lazy
-        self._lazy_tensors: List[LazyTensor] = []
+        self._lazy_tensors: list[LazyTensor] = []
         self._materialized = False
         self._total_bytes = 0
 
@@ -1354,8 +1354,8 @@ class LazyAllocator:
         """Check if all tensors have been materialized."""
         return self._materialized or not self._lazy
 
-    def create_tensor(self, name: str, shape: List[int], dtype: torch.dtype,
-                      fill_value: Optional[float] = None) -> LazyTensor:
+    def create_tensor(self, name: str, shape: list[int], dtype: torch.dtype,
+                      fill_value: float | None = None) -> LazyTensor:
         """
         Create a (potentially lazy) tensor.
 
@@ -1397,7 +1397,7 @@ class LazyAllocator:
         """Get the total size in MB."""
         return self._total_bytes / (1024**2)
 
-    def get_tensor_breakdown(self) -> Dict[str, int]:
+    def get_tensor_breakdown(self) -> dict[str, int]:
         """
         Get a breakdown of memory usage by tensor.
 
@@ -1441,7 +1441,7 @@ class LazyAllocator:
         """Alias for sync()."""
         self.sync()
 
-    def free_tensor(self, tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> None:
+    def free_tensor(self, tensor_or_lazy: LazyTensor | torch.Tensor | None) -> None:
         """
         Free a tensor using the configured free function.
 
@@ -1466,7 +1466,7 @@ class LazyAllocator:
 
 
 # Convenience function for getting underlying tensor
-def get_underlying_tensor(tensor_or_lazy: Union[LazyTensor, torch.Tensor, None]) -> Optional[torch.Tensor]:
+def get_underlying_tensor(tensor_or_lazy: LazyTensor | torch.Tensor | None) -> torch.Tensor | None:
     """
     Get the underlying tensor from a LazyTensor or return the tensor as-is.
 

@@ -262,7 +262,7 @@ def test_matmul_descriptor_persistent():
 if __name__ == "__main__":
     if USE_AOT:
         try:
-            from triton._C.libtriton_distributed import distributed
+            from triton_dist._C.libtriton_distributed import distributed
         except ImportError as e:
             print("AOT lib not found, please follow the doc to build")
             print(e)

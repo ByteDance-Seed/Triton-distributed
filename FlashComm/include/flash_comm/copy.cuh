@@ -53,8 +53,15 @@ template <int Count> __forceinline__ __device__ void tma_store_wait() {
   asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
 }
 
+// Full completion is stronger than the source-read drain above: it also waits
+// for destination writes to complete and become visible. Use this before a
+// kernel publishes completion to another GPU or returns data to its caller.
+__forceinline__ __device__ void tma_store_wait_all() {
+  asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
+}
+
 __forceinline__ __device__ void tma_store_arrive() {
-  asm volatile("cp.async.bulk.commit_group;");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
 }
 
 template <uint32_t Stages_> struct PipelineState {

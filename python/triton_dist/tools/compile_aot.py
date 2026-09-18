@@ -33,6 +33,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+# Register the out-of-tree distributed plugin on TRITON_PLUGIN_PATHS *before*
+# importing triton: the AOT pipeline (triton_dist.jit) lowers the Distributed/SIMT
+# dialects, whose passes (e.g. convert_triton_distributed_to_tritongpu) are only
+# registered once Triton loads the plugin. Triton reads TRITON_PLUGIN_PATHS exactly
+# once at first libtriton init, so this import must precede `import triton`.
+import triton_dist  # noqa: F401,E402
+
 import triton
 import triton.backends
 import triton.language as tl
@@ -559,6 +566,14 @@ def link_all(workspace: Path, libname: str, context: Dict[str, Dict]):
     content = "#include <cuda.h>\n"
     content += "#include <stdint.h>\n"
     content += "#include <stdbool.h>\n"
+    # Triton 3.7.1's tools/link.py emits backend-abstract typedefs (TT_StreamTy /
+    # TT_ResultTy) in its declaration/definition templates instead of the
+    # hardcoded CUstream / CUresult used by 3.4. Upstream resolves them by
+    # prepending extra/<backend>/link.h; we target CUDA (the header already
+    # includes <cuda.h>), so define the same typedefs inline here.
+    content += "typedef CUstream TT_StreamTy;\n"
+    content += "typedef CUresult TT_ResultTy;\n"
+    content += "#define TT_ERROR_INVALID_VALUE CUDA_ERROR_INVALID_VALUE\n"
     content += """
     #pragma once
     #ifdef __cplusplus
