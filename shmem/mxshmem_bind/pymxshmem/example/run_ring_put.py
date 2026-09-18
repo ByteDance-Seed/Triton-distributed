@@ -1,3 +1,7 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
+
 # torchrun --nproc_per_node=8 --nnodes=1 run_ring_put.py
 import datetime
 import os

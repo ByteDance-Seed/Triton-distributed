@@ -1,3 +1,7 @@
+//
+// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+//
+
 #include <cuda.h>
 
 __global__ void flush_l2c_dev() {

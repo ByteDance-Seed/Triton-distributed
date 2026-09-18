@@ -41,7 +41,12 @@ Using Triton-distributed, programmers are able to develop efficient kernels comp
 Triton-distributed currently mainly targets Nvidia GPU and AMD GPU. It can also be ported to other hardware platforms.
 Feel free to contact us if you want to use Triton-distributed on your own hardware.
 
+This branch tracks **Triton 3.4**. The default branch has moved to Triton 3.7, where Triton-distributed builds as an out-of-tree plugin against stock upstream Triton.
+
 ## News
+- 08/06/2026 ✨✨✨: Ascend RDMA support ([PR #179](https://github.com/ByteDance-Seed/Triton-distributed/pull/179)).
+- 07/12/2026 ✨✨✨: FlashComm CUDA communication library with EP overlap, TMA support, `TRITON_DIST_CGA_CLUSTER_SIZE`, Triton host-overhead optimization, and AMD mori-shmem EP intra-node / low-latency kernels.
+- 06/30/2026 ✨✨✨: Fused intra-node CuTeDSL dispatch/combine on Hopper GPUs (dispatch+FC1 and FC2+combine).
 - 12/22/2025 ✨✨✨: Updated EP functions, support low-latency mode, token saving, and Mega-EP.
 - 21/10/2025 🔥🔥🔥: Triton-distributed is presented at [Triton Conference 2025](https://tritonconference.eventbuilder.com/TritonDeveloperConference?ref=TritonDeveloperConference), see the [talk](https://www.youtube.com/playlist?list=PLc_vA1r0qoiQqCdWFDUDqI90oY5EjfGuO) for details.
 - 09/03/2025 ✨✨✨: Introduced Intra-Kernel Profiler, See the [doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/profiler/intra_kernel_profiler.md) for details.

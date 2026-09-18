@@ -13,7 +13,13 @@
 # The above copyright notice and this permission notice shall be
 # included in all copies or substantial portions of the Software.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, ...
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
 """
@@ -309,8 +315,7 @@ def run_case(args, EP_GROUP, rank, world_size, device, *, name, M, H, I, G, topk
                 raised = False
                 try:
                     fused_dispatch_token_moe_grouped_gemm(ctx, x, idx, W1_local,
-                                                          use_device_metadata=use_device_metadata,
-                                                          num_sms=args.num_sms,
+                                                          use_device_metadata=use_device_metadata, num_sms=args.num_sms,
                                                           num_dispatch_tasks=args.num_dispatch_tasks)
                 except RuntimeError as e:
                     raised = "cap_tokens" in str(e)
@@ -359,12 +364,10 @@ def main():
         dict(name="more_experts", M=128, H=512, I=512, G=4 * ws, topk=4, capacity=float(ws), routing="random"),
         # high top-k: 8 experts per token (subset of G = 4*ws)
         dict(name="topk8", M=128, H=512, I=512, G=4 * ws, topk=8, capacity=float(ws), routing="random"),
-        dict(name="fp16", M=256, H=512, I=512, G=2 * ws, topk=2, capacity=float(ws), routing="random",
-             dtype="float16"),
+        dict(name="fp16", M=256, H=512, I=512, G=2 * ws, topk=2, capacity=float(ws), routing="random", dtype="float16"),
         dict(name="ungated", M=192, H=512, I=512, G=2 * ws, topk=2, capacity=float(ws), routing="random", gated=False),
         # num_tokens < max_tokens, and per-iter varying token counts (context reuse)
-        dict(name="partial", M=256, H=512, I=512, G=2 * ws, topk=2, capacity=float(ws), routing="random",
-             n_tokens=100),
+        dict(name="partial", M=256, H=512, I=512, G=2 * ws, topk=2, capacity=float(ws), routing="random", n_tokens=100),
         dict(name="capacity_too_small", M=256, H=256, I=256, G=2 * ws, topk=2, capacity=0.5, routing="balanced_rr",
              expect_capacity_error=True),
     ]

@@ -44,7 +44,12 @@ Triton-distributed是基于OpenAI Triton构建的分布式编译器，专为计�
 
 [安装指导](docs/build.md)
 
+本分支跟踪 **Triton 3.4**。默认分支已切换到 Triton 3.7，在那里 Triton-distributed 作为 out-of-tree plugin 构建在上游 Triton 上。
+
 ### 最近更新
+- 08/06/2026 ✨✨✨: 支持 Ascend RDMA（[PR #179](https://github.com/ByteDance-Seed/Triton-distributed/pull/179)）。
+- 07/12/2026 ✨✨✨: FlashComm CUDA 通信库（含 EP overlap）、TMA、`TRITON_DIST_CGA_CLUSTER_SIZE`、Triton host-overhead 优化，以及 AMD mori-shmem EP intra-node / 低延迟 kernel。
+- 06/30/2026 ✨✨✨: Hopper GPU 上融合 intra-node CuTeDSL dispatch/combine（dispatch+FC1 与 FC2+combine）。
 - 08/24/2025 ⚡⚡⚡：支持 [ByteDance-Seed/Seed-OSS-36B-Instruct](https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct) 的推理加速，实现 1.33 倍加速。
 - 08/13/2025 ✨✨✨: MegaTritonKernel 实现，以及在 H20/H800 上提供 Qwen3 TP demo，详情参见 [MegaKernel Doc](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/getting-started/megakernel/megakernel.md)。
 - 08/06/2025 ✨✨✨: 在 H800 上支持 GEMM+AllReduce 算子，以及在 L20 上支持 MoE TP 算子, 详情参见 [GEMM+AR Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_gemm_ar.py) 和 [MOE Test](https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_moe_reduce_rs.py)。

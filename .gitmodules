@@ -4,9 +4,11 @@
 [submodule "3rdparty/mori"]
 	path = 3rdparty/mori
 	url = https://github.com/ROCm/mori.git
+	shallow = true
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+	shallow = true
 [submodule "3rdparty/shmem"]
 	path = 3rdparty/shmem
 	url = https://gitcode.com/cann/shmem.git

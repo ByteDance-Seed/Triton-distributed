@@ -1,4 +1,8 @@
 //
+// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+//
+
+//
 // Modification Copyright 2026 Huawei Technologies Ltd. and/or its affiliates.
 //
 #ifndef TRITONDISTRIBUTED_HIVM_CONVERSION_PASSES

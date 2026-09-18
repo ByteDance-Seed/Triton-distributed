@@ -1,3 +1,7 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
+
 import torch
 import torch.distributed
 from triton_dist.kernels.metax import ag_gemm_inter_node, create_ag_gemm_inter_node_context, gemm
