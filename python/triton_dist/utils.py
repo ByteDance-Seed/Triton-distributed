@@ -307,8 +307,8 @@ def nvshmem_barrier_all_on_stream(stream: torch.cuda.Stream | None = None):
 
 
 def rocshmem_barrier_all_on_stream(stream: torch.cuda.Stream | None = None):
-    stream = stream.cuda_stream or torch.cuda.current_stream().cuda_stream
-    pyrocshmem.rocshmem_barrier_all_on_stream(stream)
+    stream = stream or torch.cuda.current_stream()
+    pyrocshmem.rocshmem_barrier_all_on_stream(stream.cuda_stream)
 
 
 # mori_shmem symmetric-tensor helpers used by the AMD fused-MoE path
