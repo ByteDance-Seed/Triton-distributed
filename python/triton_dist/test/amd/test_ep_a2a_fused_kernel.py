@@ -54,6 +54,7 @@ Usage (mori_shmem; RCCL on this firmware requires HSA_NO_SCRATCH_RECLAIM=1):
     bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_a2a_fused_kernel.py
 """
 
+# ruff: noqa: E402
 import os
 import sys
 import argparse
