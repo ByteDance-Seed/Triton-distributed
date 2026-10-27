@@ -15,7 +15,7 @@ API Reference
    :param ctx: AGGemmIntraNodeContext
    :returns: Output tensor of shape ``[M, N]``
 
-.. py:function:: create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, rank, world_size, tp_group, M_PER_CHUNK=256)
+.. py:function:: create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, rank, num_ranks, tp_group, ag_streams=None, M_PER_CHUNK=1024, use_copy_kernel=False, comm_sms=0)
 
    Creates the context for AG-GEMM intra-node operation on AMD GPUs.
 
@@ -25,10 +25,13 @@ API Reference
    :param input_dtype: Input data type
    :param output_dtype: Output data type
    :param rank: Current rank ID
-   :param world_size: Total number of ranks
+   :param num_ranks: Total number of ranks
    :param tp_group: Tensor parallel process group
-   :param M_PER_CHUNK: Chunk size for overlapping
-   :returns: AGGemmIntraNodeContext object
+   :param ag_streams: Optional AllGather CUDA stream(s)
+   :param M_PER_CHUNK: Chunk size for overlapping (default: ``1024``)
+   :param use_copy_kernel: Whether to use an SM-based copy kernel (default: ``False``)
+   :param comm_sms: Number of SMs reserved for communication (default: ``0``)
+   :returns: AllGatherGEMMTensorParallelContext object
 
 Example Usage
 -------------
@@ -39,7 +42,7 @@ Example Usage
 
    # Create context
    ctx = create_ag_gemm_intra_node_context(M, N, K, torch.float16, torch.float16,
-                                            rank, world_size, tp_group)
+                                            rank, num_ranks, tp_group)
 
    # Perform AllGather + GEMM
    output = ag_gemm_intra_node(input, weight, ctx)

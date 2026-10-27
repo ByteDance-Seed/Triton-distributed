@@ -6,12 +6,18 @@ Low-latency AllGather kernel implementations for NVIDIA GPUs.
 API Reference
 -------------
 
-.. py:function:: fast_allgather(ctx, buffer)
+.. py:function:: fast_allgather(symm_buffer, ctx=None, rank=None, node=None, num_ranks=None, num_nodes=None, mode="pull")
 
-   Performs fast AllGather operation.
+   Performs fast AllGather using the selected mode. Pass ``ctx`` or provide
+   ``rank``, ``node``, ``num_ranks``, and ``num_nodes`` to create a context.
 
-   :param ctx: FastAllgatherContext
-   :param buffer: Symmetric buffer to AllGather
+   :param symm_buffer: Symmetric buffer to AllGather
+   :param ctx: Optional FastAllGatherContext
+   :param rank: Current rank, required when ``ctx`` is not provided
+   :param node: Current node, required when ``ctx`` is not provided
+   :param num_ranks: Total number of ranks, required when ``ctx`` is not provided
+   :param num_nodes: Total number of nodes, required when ``ctx`` is not provided
+   :param mode: AllGather implementation (default: ``"pull"``)
 
 .. py:function:: create_fast_allgather_context(...)
 

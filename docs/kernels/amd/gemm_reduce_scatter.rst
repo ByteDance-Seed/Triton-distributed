@@ -15,7 +15,7 @@ API Reference
    :param ctx: GemmRSIntraNodeContext
    :returns: Output tensor of shape ``[M/world_size, N]``
 
-.. py:function:: create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, world_size, tp_group, fuse_scatter=True)
+.. py:function:: create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group, fuse_scatter=True)
 
    Creates the context for GEMM-RS intra-node operation on AMD GPUs.
 
@@ -23,10 +23,10 @@ API Reference
    :param N: N dimension
    :param output_dtype: Output data type
    :param rank: Current rank ID
-   :param world_size: Total number of ranks
+   :param num_ranks: Total number of ranks
    :param tp_group: Tensor parallel process group
-   :param fuse_scatter: Whether to fuse scatter into GEMM
-   :returns: GemmRSIntraNodeContext object
+   :param fuse_scatter: Whether to fuse scatter into GEMM (``False`` is not implemented; default: ``True``)
+   :returns: GEMMReduceScatterTensorParallelContext object
 
 Example Usage
 -------------
@@ -37,7 +37,7 @@ Example Usage
 
    # Create context
    ctx = create_gemm_rs_intra_node_context(M, N, torch.float16,
-                                            rank, world_size, tp_group)
+                                            rank, num_ranks, tp_group)
 
    # Perform GEMM + ReduceScatter
    output = gemm_rs_intra_node(input, weight, ctx)
