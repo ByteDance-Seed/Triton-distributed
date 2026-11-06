@@ -61,6 +61,8 @@ Architecture
 API Reference
 -------------
 
+.. py:currentmodule:: triton_dist.layers.nvidia.ep_a2a_fused_layer
+
 EpAll2AllFusedOp
 ^^^^^^^^^^^^^^^^^
 

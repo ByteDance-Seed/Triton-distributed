@@ -69,6 +69,8 @@ Workflow
 API Reference
 -------------
 
+.. py:currentmodule:: triton_dist.layers.nvidia.ep_a2a_layer
+
 EPAll2AllLayer
 ^^^^^^^^^^^^^^
 
