@@ -102,7 +102,10 @@ class MethodResolver:
     def _try_resolve_from_struct_stub(self, struct_name: str, method_name: str) -> Optional[LLType]:
         """Try to resolve method return type from struct stub registry."""
         try:
-            from little_kernel.language.intrin.struct_stub import get_struct_stub_info
+            from little_kernel.language.intrin.struct_stub import get_struct_stub_info, get_all_struct_stubs
+            from little_kernel.core.type_system import VoidType
+
+            # Direct lookup by struct_name
             stub_info = get_struct_stub_info(struct_name)
             if stub_info and method_name in stub_info.methods:
                 method_info = stub_info.methods[method_name]
@@ -110,6 +113,20 @@ class MethodResolver:
                     return TupleType(tuple(method_info.tuple_return_types))
                 elif method_info.return_type is not None:
                     return method_info.return_type
+                else:
+                    return VoidType()
+
+            # Fallback: search all registered stubs for a method name match
+            if stub_info is None:
+                for sname, sinfo in get_all_struct_stubs().items():
+                    if method_name in sinfo.methods:
+                        method_info = sinfo.methods[method_name]
+                        if method_info.is_tuple_return and method_info.tuple_return_types:
+                            return TupleType(tuple(method_info.tuple_return_types))
+                        elif method_info.return_type is not None:
+                            return method_info.return_type
+                        else:
+                            return VoidType()
         except (ImportError, AttributeError):
             pass
         return None

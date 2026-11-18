@@ -24,9 +24,9 @@
 ################################################################################
 import ast
 from typing import Dict, Any
-from .utils.preserve_attributes import get_special_attrs
-from .utils.enhanced_unparse import enhanced_unparse
-from .utils.enhanced_dump import enhanced_dump
+from little_kernel.core.passes.utils.preserve_attributes import get_special_attrs
+from little_kernel.core.passes.utils.enhanced_unparse import enhanced_unparse
+from little_kernel.core.passes.utils.enhanced_dump import enhanced_dump
 
 
 class SpecialAttrsCollector(ast.NodeVisitor):

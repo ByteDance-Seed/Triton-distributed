@@ -32,10 +32,10 @@ This package contains mixin classes for organizing codegen visitor methods:
 - CallCodegenMixin: Function call handling
 """
 
-from .expression_codegen import ExpressionCodegenMixin
-from .statement_codegen import StatementCodegenMixin
-from .control_flow_codegen import ControlFlowCodegenMixin
-from .call_codegen import CallCodegenMixin
+from little_kernel.codegen.visitors.expression_codegen import ExpressionCodegenMixin
+from little_kernel.codegen.visitors.statement_codegen import StatementCodegenMixin
+from little_kernel.codegen.visitors.control_flow_codegen import ControlFlowCodegenMixin
+from little_kernel.codegen.visitors.call_codegen import CallCodegenMixin
 
 __all__ = [
     'ExpressionCodegenMixin',

@@ -64,6 +64,73 @@ def extract_empty_params(empty_call: ast.Call) -> Tuple[ast.AST, ast.AST, ast.AS
     return shape_expr, dtype_expr, scope_expr
 
 
+def extract_empty_align(empty_call: ast.Call) -> Optional[int]:
+    """
+    Extract the optional per-buffer ``align`` keyword of an ll.empty /
+    ll.zeros / ll.full call, or None when absent.  The value must be a
+    positive power-of-two integer literal (byte alignment of this
+    buffer's own start offset inside its scope's allocation order).
+    """
+    align_expr: Optional[ast.AST] = None
+    for kw in empty_call.keywords:
+        if kw.arg == "align":
+            align_expr = kw.value
+            break
+    if align_expr is None:
+        return None
+    if not isinstance(align_expr, ast.Constant) or not isinstance(align_expr.value, int) or isinstance(
+            align_expr.value, bool):
+        raise ValueError("ll.empty align must be an integer constant, got "
+                         f"{ast.dump(align_expr)}")
+    value = align_expr.value
+    if value <= 0 or (value & (value - 1)) != 0:
+        raise ValueError(f"ll.empty align must be a positive power of two, got {value}")
+    return value
+
+
+def split_shape_dims(shape_expr: ast.AST) -> list:
+    """
+    Split an ll.empty shape list/tuple into its dimension values.
+
+    Each dimension must be a constant: a nonnegative int (static extent) or a
+    string in the launch shape-expression mini-language (dynamic extent,
+    dynamic_shared scope only). Returns the list of dim values.
+    """
+    if not isinstance(shape_expr, (ast.List, ast.Tuple)):
+        raise ValueError(f"ll.empty shape must be a list/tuple, got {type(shape_expr).__name__}")
+    dims = []
+    for s in shape_expr.elts:
+        if not isinstance(s, ast.Constant):
+            raise ValueError(f"ll.empty shape dimension must be a constant, got {type(s).__name__}")
+        value = s.value
+        if type(value) is int:
+            if value < 0:
+                raise ValueError("ll.empty shape dimension must be nonnegative")
+            dims.append(value)
+        elif type(value) is str:
+            dims.append(value)
+        else:
+            raise ValueError(f"Shape dimension must be an integer or shape-expression string, "
+                             f"got {type(value).__name__} (value: {value})")
+    return dims
+
+
+def extract_max_elems(empty_call: ast.Call, api_name: str):
+    """Extract the optional max_elems constant from an ll.empty-like call."""
+    max_elems_node = None
+    for kw in empty_call.keywords:
+        if kw.arg == "max_elems":
+            max_elems_node = kw.value
+            break
+    if max_elems_node is None:
+        return None
+    if not (isinstance(max_elems_node, ast.Constant) and type(max_elems_node.value) is int
+            and max_elems_node.value > 0):
+        raise ValueError(f"{api_name} max_elems must be a positive integer constant, "
+                         f"got {ast.dump(max_elems_node)}")
+    return max_elems_node.value
+
+
 def get_shape_size(shape_expr: ast.AST) -> int:
     """
     Calculate the total number of elements from the shape expression (product of all dimensions).

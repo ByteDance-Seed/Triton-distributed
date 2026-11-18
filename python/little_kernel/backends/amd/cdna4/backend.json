@@ -1,0 +1,90 @@
+{
+  "aliases": [
+    "hip",
+    "amd"
+  ],
+  "architectures": [
+    "gfx950",
+    "cdna4"
+  ],
+  "backend_id": "amd/cdna4",
+  "declaration_limits": {
+    "unsupported_options": [
+      "cluster_shape",
+      "cta_group_shape",
+      "launch_bounds",
+      "no_alias",
+      "read_only",
+      "min_blocks"
+    ]
+  },
+  "factory": "little_kernel.backends.amd.cdna4.backend:make_backend",
+  "language_exports": {
+    "AmdBufferRsrc": "little_kernel.backends.amd.cdna4.core.types:AmdBufferRsrc",
+    "AmdBufferRsrcType": "little_kernel.backends.amd.cdna4.core.types:AmdBufferRsrcType",
+    "Builtin": "little_kernel.language.builtin_base:Builtin",
+    "align_memory": "little_kernel.backends.common.gpu.language.intrin.allocation:align_memory",
+    "alloc_dynamic_shared_memory": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_dynamic_shared_memory",
+    "alloc_dynamic_shared_memory_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_dynamic_shared_memory_eval_arg_type",
+    "alloc_local_full": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_full",
+    "alloc_local_full_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_full_eval_arg_type",
+    "alloc_local_memory": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_memory",
+    "alloc_local_memory_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_memory_eval_arg_type",
+    "alloc_local_zeros": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_zeros",
+    "alloc_local_zeros_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_local_zeros_eval_arg_type",
+    "alloc_shared_memory": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_shared_memory",
+    "alloc_shared_memory_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:alloc_shared_memory_eval_arg_type",
+    "amdgcn_buffer_load_lds": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_buffer_load_lds",
+    "amdgcn_buffer_store_b128": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_buffer_store_b128",
+    "amdgcn_concat_i32x4": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_concat_i32x4",
+    "amdgcn_cvt_pk_bf16_f32x4": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_cvt_pk_bf16_f32x4",
+    "amdgcn_cvt_pk_bf16_f32x8": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_cvt_pk_bf16_f32x8",
+    "amdgcn_global_store_b128": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_global_store_b128",
+    "amdgcn_global_store_b16": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_global_store_b16",
+    "amdgcn_global_store_b64": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_global_store_b64",
+    "amdgcn_lds_read_b128": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_lds_read_b128",
+    "amdgcn_lds_read_u8": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_lds_read_u8",
+    "amdgcn_lds_write_b128": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_lds_write_b128",
+    "amdgcn_make_buffer_rsrc": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_make_buffer_rsrc",
+    "amdgcn_mfma_scale_f32_16x16x128_f8f6f4": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_mfma_scale_f32_16x16x128_f8f6f4",
+    "amdgcn_readfirstlane": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_readfirstlane",
+    "amdgcn_s_barrier": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_s_barrier",
+    "amdgcn_s_waitcnt_lgkmcnt": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_s_waitcnt_lgkmcnt",
+    "amdgcn_s_waitcnt_vmcnt": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_s_waitcnt_vmcnt",
+    "amdgcn_sched_barrier": "little_kernel.backends.amd.cdna4.language.intrin.amdgcn:amdgcn_sched_barrier",
+    "asm": "little_kernel.language.simple_builtin:asm",
+    "blockDim_x": "little_kernel.backends.common.gpu.language.intrin.simt:blockDim_x",
+    "blockDim_y": "little_kernel.backends.common.gpu.language.intrin.simt:blockDim_y",
+    "blockDim_z": "little_kernel.backends.common.gpu.language.intrin.simt:blockDim_z",
+    "blockIdx_x": "little_kernel.backends.common.gpu.language.intrin.simt:blockIdx_x",
+    "blockIdx_y": "little_kernel.backends.common.gpu.language.intrin.simt:blockIdx_y",
+    "blockIdx_z": "little_kernel.backends.common.gpu.language.intrin.simt:blockIdx_z",
+    "builtin": "little_kernel.language.builtin_base:builtin",
+    "empty": "little_kernel.backends.common.gpu.language.intrin.allocation:empty",
+    "f32": "little_kernel.language.intrin.scalar_literal:f32",
+    "f64": "little_kernel.language.intrin.scalar_literal:f64",
+    "full": "little_kernel.backends.common.gpu.language.intrin.allocation:full",
+    "gridDim_x": "little_kernel.backends.common.gpu.language.intrin.simt:gridDim_x",
+    "gridDim_y": "little_kernel.backends.common.gpu.language.intrin.simt:gridDim_y",
+    "gridDim_z": "little_kernel.backends.common.gpu.language.intrin.simt:gridDim_z",
+    "simple_builtin": "little_kernel.language.simple_builtin:simple_builtin",
+    "slice_dynamic_shared_memory": "little_kernel.backends.common.gpu.language.intrin.allocation:slice_dynamic_shared_memory",
+    "slice_dynamic_shared_memory_eval_arg_type": "little_kernel.backends.common.gpu.language.intrin.allocation:slice_dynamic_shared_memory_eval_arg_type",
+    "threadIdx_x": "little_kernel.backends.common.gpu.language.intrin.simt:threadIdx_x",
+    "threadIdx_y": "little_kernel.backends.common.gpu.language.intrin.simt:threadIdx_y",
+    "threadIdx_z": "little_kernel.backends.common.gpu.language.intrin.simt:threadIdx_z",
+    "thread_y": "little_kernel.backends.common.gpu.language.intrin.simt:thread_y",
+    "thread_z": "little_kernel.backends.common.gpu.language.intrin.simt:thread_z",
+    "zeros": "little_kernel.backends.common.gpu.language.intrin.allocation:zeros"
+  },
+  "modules": [
+    "little_kernel.backends.amd.cdna4",
+    "little_kernel.backends.common.gpu"
+  ],
+  "priority": 2,
+  "resources": [],
+  "runtime_exports": {
+    "CompiledHipKernel": "little_kernel.backends.amd.cdna4.runtime.hip_kernel:CompiledHipKernel",
+    "compile_hip": "little_kernel.backends.amd.cdna4.runtime.compiler:compile_hip"
+  }
+}

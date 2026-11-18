@@ -1,0 +1,39 @@
+[project]
+name = "little-kernel"
+version = "0.1.0"
+description = "Locked CPU checks for the bundled NVIDIA and AMD compiler"
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["little_kernel", "little_kernel.*"]
+exclude = ["*.__pycache__", "*.__pycache__.*", "*.include"]
+
+[tool.setuptools.package-data]
+"little_kernel.backends" = ["**/*.json", "**/*.cuh", "**/*.h", "**/*.hpp"]
+
+[dependency-groups]
+cpu-test = ["pytest"]
+build = ["setuptools>=69", "wheel"]
+format = ["ruff==0.15.22", "yapf==0.43.0", "clang-format==20.1.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/common", "tests/amd/cdna4/unit", "tests/nv/common/unit", "tests/nv/common/refactor", "tests/nv/common/evolution", "tests/nv/sm90/unit", "tests/nv/sm90/refactor", "tests/nv/sm100/unit", "tests/nv/sm100/dataflow", "tests/repository"]
+pythonpath = ["python", "."]
+markers = ["gpu: requires matching accelerator", "sm90: requires SM90", "sm100: requires SM100", "distributed: requires multiple accelerators", "torch: optional tensor integration", "triton: optional triton integration", "benchmark: opt-in performance run"]
+
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 120
+disable_split_list_with_comment = true
+each_dict_entry_on_separate_line = false
+split_before_named_assigns = false
+split_complex_comprehension = true

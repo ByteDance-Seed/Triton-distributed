@@ -24,7 +24,7 @@
 ################################################################################
 
 # Export loop modifier registration functions for easy access
-from .registries.loop_modifier_registry import (register_loop_modifier, get_loop_modifier_registry)
+from little_kernel.core.passes.utils.registries.loop_modifier_registry import register_loop_modifier, get_loop_modifier_registry
 
 __all__ = [
     'register_loop_modifier',

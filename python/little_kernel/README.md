@@ -1,88 +1,110 @@
-# LittleKernel
+# LittleKernel Python package
 
-A Python DSL for writing CUDA kernels with PTX-level control. LittleKernel
-generates CUDA C++ with inline PTX from decorated Python functions and
-compiles them at runtime via `nvcc`.
+LittleKernel lowers decorated Python functions through shared compiler infrastructure
+and hardware-specific NVIDIA CUDA/PTX and AMD HIP/AMDGPU components.
 
-## Quick Start
+## Minimal example
 
 ```python
-import little_kernel as lk
-import little_kernel.language as ll
-from little_kernel.core.passes import PASSES
-from little_kernel.codegen.codegen_cuda import codegen_cuda
 import torch
 
-@lk.ll_kernel(backend="cuda", is_entry=True)
+import little_kernel as lk
+import little_kernel.language as ll
+from little_kernel.backends import get_backend
+from little_kernel.core.passes import PASSES
+
+codegen_cuda = get_backend("nv/sm90").codegen.generate
+
+@lk.ll_kernel(backend="nv/sm90", is_entry=True)
 def vec_add(
-    A: ll.Tensor[ll.float32],
-    B: ll.Tensor[ll.float32],
-    C: ll.Tensor[ll.float32],
-    N: ll.int32,
+    a: ll.Tensor[ll.float32],
+    b: ll.Tensor[ll.float32],
+    out: ll.Tensor[ll.float32],
+    n: ll.int32,
 ) -> ll.void:
-    tid: ll.int32 = ll.blockIdx_x() * ll.blockDim_x() + ll.threadIdx_x()
-    if tid < N:
-        C[tid] = A[tid] + B[tid]
+    i: ll.int32 = ll.blockIdx_x() * 256 + ll.threadIdx_x()
+    if i < n:
+        out[i] = a[i] + b[i]
 
-N = 1024
-kernel = vec_add.build(PASSES["cuda"], codegen_cuda,
-                       grid=(N // 256,), block=(256,), arch="sm_90")
 
-A = torch.randn(N, device="cuda")
-B = torch.randn(N, device="cuda")
-C = torch.empty(N, device="cuda")
-kernel(A, B, C, N)
+n = 1024
+kernel = vec_add.build(
+    PASSES["nv/sm90"],
+    codegen_cuda,
+    grid=((n + 255) // 256, 1, 1),
+    block=(256, 1, 1),
+    arch="sm_90a",
+)
+a = torch.randn(n, device="cuda")
+b = torch.randn(n, device="cuda")
+out = torch.empty_like(a)
+kernel(a, b, out, n)
+kernel.synchronize()
 ```
 
-## Architecture
+## Control flow: runtime loops and loop-carried scalars
 
-```
-little_kernel/
-├── language/        # DSL: types, decorators, intrinsic definitions
-│   └── intrin/      # Hardware intrinsics (WGMMA, UMMA, TMA, barriers, ...)
-├── core/            # IR representation, compiler passes, type system
-│   └── passes/      # Type inference, memory allocation, constant folding, inlining
-├── codegen/         # CUDA C++ code generation from IR
-├── runtime/         # nvcc compilation, TMA descriptor creation, kernel launch
-├── atom/            # High-level composable building blocks
-└── benchmark/       # GPU micro-benchmarks and GEMM kernel implementations
-    ├── gemm_sm90/   # 10 Hopper GEMM variants (v1-v10)
-    ├── gemm_sm100/  # 9 Blackwell GEMM levels (level1-level9)
-    ├── compute/     # Throughput: FP32 FMA, SFU, WGMMA
-    ├── memory/      # Bandwidth: HBM, L1, L2, SMEM, register file
-    ├── latency/     # Instruction latency: arithmetic, memory, sync
-    ├── warp/        # Shuffle, vote/ballot
-    ├── sm/          # Occupancy, IPC
-    └── sm90/        # TMA, cluster, async overlap
-```
+The frontend pipeline is AST -> passes -> codegen (see `core/compile.py`); the
+Python function body is translated, not executed, so there is no SSA
+restriction on scalars.
 
-## Supported GPU Architectures
+* `for i in range(start, stop, step)` with tensor-derived (runtime) bounds
+  lowers to a CUDA `for` loop. `ll.unroll(range(...))` with constant bounds
+  unrolls at trace time instead.
+* **Loop-carried mutable scalars are supported and stable.** A scalar
+  annotated once ABOVE the loop and reassigned inside the body (plain `=`,
+  augmented `+=`, or conditionally under a nested runtime `if`) is emitted
+  exactly once as a C++ declaration before the loop and mutated in place on
+  every iteration. This is the idiom for software-pipelined/prefetch
+  formulations, e.g. resolve iteration `i+stride`'s indices while computing
+  iteration `i`:
 
-| Architecture | GPU       | Key Features                                |
-|-------------|-----------|---------------------------------------------|
-| SM90        | H100/H800 | WGMMA, TMA, MBarrier, Cluster, async pipes  |
-| SM100       | GB200     | UMMA, TMEM, tcgen05, 2SM CTA groups         |
+  ```python
+  nxt: ll.int32 = ll.int32(src[tid])          # carried prologue
+  total: ll.int32 = 0                          # carried accumulator
+  for i in range(tid, n, stride):
+      cur: ll.int32 = nxt                       # loop-local temp (annotated)
+      ahead: ll.int32 = i + stride
+      if ahead < n:
+          nxt = ll.int32(src[ahead])            # plain reassignment carries
+          total += 1
+      dst[i] = cur + total
+  ```
 
-## Running Benchmarks
+* Reassignment sites must be PLAIN assignments — never re-annotate the
+  carried name inside the loop (`nxt: ll.int32 = ...` would shadow it and
+  break the carry). Loop-local temporaries, conversely, ARE annotated inside
+  the body; they are hoisted once as uninitialized declarations and keep
+  per-iteration semantics.
+* `launch.disable_var_hoisting: true` (export.json) changes only where
+  loop-local temporaries are declared; annotations above the loop keep
+  carried semantics identically.
+
+Emission contracts for all of the above are pinned by
+`tests/nv/sm90/unit/test_loop_carried_scalars.py`.
+
+## Package and hardware layout
+
+Shared services live in `core/`, `language/`, `codegen/` and `runtime/`.
+`backends/interfaces.py` defines common contracts. Hardware-owned extensions,
+passes, codegen, runtime and integrations live in `backends/nv/{common,sm90,sm100}`
+and `backends/amd/cdna4`. See the
+[LittleKernel guide](../../docs/little_kernel/README.md).
+
+Repository tests, examples, benchmarks and assets mirror hardware ownership and
+stay outside the production wheel. `tests/` is the sole test root; there is no
+prototype compatibility package. CPU compilation requires NumPy. Device/tensor
+and benchmark integrations are optional, declared deployment dependencies.
+
+## Verification
 
 ```bash
-# Full micro-benchmark suite (Hopper)
-python -m little_kernel.benchmark.run_all
-
-# Individual GEMM variants
-python -m little_kernel.benchmark.gemm_sm90.gemm_v1
-python -m little_kernel.benchmark.gemm_sm100.gemm_level1
-
-# All SM100 levels
-python -m little_kernel.benchmark.gemm_sm100.test_all_levels
+uv run --locked pytest -q tests
+uv run --locked python tools/verify.py --backend nv/sm90 --suite cpu
+uv run --locked python tools/verify.py --backend nv/sm90 --suite gpu
+uv run --locked --group bench python -m benchmarks.nv.common.run_all --list
 ```
 
-## Running Tests
-
-```bash
-# Unit tests
-pytest test/little_kernel/unit/ -v
-
-# Integration tests (requires GPU)
-pytest test/little_kernel/integration/ -v
-```
+The GPU command requires matching hardware and toolkit. For SM100 dataflow, see
+the [frontend guide](../../docs/dataflow.md). Selected hardware publishing is
+described in the [repository README](../../README.md).

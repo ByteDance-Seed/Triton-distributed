@@ -28,14 +28,14 @@ import inspect
 import textwrap
 from typing import Optional
 import little_kernel.language as ll
-from little_kernel.core.type_system import (LLType, ScalarType, Pointer, TupleType, SpecialStructType, Tensor, int32,
-                                            float32, bool_)
+from little_kernel.core.type_system import LLType, ScalarType, Pointer, TupleType, SpecialStructType, FloatType, Tensor, int32, float32, float64, bool_
 from little_kernel.codegen.registries.special_struct_registry import get_special_struct_codegen
-from .type_inference_core import (TypeInferenceError, TypeMismatchError, UnsupportedNodeError, UndefinedVariableError)
-from .type_inference_visitors import (ConstantTypeInferencer, AnnotationResolver, OperatorTypeInferencer)
-from .type_inference_call import CallTypeInferencer
-from .method_resolver import MethodResolver
-from ..resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.utils.type_inference.type_inference_core import TypeInferenceError, TypeMismatchError, UnsupportedNodeError, UndefinedVariableError
+from little_kernel.core.passes.utils.type_inference.type_inference_visitors import ConstantTypeInferencer, AnnotationResolver, OperatorTypeInferencer
+from little_kernel.core.passes.utils.type_inference.type_inference_call import CallTypeInferencer
+from little_kernel.core.passes.utils.type_inference.method_resolver import MethodResolver
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.core import ir as lk_ir
 
 
 class ASTNodeVisitors:
@@ -81,6 +81,16 @@ class ASTNodeVisitors:
 
     def visit_Name(self, node: ast.Name) -> LLType:
         """Infer type of variable references (ast.Name)"""
+        # Transitional compatibility for legacy role lowering that hid raw C++
+        # on ast.Name. Prefer an explicitly attached declared type (so pointer
+        # results retain pointer types); the historical int32 default applies
+        # only to unmigrated producers. New lowering uses
+        # lk_ir.TargetExpression, handled in visit_TargetExpression.
+        if lk_ir.is_legacy_cpp_node(node):
+            result_type = lk_ir.legacy_cpp_expr_type(node)
+            self.inferencer.all_types[node] = result_type
+            return result_type
+
         # Priority order:
         # 1. Current scope type map (for types set by eval_arg_type, e.g., alloc_shared_memory)
         # 2. Scope manager type map (for variables with inferred types)
@@ -141,6 +151,14 @@ class ASTNodeVisitors:
 
         bin_type = self.operator_inferencer.infer_bin_op(left_type, right_type, type(node.op), node)
         self.inferencer.all_types[node] = bin_type
+        # Merge repair (conflict-11): operands keep their own inferred types
+        # even when the BinOp promotes to float64. A float literal stays
+        # typed float32 (ConstantTypeInferencer), so codegen emits the
+        # f-suffixed literal and C++ usual arithmetic conversions perform
+        # the promotion at the expression level. Retyping the literal to
+        # float64 here (the alternative merged side) made codegen emit a
+        # bare double literal, breaking the pinned candidate-base contract
+        # in tests/nv/common/unit/test_scalar_literal.py.
         return bin_type
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> LLType:
@@ -192,7 +210,49 @@ class ASTNodeVisitors:
 
     def visit_Subscript(self, node: ast.Subscript) -> LLType:
         """Infer type of subscript expression (e.g., "A[i]" → Tensor element type)"""
+        from little_kernel.core.type_system import SpecialStructType, VectorType, TupleType, VoidType
         base_type = self.inferencer.infer_node_type(node.value)
+
+        # TupleType element access: t[<const int>] -> element type (lowers to
+        # std::get<i> in codegen)
+        if isinstance(base_type, TupleType):
+            slc = node.slice
+            if hasattr(ast, "Index") and isinstance(slc, ast.Index):
+                slc = slc.value
+            if not (isinstance(slc, ast.Constant) and isinstance(slc.value, int)):
+                raise TypeMismatchError("Tuple subscript index must be a constant integer", node=node)
+            if not 0 <= slc.value < len(base_type.element_types):
+                raise TypeMismatchError(f"Tuple index {slc.value} out of range for {base_type}", node=node)
+            ret = base_type.element_types[slc.value]
+            self.inferencer.all_types[node] = ret
+            return ret
+
+        # SpecialStructType (GlobalTensor, LocalTensor, etc.) supports subscript
+        if isinstance(base_type, SpecialStructType):
+            self.inferencer.all_types[node] = base_type
+            return base_type
+
+        # one element of a register vector (ext_vector_type: v[i])
+        if isinstance(base_type, VectorType):
+            idx_type = self.inferencer.infer_node_type(node.slice)
+            if not (isinstance(idx_type, ll.IntType) and not idx_type.special):
+                raise TypeMismatchError(f"Vector element index must be a regular integer (got {idx_type})",
+                                        node=node.slice)
+            self.inferencer.all_types[node] = base_type.element_type
+            return base_type.element_type
+
+        # VoidType from opaque struct stub method returns also supports subscript
+        if isinstance(base_type, VoidType):
+            self.inferencer.all_types[node] = base_type
+            return base_type
+
+        # A const view (const[ptr[T]] / const[Tensor[T]]) does not change
+        # indexability: peel plain const wrappers so the pointer/tensor below
+        # governs the subscript. GridConstant wraps a by-value parameter and
+        # is intentionally not peeled.
+        while (base_type.is_const() and not base_type.is_grid_constant() and hasattr(base_type, "inner_type")):
+            base_type = base_type.inner_type
+
         if not (base_type.is_tensor() or base_type.is_pointer() or base_type.is_generic()):
             raise TypeMismatchError(f"Subscript requires tensor or pointer or generic base type (got {base_type})",
                                     node=node)
@@ -276,10 +336,63 @@ class ASTNodeVisitors:
         """Process expression statements (side effects, no type to return)"""
         self.inferencer.infer_node_type(node.value)
 
+    # ------------------------------ Typed lowered IR (RF06) ------------------------------
+    def visit_TargetExpression(self, node) -> LLType:
+        """Infer the declared result type of a backend expression escape hatch.
+
+        Unlike the legacy ``int32`` catch-all, the result type is part of the
+        node's contract and may be a pointer/address-space-bearing type.
+        """
+        lk_ir.verify_lowered_node(node)
+        result_type = node.result_type
+        self.inferencer.all_types[node] = result_type
+        return result_type
+
+    def visit_ResourceReference(self, node) -> LLType:
+        """Infer the pointer result type of a lowered resource reference."""
+        lk_ir.verify_lowered_node(node)
+        self.inferencer.all_types[node] = node.result_type
+        return node.result_type
+
+    def visit_StageReference(self, node) -> LLType:
+        """Infer a pipeline-stage-indexed resource view (pointer-typed)."""
+        lk_ir.verify_lowered_node(node)
+        # Infer the stage index; it must be integer when typed.
+        stage_type = self.inferencer.infer_node_type(node.stage)
+        if not isinstance(stage_type, ll.IntType) or getattr(stage_type, "special", False):
+            raise TypeInferenceError(f"StageReference stage index must be an integer "
+                                     f"(got {stage_type})", node=node.stage)
+        # Infer the base so its declared pointer type is registered even
+        # though the constructor already validated element consistency.
+        base_type = self.inferencer.infer_node_type(node.base)
+        if not base_type.is_pointer():
+            raise TypeInferenceError(f"StageReference base must be a pointer (got {base_type})", node=node.base)
+        if base_type.inner_type != node.result_type.inner_type:
+            raise TypeInferenceError(
+                f"StageReference result element type {node.result_type} "
+                f"does not match base pointer {base_type}", node=node)
+        self.inferencer.all_types[node] = node.result_type
+        return node.result_type
+
+    def visit_TargetStatement(self, node) -> None:
+        """A backend statement has no expression result."""
+        lk_ir.verify_lowered_node(node)
+
+    def visit_TargetInclude(self, node) -> None:
+        """A backend include has no expression result."""
+        lk_ir.verify_lowered_node(node)
+
+    def visit_TargetHelper(self, node) -> None:
+        """A backend helper definition has no expression result."""
+        lk_ir.verify_lowered_node(node)
+
     def visit_Return(self, node: ast.Return) -> None:
-        """Process return statements (type validation is done in visit_FunctionDef)"""
-        if node.value is not None:
-            self.inferencer.infer_node_type(node.value)
+        """Validate return statements against the enclosing function.
+
+        Delegates to the return-context stack so direct and nested returns
+        follow identical void/value/type rules at the return's own location.
+        """
+        self.inferencer.check_return_statement(node)
 
     def visit_IfExp(self, node: ast.IfExp) -> LLType:
         """Infer type of conditional expressions"""

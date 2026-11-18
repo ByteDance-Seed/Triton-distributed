@@ -34,16 +34,20 @@ This module provides functions to format error messages with:
 import ast
 import inspect
 from typing import Optional, Dict, Any, Tuple
-import sys
+
+from little_kernel.core.passes.utils.inline_provenance import (
+    find_inline_provenance,
+    format_inline_provenance,
+)
 
 
 def get_source_lines(func_or_source: Any) -> Optional[list]:
     """
     Get source lines from a function or source code string.
-    
+
     Args:
         func_or_source: Either a function object or a string containing source code
-        
+
     Returns:
         List of source lines, or None if source cannot be retrieved
     """
@@ -61,10 +65,10 @@ def get_source_lines(func_or_source: Any) -> Optional[list]:
 def get_node_location(node: ast.AST) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
     """
     Get location information from an AST node.
-    
+
     Args:
         node: AST node
-        
+
     Returns:
         Tuple of (lineno, col_offset, end_lineno, end_col_offset)
         Returns None for missing values
@@ -80,7 +84,7 @@ def extract_code_snippet(source_lines: list, lineno: int, col_offset: int, end_l
                          end_col_offset: Optional[int] = None, context_lines: int = 10) -> str:
     """
     Extract a code snippet around the specified location.
-    
+
     Args:
         source_lines: List of source code lines
         lineno: Starting line number (1-based)
@@ -88,7 +92,7 @@ def extract_code_snippet(source_lines: list, lineno: int, col_offset: int, end_l
         end_lineno: Ending line number (1-based, optional)
         end_col_offset: Ending column offset (0-based, optional)
         context_lines: Number of context lines to include before and after
-        
+
     Returns:
         Formatted code snippet string
     """
@@ -132,37 +136,45 @@ def extract_code_snippet(source_lines: list, lineno: int, col_offset: int, end_l
 
 
 def get_source_from_ctx(ctx: Optional[Dict[str, Any]] = None) -> Optional[list]:
-    """
-    Try to get source code from context (e.g., from LLKernel).
-    
+    """Get the compilation source lines from an explicit context entry.
+
+    The sole legitimate source owner in a compilation context is the
+    registered compilation entry (``__LITTLE_KERNEL_ENTRY__``, or the
+    transitional literal keys ``__LITTLE_KERNEL_ENTRY__`` / ``__entry__``
+    when the internal marker cannot be imported).  Its value may be a
+    callable (whose source is inspected) or a source string.
+
+    This deliberately never scans the context for the "first callable":
+    ctx routinely contains unrelated functions/modules (imports, builtins,
+    helpers), and picking one would attach an unrelated -- or even
+    misleading -- snippet to the diagnosis.  When no explicit entry exists,
+    None is returned and the formatter keeps line/column/AST context
+    without any code snippet.
+
     Args:
-        ctx: Context dictionary that may contain source information
-        
+        ctx: Context dictionary that may contain the compilation entry.
+
     Returns:
-        List of source lines, or None if not found
+        List of source lines for the explicit entry, or None.
     """
     if ctx is None:
         return None
 
-    # Try to get source from __LITTLE_KERNEL_ENTRY__ or other kernel functions
+    entry_keys = []
     try:
         from little_kernel.core.internal import __LITTLE_KERNEL_ENTRY__
-        if __LITTLE_KERNEL_ENTRY__ in ctx:
-            func = ctx[__LITTLE_KERNEL_ENTRY__]
-            return get_source_lines(func)
+        entry_keys.append(__LITTLE_KERNEL_ENTRY__)
     except ImportError:
-        # Fallback: try common names
-        for key in ["__LITTLE_KERNEL_ENTRY__", "__entry__"]:
-            if key in ctx:
-                func = ctx[key]
-                return get_source_lines(func)
+        # Transitional explicit keys only; never fall back to scanning.
+        entry_keys.extend(["__LITTLE_KERNEL_ENTRY__", "__entry__"])
 
-    # Try other callable objects in context
-    for key, value in ctx.items():
-        if callable(value) and hasattr(value, '__code__'):
-            source_lines = get_source_lines(value)
-            if source_lines:
-                return source_lines
+    for key in entry_keys:
+        entry = ctx.get(key)
+        if entry is None:
+            continue
+        source_lines = get_source_lines(entry)
+        if source_lines:
+            return source_lines
 
     return None
 
@@ -171,13 +183,25 @@ def format_error_message(message: str, node: Optional[ast.AST] = None, source_li
                          ctx: Optional[Dict[str, Any]] = None, context_lines: int = 10) -> str:
     """
     Format an error message with location information and code snippet.
-    
+
+    Source ownership is fully explicit -- this formatter never inspects
+    caller stack frames and never searches the context for an arbitrary
+    callable.  A code snippet is emitted only when:
+
+    1. ``source_lines`` was supplied directly, or
+    2. ``ctx`` carries the registered compilation entry
+       (``__LITTLE_KERNEL_ENTRY__``; see ``get_source_from_ctx``).
+
+    When neither is available the diagnosis still retains its message,
+    line/column span and AST dump, with no unrelated code snippet.
+
     Args:
         message: Error message
         node: AST node where the error occurred
-        source_lines: Source code lines (optional, will try to infer if not provided)
+        source_lines: Explicit source lines (take precedence over ctx)
+        ctx: Compilation context; only its explicit entry can supply source
         context_lines: Number of context lines to show
-        
+
     Returns:
         Formatted error message string
     """
@@ -185,6 +209,13 @@ def format_error_message(message: str, node: Optional[ast.AST] = None, source_li
 
     if node is None:
         return message
+
+    # Inline-callsite provenance: when the offending node came out of an
+    # inlined outlined-kernel copy, name the copy (e.g. "copy 2 of _leaf")
+    # so users don't have to divide-and-conquer which callsite failed.
+    provenance_suffix = format_inline_provenance(find_inline_provenance(node))
+    if provenance_suffix:
+        parts.append(provenance_suffix)
 
     # Get location information
     lineno, col_offset, end_lineno, end_col_offset = get_node_location(node)
@@ -198,28 +229,10 @@ def format_error_message(message: str, node: Optional[ast.AST] = None, source_li
             location_str += f" to line {end_lineno}"
         parts.append(f"\nLocation: {location_str}")
 
-    # Try to get code snippet
-    if source_lines is None and ctx is not None:
-        source_lines = get_source_from_ctx(ctx)
-
+    # Source ownership: explicit source_lines win; otherwise only an
+    # explicit compilation entry in ctx can provide the snippet.
     if source_lines is None:
-        # Try to get source from the current frame
-        try:
-            frame = sys._getframe(2)  # Go up 2 frames to get caller's frame
-            # Look for source in frame locals/globals
-            for key, value in frame.f_locals.items():
-                if callable(value):
-                    source_lines = get_source_lines(value)
-                    if source_lines:
-                        break
-            if not source_lines:
-                for key, value in frame.f_globals.items():
-                    if callable(value):
-                        source_lines = get_source_lines(value)
-                        if source_lines:
-                            break
-        except (ValueError, AttributeError):
-            pass
+        source_lines = get_source_from_ctx(ctx)
 
     if source_lines and lineno is not None:
         snippet = extract_code_snippet(source_lines, lineno, col_offset, end_lineno, end_col_offset, context_lines)
@@ -247,7 +260,7 @@ class PassError(RuntimeError):
                  ctx: Optional[Dict[str, Any]] = None, context_lines: int = 10):
         """
         Initialize a pass error.
-        
+
         Args:
             message: Error message
             node: AST node where the error occurred
@@ -269,7 +282,7 @@ def raise_pass_error(message: str, node: Optional[ast.AST] = None, source_lines:
                                         Any]] = None, context_lines: int = 10, error_class: type = PassError) -> None:
     """
     Raise a pass error with formatted message.
-    
+
     Args:
         message: Error message
         node: AST node where the error occurred
@@ -277,7 +290,7 @@ def raise_pass_error(message: str, node: Optional[ast.AST] = None, source_lines:
         ctx: Context dictionary (optional, used to find source)
         context_lines: Number of context lines to show
         error_class: Exception class to raise (default: PassError)
-        
+
     Raises:
         error_class: The specified error class with formatted message
     """

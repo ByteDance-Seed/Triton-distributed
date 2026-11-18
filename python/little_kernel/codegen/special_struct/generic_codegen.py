@@ -33,8 +33,8 @@ import ast
 import inspect
 from little_kernel.core.passes.utils.type_inference import TypeInferencer
 import little_kernel.language as ll
-from .struct_converter import PythonClassToCppStructConverter
-from .utils import _resolve_template_param
+from little_kernel.codegen.special_struct.struct_converter import PythonClassToCppStructConverter
+from little_kernel.codegen.special_struct.utils import _resolve_template_param
 
 
 def generic_special_struct_declaration_codegen(node: ast.Assign, emitter) -> str:

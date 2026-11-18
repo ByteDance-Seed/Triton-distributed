@@ -25,7 +25,7 @@
 
 ################################################################################
 #
-# Copyright (c) 2025-2026 ByteDance Ltd. and/or its affiliates
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files
@@ -49,14 +49,12 @@
 ################################################################################
 
 # Codegen registry module exports
-from .type_mapping_registry import get_type_mapping_registry, TypeMappingRegistry
-from .operator_codegen import get_operator_codegen_registry, OperatorCodegenRegistry
-from .loop_modifier_codegen import (get_loop_modifier_codegen, register_loop_modifier_codegen, LoopModifierCodegen)
-from .type_converter import TypeConverter
-from .enum_registry import get_enum, register_enum, generate_enum_cpp_definition
-from .special_struct_registry import (is_special_struct, get_special_struct_name, get_special_struct_codegen,
-                                      get_all_registered_special_structs, register_special_struct,
-                                      register_special_struct_codegen)
+from little_kernel.codegen.registries.type_mapping_registry import get_type_mapping_registry, TypeMappingRegistry
+from little_kernel.codegen.registries.operator_codegen import get_operator_codegen_registry, OperatorCodegenRegistry
+from little_kernel.codegen.registries.loop_modifier_codegen import get_loop_modifier_codegen, register_loop_modifier_codegen, LoopModifierCodegen
+from little_kernel.codegen.registries.type_converter import TypeConverter
+from little_kernel.codegen.registries.enum_registry import get_enum, register_enum, generate_enum_cpp_definition
+from little_kernel.codegen.registries.special_struct_registry import is_special_struct, get_special_struct_name, get_special_struct_codegen, get_all_registered_special_structs, register_special_struct, register_special_struct_codegen
 
 __all__ = [
     'get_type_mapping_registry',

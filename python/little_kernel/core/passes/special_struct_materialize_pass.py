@@ -33,10 +33,10 @@ This pass:
 
 import ast
 from typing import Dict, Any, List, Optional, Set
-from .pass_base import CompleteASTMutator
-from .utils.resolve_attribute import recursive_resolve_attribute
-from .utils.error_report import raise_pass_error
-from .utils.ir_nodes import SpecialStructDef, EnumDef
+from little_kernel.core.passes.pass_base import CompleteASTMutator
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.utils.error_report import raise_pass_error
+from little_kernel.core.passes.utils.ir_nodes import SpecialStructDef, EnumDef
 from little_kernel.codegen.registries.special_struct_registry import get_all_registered_special_structs
 from little_kernel.codegen.registries.enum_registry import get_all_registered_enums
 
@@ -134,13 +134,16 @@ class SpecialStructMaterializeTransformer(CompleteASTMutator):
             if func == class_obj:
                 return struct_name
 
-            # Case 1b: Function name matches struct name (e.g., MyStruct() -> MyStruct)
-            if func_name.lower() == struct_name.lower() or func_name == struct_name:
+            # Case 1b: Function name exactly matches struct name and the
+            # function originates from the same module as the registered
+            # class. Case-insensitive matching, or matching when module
+            # identity is unavailable, hijacked unrelated or shadowing
+            # callables that merely happened to share a name and hid the
+            # real diagnosis; exact identity (Case 1) still handles
+            # constructors resolved directly from ctx.
+            if func_name == struct_name:
                 if func_module and class_module and func_module == class_module:
                     return struct_name
-                # Also check if it's the constructor directly (module check might fail)
-                # This handles cases where the class is in ctx but module info is missing
-                return struct_name
 
             # Case 2: Function is a factory function that returns the struct
             # Check by return type annotation
@@ -163,57 +166,47 @@ class SpecialStructMaterializeTransformer(CompleteASTMutator):
         return None
 
     def _resolve_callable(self, node: ast.AST) -> Optional[Any]:
-        """Resolve a callable from AST node."""
+        """Resolve a callable from an AST node.
+
+        A legitimately unresolved reference is a supported outcome, not an
+        error: ``recursive_resolve_attribute`` returns the original AST node
+        for a local base or unknown name, and host evaluation of a constant
+        subscript can raise AttributeError/KeyError/TypeError/IndexError.
+        Those optional-probe failures return None so the caller can use its
+        supported name-based fallback. Any other exception is a real program
+        error and must propagate with its cause.
+        """
         try:
-            result = recursive_resolve_attribute(node, self.ctx)
-            return result
-        except Exception:
+            return recursive_resolve_attribute(node, self.ctx)
+        except (AttributeError, KeyError, TypeError, IndexError):
             return None
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         """Handle assignments that might contain special struct constructor calls."""
         # Check if this is a special struct constructor call BEFORE visiting
         if isinstance(node.value, ast.Call):
-            # Try to resolve the function and check if it's a special struct constructor
-            # This works for both Name (e.g., Scheduler(...)) and Attribute access (e.g., module.Scheduler(...))
-            try:
-                func = self._resolve_callable(node.value.func)
-                if func:
-                    struct_name = self._is_special_struct_constructor(func)
-                    if struct_name:
-                        return self._transform_special_struct_call(node, node.value, struct_name)
-            except Exception:
-                pass
-
-            # Fallback: Check by name if resolution fails
-            # This handles cases where the class can't be resolved from ctx but we know it's a constructor
-            if isinstance(node.value.func, ast.Name):
-                func_name = node.value.func.id
-                # Check if it matches any registered special struct name
-                for struct_name in self.registered_structs.keys():
-                    if func_name.lower() == struct_name.lower() or func_name == struct_name:
-                        # Try to resolve one more time, but if it fails, still transform it
-                        # This handles cases where the class exists but can't be resolved from ctx
-                        try:
-                            func = self._resolve_callable(node.value.func)
-                            if func and self._is_special_struct_constructor(func) == struct_name:
-                                return self._transform_special_struct_call(node, node.value, struct_name)
-                        except Exception:
-                            # If resolution fails but name matches a registered struct, assume it's the constructor
-                            # This is safe because we're checking against registered structs
-                            return self._transform_special_struct_call(node, node.value, struct_name)
-
-            # Also check if it's an Attribute access (e.g., from module import Scheduler)
-            if isinstance(node.value.func, ast.Attribute):
-                # Try to resolve and check
-                try:
-                    func = self._resolve_callable(node.value.func)
-                    if func:
-                        struct_name = self._is_special_struct_constructor(func)
-                        if struct_name:
-                            return self._transform_special_struct_call(node, node.value, struct_name)
-                except Exception:
-                    pass
+            # Resolve the called function once. This recognizes a Name
+            # (e.g., Scheduler(...)) and an Attribute access
+            # (e.g., module.Scheduler(...)).
+            func = self._resolve_callable(node.value.func)
+            if func is not None and not isinstance(func, ast.AST):
+                struct_name = self._is_special_struct_constructor(func)
+                if struct_name:
+                    return self._transform_special_struct_call(node, node.value, struct_name)
+            else:
+                # Legitimately unresolved: recursive_resolve_attribute
+                # returns the original AST node for a name unknown in ctx
+                # (or None for the documented host-evaluation probe
+                # failures). Preserve the supported legacy probe: an exact
+                # spelling match to a registered struct name covers
+                # constructors not visible in ctx. Case-insensitive
+                # guessing hijacked unrelated or shadowing names and hid
+                # their real diagnosis.
+                if isinstance(node.value.func, (ast.Name, ast.Attribute)):
+                    probed_name = (node.value.func.id
+                                   if isinstance(node.value.func, ast.Name) else node.value.func.attr)
+                    if probed_name in self.registered_structs:
+                        return self._transform_special_struct_call(node, node.value, probed_name)
 
         # Visit the value first (for other cases)
         new_value = self.visit(node.value)

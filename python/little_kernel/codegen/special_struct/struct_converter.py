@@ -35,7 +35,7 @@ from little_kernel.core.passes.utils.type_inference import TypeInferencer
 from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
 import little_kernel.language as ll
 from little_kernel.codegen.registries.type_converter import TypeConverter
-from .translator import PythonToCppTranslator
+from little_kernel.codegen.special_struct.translator import PythonToCppTranslator
 
 
 class PythonClassToCppStructConverter(ast.NodeVisitor):

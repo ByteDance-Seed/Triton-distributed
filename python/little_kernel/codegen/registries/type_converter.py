@@ -24,7 +24,7 @@
 ################################################################################
 
 import little_kernel.language as ll
-from .type_mapping_registry import get_type_mapping_registry
+from little_kernel.codegen.registries.type_mapping_registry import get_type_mapping_registry
 
 
 class TypeConverter:
@@ -80,12 +80,11 @@ class TypeConverter:
                 self.struct_types[ll_type] = self._generate_struct_name(ll_type)
             return self.struct_types[ll_type]
 
-        # Special types
-        type_str = str(ll_type)
-        if type_str == "TmaDescriptor":
-            return self.registry.map_special_type("TmaDescriptor") or "cute::TmaDescriptor"
-        elif type_str == "Wgmma":
-            raise NotImplementedError("WgmmaType is not supported for C++ generation")
+        elif ll_type.is_tuple():
+            elem_cpps = [self.lltype_to_cpp(t) for t in ll_type.element_types]
+            # libcu++ tuple: usable in device code (std::tuple's members are
+            # host-only under libstdc++/nvcc).
+            return f"cuda::std::tuple<{', '.join(elem_cpps)}>"
 
         # Unsupported LLType
         raise NotImplementedError(f"Unsupported LLType: {type(ll_type).__name__} (value: {str(ll_type)})")

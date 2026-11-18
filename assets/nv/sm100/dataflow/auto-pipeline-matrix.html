@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>如何思考 Auto Pipeline：Memory Effect × Warp 同步</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #0d1a2b;
+      --panel-2: #112238;
+      --line: #263a52;
+      --text: #e8f0f7;
+      --muted: #98aabd;
+      --cyan: #4dd9ff;
+      --cyan-dim: rgba(77, 217, 255, .12);
+      --green: #68e0ae;
+      --green-dim: rgba(104, 224, 174, .11);
+      --amber: #ffc96b;
+      --amber-dim: rgba(255, 201, 107, .12);
+      --red: #ff8585;
+      --red-dim: rgba(255, 133, 133, .09);
+      --violet: #b39cff;
+      --violet-dim: rgba(179, 156, 255, .11);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% 0, rgba(77, 217, 255, .11), transparent 31rem),
+        radial-gradient(circle at 92% 10%, rgba(179, 156, 255, .08), transparent 29rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.58;
+    }
+    a { color: var(--cyan); text-underline-offset: 3px; }
+    code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+    code { font-size: .94em; }
+    .shell { width: min(1320px, calc(100% - 36px)); margin: 0 auto; }
+    header { padding: 58px 0 31px; }
+    .eyebrow {
+      color: var(--cyan);
+      font: 700 12px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h1 { max-width: 1080px; margin: 14px 0 17px; font-size: clamp(36px, 5.4vw, 68px); line-height: 1.04; letter-spacing: -.045em; }
+    .lead { max-width: 1020px; margin: 0; color: #bac8d5; font-size: clamp(17px, 2vw, 21px); }
+    .tags { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
+    .tag { padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; color: #b9c9d7; background: rgba(11, 25, 42, .74); font-size: 12px; }
+    .formula {
+      margin-top: 27px;
+      padding: 19px 21px;
+      border: 1px solid rgba(77, 217, 255, .36);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(15, 52, 68, .78), rgba(10, 25, 41, .9));
+      color: #d7e7ec;
+      font-size: 14px;
+    }
+    .formula strong { color: var(--cyan); }
+    .formula .line { display: block; margin-top: 5px; }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-block: 1px solid rgba(38, 58, 82, .82);
+      background: rgba(7, 17, 31, .88);
+      backdrop-filter: blur(14px);
+    }
+    nav .shell { display: flex; gap: 22px; overflow-x: auto; padding: 12px 0; }
+    nav a { color: var(--muted); text-decoration: none; white-space: nowrap; font-size: 13px; }
+    nav a:hover { color: var(--text); }
+    main { padding: 8px 0 82px; }
+    section { margin-top: 64px; scroll-margin-top: 62px; }
+    .section-head { margin-bottom: 20px; }
+    h2 { margin: 0; font-size: clamp(26px, 3vw, 39px); letter-spacing: -.03em; }
+    h3 { margin: 0 0 9px; font-size: 18px; }
+    p { margin: 0; }
+    .section-kicker { max-width: 930px; margin-top: 8px; color: var(--muted); }
+    .grid { display: grid; gap: 16px; }
+    .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 28px; }
+    .metric, .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, rgba(17, 34, 56, .9), rgba(10, 23, 39, .9));
+    }
+    .metric { min-height: 137px; padding: 18px 19px; }
+    .metric .value { color: var(--green); font-size: 39px; font-weight: 780; line-height: 1; letter-spacing: -.045em; }
+    .metric .label { margin-top: 10px; font-weight: 720; }
+    .metric .note { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .card { padding: 21px; }
+    .card p, .card li { color: #bdcad5; font-size: 13px; }
+    .card ul, .card ol { margin: 12px 0 0; padding-left: 20px; }
+    .card li + li { margin-top: 8px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .good { border-color: rgba(104, 224, 174, .34); background: var(--green-dim); }
+    .warn { border-color: rgba(255, 201, 107, .3); background: var(--amber-dim); }
+    .bad { border-color: rgba(255, 133, 133, .3); background: var(--red-dim); }
+    .callout { margin-top: 16px; padding: 16px 18px; border: 1px solid rgba(255, 201, 107, .3); border-radius: 13px; background: var(--amber-dim); color: #eadbb9; font-size: 13px; }
+    .callout strong { color: var(--amber); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: rgba(9, 21, 36, .88); }
+    table { width: 100%; min-width: 980px; border-collapse: collapse; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #102138; color: #c8d6e2; font-size: 11px; letter-spacing: .052em; text-transform: uppercase; }
+    td { color: #becbd6; font-size: 12.5px; }
+    td:first-child { color: var(--text); font-weight: 700; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .matrix { min-width: 1260px; table-layout: fixed; }
+    .matrix th:first-child { width: 190px; }
+    .matrix td { height: 142px; padding: 12px; }
+    .matrix .valid { background: rgba(104, 224, 174, .065); }
+    .matrix .invalid { background: rgba(151, 169, 187, .022); color: #708296; }
+    .pipe-name { display: block; color: var(--green); font: 720 11.5px/1.42 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+    .invalid .pipe-name { color: #708296; }
+    .cell-note { display: block; margin-top: 7px; color: var(--muted); font-size: 10.5px; line-height: 1.42; }
+    .row-kind { display: block; color: var(--text); font-weight: 760; }
+    .kind-id { display: block; margin-top: 5px; color: var(--cyan); font: 10.5px/1.35 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+    .status { display: inline-block; padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 750; white-space: nowrap; }
+    .sync { background: var(--cyan-dim); color: var(--cyan); }
+    .async { background: var(--violet-dim); color: var(--violet); }
+    .special { background: var(--amber-dim); color: var(--amber); }
+    pre {
+      margin: 14px 0 0;
+      overflow-x: auto;
+      padding: 16px 17px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #07111d;
+      color: #cbd9e4;
+      font-size: 12.5px;
+      line-height: 1.65;
+    }
+    .lifecycle { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 19px; }
+    .life-step { position: relative; min-height: 112px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(10, 24, 40, .84); }
+    .life-step:not(:last-child)::after { content: "→"; position: absolute; right: -10px; top: 50%; transform: translate(50%, -50%); z-index: 2; color: var(--cyan); }
+    .life-step b { display: block; color: var(--cyan); font: 720 11.5px/1.4 "SFMono-Regular", Consolas, monospace; }
+    .life-step span { display: block; margin-top: 7px; color: var(--muted); font-size: 11.5px; }
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; gap: 12px; align-items: center; margin-top: 18px; }
+    .flow .node { min-height: 116px; padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: rgba(10, 24, 40, .84); }
+    .flow b { display: block; color: var(--cyan); font: 720 12px/1.4 "SFMono-Regular", Consolas, monospace; }
+    .flow span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
+    .flow .mark { color: var(--cyan); font-size: 20px; }
+    .stack { display: grid; gap: 8px; margin-top: 15px; }
+    .slot { display: grid; grid-template-columns: 90px 1fr 1fr; gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: rgba(8, 20, 34, .78); font-size: 12px; }
+    .slot b { color: var(--green); }
+    .slot span { color: var(--muted); }
+    .rules { counter-reset: rule; padding: 0; }
+    .rule { position: relative; padding: 17px 18px 17px 56px; border-bottom: 1px solid var(--line); }
+    .rule:last-child { border-bottom: 0; }
+    .rule::before { counter-increment: rule; content: counter(rule, decimal-leading-zero); position: absolute; left: 17px; top: 17px; color: var(--cyan); font: 760 13px/1.5 "SFMono-Regular", Consolas, monospace; }
+    .rule b { display: block; font-size: 13px; }
+    .rule p { margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+    .source-list { margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px; }
+    .source-list li + li { margin-top: 9px; }
+    footer { padding: 25px 0 42px; border-top: 1px solid var(--line); color: #75889a; font-size: 12px; }
+    @media (max-width: 980px) {
+      .metrics, .three, .four { grid-template-columns: 1fr 1fr; }
+      .two { grid-template-columns: 1fr; }
+      .lifecycle { grid-template-columns: repeat(3, 1fr); }
+      .life-step:nth-child(3)::after { display: none; }
+      .flow { grid-template-columns: 1fr; }
+      .flow .mark { transform: rotate(90deg); justify-self: center; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, 1320px); }
+      header { padding-top: 40px; }
+      .metrics, .three, .four, .lifecycle { grid-template-columns: 1fr; }
+      .life-step::after { display: none; }
+      .slot { grid-template-columns: 70px 1fr; }
+      .slot span:last-child { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <div class="eyebrow">LittleKernel · SM100 · warp-specialized communication</div>
+      <h1>如何思考 Auto Pipeline：Memory Effect × Warp 同步</h1>
+      <p class="lead">先抛开 stage。一个 pipeline 描述 producer warp 集合与 consumer warp 集合如何围绕一个片上 buffer 完成“可写 → 数据就绪 → 读完 → 可复用”的同步。不同 pipeline 的根源，是两侧访问这个 buffer 的 memory effect 不同。</p>
+      <div class="tags">
+        <span class="tag">一个 buffer lifetime</span>
+        <span class="tag">producer warp(s) → consumer warp(s)</span>
+        <span class="tag">SMEM / TMEM</span>
+        <span class="tag">completion + visibility + issue discipline</span>
+        <span class="tag">stage 正交</span>
+      </div>
+      <div class="formula">
+        <strong>核心模型</strong>
+        <span class="line mono">CandidatePairs = ProducerWriteEffect × ConsumerReadEffect</span>
+        <span class="line mono">PipelineFamily = Matrix[normalize(write), normalize(read)]</span>
+        <span class="line mono">PipelineImpl = specialize(PipelineFamily, proven topology / schedule / issuer-domain facts)</span>
+        <span class="line mono">Staging(N) = N 份 buffer + N 份同一种协议状态；不改变 PipelineFamily</span>
+      </div>
+      <div class="grid metrics">
+        <div class="metric"><div class="value">1</div><div class="label">同步对象</div><div class="note">一个 buffer，或严格同生共死的一组 buffer</div></div>
+        <div class="metric"><div class="value">2</div><div class="label">参与者集合</div><div class="note">producer warp set / consumer warp set</div></div>
+        <div class="metric"><div class="value">10</div><div class="label">Core Effect Pairs</div><div class="note">本文 core scope：SMEM 6 + TMEM 4</div></div>
+        <div class="metric"><div class="value">N</div><div class="label">正交 stages</div><div class="note">为 latency hiding 复制 buffer，不创造协议种类</div></div>
+      </div>
+    </div>
+  </header>
+
+  <nav>
+    <div class="shell">
+      <a href="#model">心智模型</a>
+      <a href="#effects">Effect 归一化</a>
+      <a href="#matrix">Pipeline 矩阵</a>
+      <a href="#specializations">性能特化</a>
+      <a href="#multi-effect">多 Buffer 指令</a>
+      <a href="#intrinsic-layers">指令分层</a>
+      <a href="#implementation">独立实现</a>
+      <a href="#stages">Stage 正交性</a>
+      <a href="#analysis">编译分析</a>
+      <a href="#cutlass">CUTLASS 对照</a>
+    </div>
+  </nav>
+
+  <main class="shell">
+    <section id="model">
+      <div class="section-head">
+        <h2>1. Pipeline 的本体：一个 Buffer 的所有权交接</h2>
+        <p class="section-kicker">Pipeline 不是 copy engine，也不是 stage ring。它回答的是：哪些 warp 何时可以写、写完成如何被观察、哪些 warp 何时可以读、读完成如何允许下一轮覆盖。</p>
+      </div>
+      <div class="lifecycle" aria-label="single-buffer pipeline lifecycle">
+        <div class="life-step"><b>producer_acquire</b><span>等待 buffer 可写；producer 获得本轮所有权。</span></div>
+        <div class="life-step"><b>write(buffer)</b><span>一个或多个 producer warp 按指令约束写 buffer。</span></div>
+        <div class="life-step"><b>producer_commit</b><span>证明写已完成，或把异步完成事件连接到 full barrier。</span></div>
+        <div class="life-step"><b>consumer_wait</b><span>等待数据 ready，并建立 consumer 访问需要的顺序与可见性。</span></div>
+        <div class="life-step"><b>read(buffer)</b><span>一个或多个 consumer warp 读取；可能同步，也可能异步。</span></div>
+        <div class="life-step"><b>consumer_release</b><span>同步读可立即释放；异步读把 completion 责任交给 pipeline，完成后 buffer 才再次可写。</span></div>
+      </div>
+      <div class="grid two" style="margin-top:16px">
+        <article class="card good">
+          <h3>固定语义</h3>
+          <ul>
+            <li><span class="mono">producer_commit</span> 发布的是“本轮写入可被 consumer 安全使用”。</li>
+            <li><span class="mono">consumer_release</span> 表示 consumer 交出本轮访问；同步 consumer 可立即发布 empty，异步 consumer 则提交可观察的 completion。</li>
+            <li>同步的粒度是 logical buffer lifetime，而不是某条指令的名字。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>由具体 Pipeline 决定</h3>
+          <ul>
+            <li>full / empty 是普通 mbarrier、transaction barrier、named barrier，还是专用 completion。</li>
+            <li>谁 issue 指令、谁 arrive、arrival count 如何计算。</li>
+            <li>是否要 wait、proxy fence、TCGEN05 fence、commit 或 multicast。</li>
+          </ul>
+        </article>
+      </div>
+      <div class="callout"><strong>范围说明：</strong>这里把通信参与者抽象为 CTA 内的一组 producer warp/warpgroup 与一组 consumer warp/warpgroup。硬件指令仍可能要求 <span class="mono">shared::cluster</span> mbarrier 或 CTA-group 语义；那是具体 pipeline 的 completion/topology 细节。</div>
+    </section>
+
+    <section id="effects">
+      <div class="section-head">
+        <h2>2. 先归一化 Memory Effect，再谈指令名</h2>
+        <p class="section-kicker">两条指令只要对目标 buffer 具有相同的完成、可见性和参与者义务，就可以归入同一种 effect。反过来，即使都叫“load”或都访问 SMEM，只要这些义务不同，就不能共用 pipeline 端点语义。</p>
+      </div>
+      <div class="grid two">
+        <article class="card">
+          <h3>Effect descriptor</h3>
+          <pre>struct MemoryEffectKind {
+  Access       access;      // Read / Write / ReadWrite
+  MemorySpace space;       // SMEM / TMEM
+  Execution   execution;   // Sync / Async
+  Proxy        proxy;       // Generic / Async / TCGEN05 domain
+  IssuerSet    issuer;      // threads / warp / warpgroup / elected-one
+  Completion   completion;  // scoreboard / mbarrier-tx / commit / wait...
+};</pre>
+        </article>
+        <article class="card">
+          <h3>为什么六个维度都需要</h3>
+          <ul>
+            <li><strong>execution</strong> 决定 issue 后能否立即交接，还是必须等待异步完成。</li>
+            <li><strong>proxy</strong> 决定跨访问路径是否需要 <span class="mono">fence.proxy.async</span>。</li>
+            <li><strong>issuer</strong> 决定哪些线程发指令、哪些线程/完成域参与 arrive。</li>
+            <li><strong>completion</strong> 决定普通 arrive、TMA transaction、bulk-group wait、TCGEN05 commit/wait 等具体路径。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead><tr><th>指令 / 操作</th><th>对该 Buffer 的 Effect</th><th>执行 / Proxy</th><th>Issue discipline</th><th>Completion</th><th>Normalized Kind</th></tr></thead>
+          <tbody>
+            <tr><td><code>st.shared</code><br><code>stmatrix</code></td><td>Write(SMEM)</td><td><span class="status sync">sync</span> generic proxy</td><td>participant threads / warp-collective；由分析给出完整 producer set</td><td>scoreboard；不需要额外 async wait</td><td><code>W.SMEM.Generic.Sync</code></td></tr>
+            <tr><td><code>ld.shared</code><br><code>ldmatrix</code></td><td>Read(SMEM)</td><td><span class="status sync">sync</span> generic proxy</td><td>participant threads / warp-collective</td><td>scoreboard；读完成后普通 release</td><td><code>R.SMEM.Generic.Sync</code></td></tr>
+            <tr><td><code>TMA load</code><br><code>cp.async.bulk.tensor</code></td><td>Write(SMEM)</td><td><span class="status async">async</span> async proxy</td><td>通常 elected issuing thread；可 multicast</td><td><code>mbarrier::complete_tx::bytes</code></td><td><code>W.SMEM.TMA.Tx</code></td></tr>
+            <tr><td><code>TMA store</code><br><code>cp.async.bulk.global.shared</code></td><td>Read(SMEM)</td><td><span class="status async">async</span> async proxy</td><td>issuing thread / completion domain</td><td><code>bulk_group</code>；source reuse 用 <code>wait_group.read</code></td><td><code>R.SMEM.TMA.Bulk</code></td></tr>
+            <tr><td><code>tcgen05.mma/cp</code></td><td>Read(SMEM)</td><td><span class="status async">async</span> async proxy</td><td>CTA-group / elected issue contract</td><td><code>tcgen05.commit</code> 可把读取完成连接到 empty barrier</td><td><code>R.SMEM.TCGEN05.Commit</code></td></tr>
+            <tr><td><code>tcgen05.mma/cp/shift</code></td><td>Write(TMEM)</td><td><span class="status special">TCGEN05 async</span></td><td>CTA-group contract</td><td><code>tcgen05.commit.cta_group::{1|2}.mbarrier::arrive::one.shared::cluster.b64</code></td><td><code>W.TMEM.TCGEN05.Commit</code></td></tr>
+            <tr><td><code>tcgen05.mma TS</code><br><code>tcgen05.shift</code></td><td>Read(TMEM)</td><td><span class="status special">TCGEN05 async</span></td><td>CTA-group contract</td><td><code>tcgen05.commit</code></td><td><code>R.TMEM.TCGEN05.Commit</code></td></tr>
+            <tr><td><code>tcgen05.st</code></td><td>Write(TMEM)</td><td><span class="status async">async</span> wait-based TCGEN05 op</td><td>warp-collective</td><td><code>tcgen05.wait::st</code></td><td><code>W.TMEM.TCGEN05.WaitSt</code></td></tr>
+            <tr><td><code>tcgen05.ld</code></td><td>Read(TMEM)</td><td><span class="status async">async</span> wait-based TCGEN05 op</td><td>warp-collective</td><td><code>tcgen05.wait::ld</code></td><td><code>R.TMEM.TCGEN05.WaitLd</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout"><strong><span class="mono">st.shared</span> 与 <span class="mono">stmatrix</span> 为什么可归并：</strong>它们的 ISA issue 形式不同，但对 pipeline 来说都是 generic proxy 上的同步 SMEM write，完成由执行线程的 scoreboard 保证。前提是 participation analysis 已验证正确的 issuer set；归并 effect 不等于忽略指令自身的 collective 约束。</div>
+      <div class="callout"><strong>IR 要求：</strong>Effect descriptor 必须表达 access、space、execution、proxy、issuer 与 completion。Pipeline selection 应只依赖 normalized per-operand effect，而不是从 intrinsic 名称或额外 op-kind tag 猜测协议。</div>
+    </section>
+
+    <section id="matrix">
+      <div class="section-head">
+        <h2>3. Pipeline 矩阵：Write Effect × Read Effect</h2>
+        <p class="section-kicker">这里明确使用笛卡尔积思考候选空间。行是 producer 对交互 buffer 的 normalized write effect，列是 consumer 对同一 buffer 的 normalized read effect；memory space 匹配且确有跨 warp lifetime 的单元格，定义一个独立 protocol family。一个 family 可以有多个完整、独立的 topology specialization。</p>
+      </div>
+      <div class="table-wrap">
+        <table class="matrix">
+          <thead>
+            <tr>
+              <th>Producer ↓ / Consumer →</th>
+              <th>Generic Read<br><span class="kind-id">R.SMEM.Generic.Sync</span></th>
+              <th>TMA Store Read<br><span class="kind-id">R.SMEM.TMA.Bulk</span></th>
+              <th>TCGEN05 SMEM Read<br><span class="kind-id">R.SMEM.TCGEN05.Commit</span></th>
+              <th>TCGEN05 TMEM Read<br><span class="kind-id">R.TMEM.TCGEN05.Commit</span></th>
+              <th>TCGEN05 Load<br><span class="kind-id">R.TMEM.TCGEN05.WaitLd</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="row-kind">Generic Write</span><span class="kind-id">W.SMEM.Generic.Sync</span></td>
+              <td class="valid"><span class="pipe-name">PipelineGenericGeneric</span><span class="cell-note">producer scoreboard → ordinary full arrive；consumer 同步读完 → ordinary empty arrive。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineGenericTmaStore family</span><span class="cell-note">发布前 generic→async proxy fence；same-role 可用 named-barrier 特化，cross-role 需要 mbarrier；source read 完成后才复用。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineGenericUmma</span><span class="cell-note">发布前 proxy fence；consumer 的 tcgen05.commit 到 empty barrier。</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">SMEM write ≠ TMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">SMEM write ≠ TMEM read</span></td>
+            </tr>
+            <tr>
+              <td><span class="row-kind">TMA Write</span><span class="kind-id">W.SMEM.TMA.Tx</span></td>
+              <td class="valid"><span class="pipe-name">PipelineTmaGeneric</span><span class="cell-note">acquire arm transaction；TMA completion 发布 full；consumer 普通 release。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineTmaTmaStore family</span><span class="cell-note">通用路径需要双游标；可证明的 same-role 单 stream 可用 one-cursor。两者都必须等待 load 与 store source-read completion。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineTmaUmma</span><span class="cell-note">TMA completion → consumer wait → TCGEN05 read；commit 到 empty。</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">SMEM write ≠ TMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">SMEM write ≠ TMEM read</span></td>
+            </tr>
+            <tr>
+              <td><span class="row-kind">TCGEN05 Commit Write</span><span class="kind-id">W.TMEM.TCGEN05.Commit</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="valid"><span class="pipe-name">PipelineUmmaUmma</span><span class="cell-note">producer commit 到 full；wait + TCGEN05 ordering；consumer commit 到 empty。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineUmmaTmemLoad</span><span class="cell-note">producer commit 到 full；consumer tcgen05.ld + wait::ld 后释放。</span></td>
+            </tr>
+            <tr>
+              <td><span class="row-kind">TCGEN05 Store Write</span><span class="kind-id">W.TMEM.TCGEN05.WaitSt</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="invalid"><span class="pipe-name">—</span><span class="cell-note">TMEM write ≠ SMEM read</span></td>
+              <td class="valid"><span class="pipe-name">PipelineTmemStoreUmma</span><span class="cell-note">producer wait::st 后发布；consumer TCGEN05 read 完成后 commit empty。</span></td>
+              <td class="valid"><span class="pipe-name">PipelineTmemStoreTmemLoad</span><span class="cell-note">两侧分别 wait::st / wait::ld，再完成线程间交接。</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="grid three" style="margin-top:14px">
+        <article class="card good"><h3>10 个 Core Effect Pairs</h3><p>每个绿色格子是一个协议 family，至少对应一个独立实现；topology 改变结构时还会继续拆 class。</p></article>
+        <article class="card"><h3>空间先过滤</h3><p>SMEM producer 只能连接读取同一 SMEM buffer 的 consumer；TMEM 同理。跨空间指令会形成多条 per-buffer edge。</p></article>
+        <article class="card warn"><h3>Topology 可继续拆类</h3><p>若 same-role / cross-role、CTA-group::1 / ::2 导致控制流或 storage 不同，应在同一格下使用独立具体 class。</p></article>
+      </div>
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead><tr><th>完备性边界</th><th>Producer kinds</th><th>Consumer kinds</th><th>有效 pairs</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr><td>SMEM · Core scope</td><td>Generic Sync<br>TMA Tx</td><td>Generic Sync<br>TMA Bulk<br>TCGEN05 Commit</td><td><code>2 × 3 = 6</code></td><td>完备</td></tr>
+            <tr><td>TMEM · Core scope</td><td>TCGEN05 Commit<br>TCGEN05 WaitSt</td><td>TCGEN05 Commit<br>TCGEN05 WaitLd</td><td><code>2 × 2 = 4</code></td><td>完备</td></tr>
+            <tr><td>Core scope 合计</td><td colspan="2">本文明确列出的 SMEM/TMEM normalized effect vocabulary</td><td><code>6 + 4 = 10</code></td><td>effect-pair family 完备</td></tr>
+            <tr><td>全部 PTX ISA</td><td colspan="2"><code>cp.async</code>、<code>st.async</code>、DSM/cluster 及未来 effect kinds</td><td>开放集合</td><td>不宣称完备</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout"><strong>为什么经典 <span class="mono">cp.async</span> 不在 10 种内：</strong>Core scope 明确排除这条非 bulk 路径。它是 generic proxy 上的异步 SMEM write，并使用 group/mbarrier completion；一旦纳入 scope，就新增 1 个 producer kind，与 3 个 SMEM consumer kinds 形成 3 个新 family，总数变为 13。</div>
+      <div class="callout"><strong>RMW 不自动增加一行：</strong>同步 generic <span class="mono">atom.shared/red.shared</span> 若 completion、proxy 与 issuer 义务没有新变化，可拆成同一 buffer 上的 generic read + generic write effects。只有出现新的 completion/visibility 协议时才新增 kind。</div>
+    </section>
+
+    <section id="specializations">
+      <div class="section-head">
+        <h2>4. 性能特化：只删除已经被证明冗余的同步</h2>
+        <p class="section-kicker">矩阵先决定不能违反的 buffer protocol family；随后 compiler 才能利用 same-role、锁步 stage schedule、单 issuer domain 等事实选择更小的完整实现。特化失败只能回退到同一格子的通用实现；若连通用协议要求的 transaction 对齐也无法证明，则编译报错。绝不能回退到另一个 effect family。</p>
+      </div>
+      <div class="flow" aria-label="pipeline specialization selection">
+        <div class="node"><b>effect-pair matrix</b><span>确定 completion、visibility 与 source-reuse 的语义下界。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>prove static facts</b><span>证明 role identity、访问顺序、每轮执行次数、issuer domain 与 topology。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>choose concrete class</b><span>命中窄特化，或选择该 family 的保守 fallback。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>materialize stages</b><span>实例化精确 storage、cursor 和 queue window。</span></div>
+      </div>
+
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead><tr><th>Effect family</th><th>可证明的窄 topology</th><th>可以删除什么</th><th>保守 fallback 仍需什么</th></tr></thead>
+          <tbody>
+            <tr><td><code>Generic → TMA Store</code></td><td>同一 role；同一 stage schedule；每轮 write-before-store；所有 participant 收敛。</td><td>per-stage full/empty mbarrier 与双 cursor；改用 program order、必要的 warp/named barrier 和单 cursor。</td><td>跨 role 时保留两组 mbarrier、双 cursor、proxy fence、source-read completion 与 issuer-domain store stream。</td></tr>
+            <tr><td><code>TMA Load → TMA Store</code></td><td>一个 warp；同 transaction 与 issuer domain；每轮恰好一个 load 后接一个 store；非 multicast；queue depth 可静态界定。</td><td>consumer barrier、第二个 cursor、inflight bookkeeping 与通用 capacity/reuse 分支；直接用 <code>wait_group.read&lt;Stages-1&gt;</code> 保护复用。</td><td>cross-role、多 group 或多个 completion domain 时保留双 barrier/cursor、inflight/retirement 状态与 stream scheduler。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid two" style="margin-top:16px">
+        <article class="card good">
+          <h3><code>TmaStoreStream</code> 不是第 11 种 Pipeline</h3>
+          <p>TMA bulk group 属于 issuing thread/domain，而不属于某个 buffer。一组 store 可以同时读取多个 buffer，一次 wait 也可能 retire 多条 buffer edge。因此它应作为 issuer-domain scheduler 与多个独立 pipeline 协作，而不是塞进某个格子的通用状态机。</p>
+        </article>
+        <article class="card">
+          <h3>State 也按实现精确缩小</h3>
+          <pre>// two-role fallback
+PipelineState&lt;Stages&gt; state_;
+
+// one-cursor specialization
+struct State { int stage; uint32_t phase; } state_;</pre>
+          <p>两者都是 composition。one-cursor class 不应为了复用而携带死的 producer/consumer 双游标，也不应继承一个更大的 state base。</p>
+        </article>
+      </div>
+
+      <div class="callout"><strong>CTA-group / multicast 的位置：</strong><span class="mono">CtaGroup</span>、静态 arrival count、transaction bytes 和 mask 是 topology facts，不增加 effect family。纯数值参数可以留作模板值；若 leader/peer remote-arrive、barrier ownership 或 storage 路径形成不同控制流，应拆为命名清楚的完整 specialization。</div>
+      <div class="callout"><strong>Proof rule：</strong>same-role 只是候选信号，不是证明。选择单 cursor 或删除 barrier 前，必须静态证明 transaction 对齐、producer-before-consumer、control-path cardinality、issuer domain、participant convergence 与 completion ownership。未知则选同 family fallback；transaction 不平衡则报错。</div>
+      <div class="callout"><strong>特化不是 endpoint policy：</strong>每个 specialization 仍是可逐行 review 的完整 struct，自己拥有 storage、state 和 transition 指令序列。Compiler 只做显式、保守的 class 选择；不需要一个通用 rule engine 或 <span class="mono">Pipeline&lt;ProducerPolicy, ConsumerPolicy&gt;</span>。</div>
+    </section>
+
+    <section id="multi-effect">
+      <div class="section-head">
+        <h2>5. 一条指令可以连接多个 Pipeline</h2>
+        <p class="section-kicker">分析单位是“指令对某个 buffer 的 effect”，不是“指令属于哪一种 pipeline”。这对 UMMA、tcgen05.cp 和 TMA 尤其重要。</p>
+      </div>
+      <div class="grid four">
+        <article class="card"><h3>TMA load</h3><p>对 GMEM 是 Read；对 staged SMEM 是 <span class="mono">W.SMEM.TMA.Tx</span>。CTA 内 pipeline 只关心后者。</p></article>
+        <article class="card"><h3>TMA store</h3><p>对 staged SMEM 是 <span class="mono">R.SMEM.TMA.Bulk</span>；对 GMEM 是 Write。SMEM 何时可复用取决于 source read completion。</p></article>
+        <article class="card"><h3>tcgen05.cp</h3><p>对输入 SMEM 是 <span class="mono">R.SMEM.TCGEN05.Commit</span>，对输出 TMEM 是 <span class="mono">W.TMEM.TCGEN05.Commit</span>。</p></article>
+        <article class="card"><h3>UMMA</h3><p>对 A/B-SMEM 是 async Read，对 D-TMEM 是 Write；accumulate 时 D 同时是 ReadWrite，TS 还会读 A-TMEM。</p></article>
+      </div>
+      <div class="flow" aria-label="multi-effect UMMA example">
+        <div class="node"><b>A/B SMEM writer</b><span>Generic 或 TMA write effect</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>input pipeline(s)</b><span>按每个 SMEM buffer 选择 Generic→UMMA 或 TMA→UMMA</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>UMMA instruction</b><span>消费 A/B；生产或累加 D-TMEM</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>output pipeline</b><span>按 D 的后继 read effect 选择 UMMA→UMMA 或 UMMA→TmemLoad</span></div>
+      </div>
+      <div class="callout"><strong>Completion fan-out：</strong>同一条 TCGEN05 指令可能既需要释放输入 buffer，又需要发布输出 buffer。lowering 必须明确生成对应 mbarrier completion，并验证每个 <span class="mono">tcgen05.commit</span> 跟踪的 issue interval；不能让两个通用 endpoint policy 各自猜测同一批异步操作。</div>
+    </section>
+
+    <section id="intrinsic-layers">
+      <div class="section-head">
+        <h2>5.1 <span class="mono">ll</span> 与 <span class="mono">ri</span>：物理 Wrapper 与可分析复合指令</h2>
+        <p class="section-kicker">分层由公开语义和分析契约决定，不由 Python decorator 决定。<span class="mono">ll_kernel(is_entry=False)</span> 只是生成可复用 device function 的机制；它既不能自动把函数变成底层指令，也不能替代 memory-effect metadata。</p>
+      </div>
+      <div class="flow" aria-label="intrinsic layering">
+        <div class="node"><b>Kernel schedule</b><span>role、stage.bind、遍历顺序、issuer predicate 与地址策略</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b><span class="mono">ri</span> semantic instruction</b><span>稳定的复合数据变换 + logical memory operands + 可分析 effects/regions</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b><span class="mono">ll</span> physical wrapper</b><span>单条 PTX，或因寄存器 tuple / inline-asm 约束必须捆绑的窄物理 macro</span></div>
+      </div>
+      <div class="grid three" style="margin-top:16px">
+        <article class="card">
+          <h3>Kernel 保留什么</h3>
+          <p>跨 fragment 的前后遍历、overlay-safe 顺序、runtime 分支、elected issuer、stage transaction 边界与 pipeline ownership。它们是 schedule，不应藏进方便函数。</p>
+        </article>
+        <article class="card good">
+          <h3><span class="mono">ri</span> 可以封装什么</h3>
+          <p>一个可命名、可独立 lowering 的语义 transaction，例如固定宽度的 <span class="mono">TMEM load → convert/activation → reduce/pack → TMEM/SMEM store</span>。名字描述数据变换、空间和宽度，不描述某个模型或 kernel。</p>
+        </article>
+        <article class="card">
+          <h3><span class="mono">ll</span> 可以封装什么</h3>
+          <p>ISA 原语、bitcast/pack、barrier/fence wrapper，以及无法自然暴露寄存器 tuple 的窄物理 helper。<span class="mono">ll</span> 不拥有 logical buffer lifetime，也不替 compiler 决定 pipeline transition。</p>
+        </article>
+      </div>
+      <pre># Good: one analyzable semantic transaction. The name exposes datapath and repeat.
+ri.tmem_ld_32dp_f32_to_smem_bf16_x8(
+    accum_mem, output_mem, src_col, dst_addr)
+
+# Declared metadata:
+#   accum_mem: Read(TMEM), region(src_col, 32dp x8)
+#   output_mem: Write(SMEM), conservative whole-buffer region when dst_addr
+#               cannot yet be recovered as a logical SMEM view
+# Lowering uses ll.tmem_ld_32dp, ll.tmem_ld_fence,
+# ll.pack_bf16 and ll.st_shared_128.</pre>
+      <div class="callout"><strong>Effect + region 是准入条件：</strong>每个 logical memory operand 都必须声明 access、space、proxy/completion，并让分析恢复 offset 与 extent。未知 region 可以保守地表示 whole-buffer access；需要精确 overlay、TMA partition 或局部复用证明时，不能靠 intrinsic 名字的 <span class="mono">if/else</span> 特判，也不能因封装而丢掉原本可见的范围。</div>
+      <div class="callout"><strong>内部 completion 与 pipeline transition 分开：</strong>复合指令可以内含使自身结果成立所必需的窄 ISA wait/fence，例如 TMEM load 后在使用寄存器前执行 <span class="mono">tcgen05.wait::ld</span>。但 <span class="mono">producer_acquire/commit</span>、<span class="mono">consumer_wait/release</span>、TMA-store stream commit/retire 等跨 logical buffer lifetime 的动作必须继续由 compiler 和 concrete pipeline 拥有。</div>
+      <div class="card rules" style="margin-top:16px">
+        <div class="rule"><b>先证明重复的是语义，不只是文本</b><p>至少两个 call sites 共享输入输出、memory effects、内部 completion 与 width；只有变量名或地址不同才值得抽取。</p></div>
+        <div class="rule"><b>名字暴露可观察 layout</b><p>统一使用 <span class="mono">ld/st</span>；TMEM 指令显式写出 <span class="mono">16dp/32dp</span> 与 <span class="mono">xN</span>。不同 datapath/lane layout 使用独立 <span class="mono">ri</span> 指令，不能只用元素数掩盖。</p></div>
+        <div class="rule"><b>边界停在一个 transaction</b><p>允许固定宽度 load/transform/store；不吞掉外层 tile loop、stage.bind、overlay traversal 或 issuer selection。</p></div>
+        <div class="rule"><b>lowering 展开到 <span class="mono">ll</span></b><p><span class="mono">ri</span> 负责分析契约；物理 PTX/CUDA 实现放在 <span class="mono">ll</span>。若用 non-entry LLKernel，实现仍按其公开层级归类。</p></div>
+        <div class="rule"><b>生成代码是验收标准</b><p>重构前后保存 CUDA/SASS；检查 helper 已内联、资源未恶化、effect/region events 等价，再批量迁移 call sites。</p></div>
+      </div>
+    </section>
+
+    <section id="implementation">
+      <div class="section-head">
+        <h2>6. 实现原则：每个具体 Pipeline 都是独立 Class</h2>
+        <p class="section-kicker">统一的是 compiler-facing concept；不统一 barrier layout、completion hook 或 transition control flow。每个 effect family 至少有一个 class，证明成立时可增加窄 specialization。少量重复让每个实现可以被逐行 review。</p>
+      </div>
+      <div class="grid two">
+        <article class="card good">
+          <h3>基础 concept</h3>
+          <pre>template &lt;class P&gt;
+concept WarpBufferPipeline = requires(P&amp; p) {
+  { p.producer_acquire() } -&gt; std::same_as&lt;void&gt;;
+  { p.producer_commit()  } -&gt; std::same_as&lt;void&gt;;
+  { p.consumer_wait()    } -&gt; std::same_as&lt;void&gt;;
+  { p.consumer_release() } -&gt; std::same_as&lt;void&gt;;
+};</pre>
+          <p>四个名字固定插入位置和所有权语义，但不限制具体指令序列。对异步 consumer，<span class="mono">consumer_release()</span> 是“交出访问并提交 completion”，不保证函数返回时 stage 已物理可复用。</p>
+        </article>
+        <article class="card">
+          <h3>按需 capability</h3>
+          <pre>TmaLoadSource       // producer_prepare_transaction(), producer_get_barrier()
+StagedPipeline      // producer_stage(), consumer_stage()
+RetirableAsyncSink // retire_completed()
+DrainablePipeline  // producer_tail()</pre>
+          <p>只有真实 lowering 需要时才要求 capability；不要为“接口整齐”给所有 pipeline 填 no-op。</p>
+        </article>
+      </div>
+      <pre>template &lt;int Stages, int ProducerWarps, int ConsumerWarps&gt;
+struct PipelineGenericUmma {
+  // Composition: the concrete pipeline owns its stage state.
+  PipelineState&lt;Stages&gt; state_;
+  BarrierArray&lt;Stages&gt; full;
+  BarrierArray&lt;Stages&gt; empty;
+
+  int  producer_stage() const { return state_.producer_stage(); }
+  int  consumer_stage() const { return state_.consumer_stage(); }
+  void producer_acquire(); // wait empty
+  void producer_commit();  // proxy fence + full.arrive + advance
+  void consumer_wait();    // wait full + required TCGEN05 ordering
+  void consumer_release(); // tcgen05.commit -> empty + advance
+};</pre>
+      <div class="grid two" style="margin-top:16px">
+        <article class="card">
+          <h3>允许共享</h3>
+          <p>原始 PTX wrapper、barrier array view、elect-one、cluster rank/mask，以及只负责 index/phase 的 <span class="mono">PipelineState</span> 值类型。</p>
+        </article>
+        <article class="card bad">
+          <h3>不共享</h3>
+          <p><span class="mono">Pipeline&lt;ProducerPolicy, ConsumerPolicy&gt;</span>、通用 completion token、fence trait、由矩阵自动生成的 alias、带大量 no-op 分支的万能 storage。</p>
+        </article>
+      </div>
+      <div class="callout"><strong>禁止 state inheritance：</strong>具体类型写成 <span class="mono">struct PipelineX { PipelineState&lt;Stages&gt; state_; ... };</span>，不写 <span class="mono">struct PipelineX : PipelineState&lt;Stages&gt;</span>。Pipeline 不是一种 PipelineState；它只是拥有 stage cursor。composition 让状态访问、推进时机和额外的 <span class="mono">inflight_</span> 等字段都留在具体实现中。</div>
+      <div class="callout"><strong>Collective 是协议的一部分：</strong>模板值可以描述 warp 数量或 CTA group，但“由所有 participant arrive”“由 elected lane issue”“由硬件 completion domain arrive”必须写在具体 class 中。若 topology 改变了控制流或 storage，就拆成另一个独立 class。</div>
+    </section>
+
+    <section id="stages">
+      <div class="section-head">
+        <h2>7. Stage 只是同一协议的多份 Buffer</h2>
+        <p class="section-kicker">Stage 解决吞吐，不定义同步种类。它用更多片上容量换取更多 in-flight work，使 producer 与 consumer 的执行重叠。</p>
+      </div>
+      <div class="grid two">
+        <article class="card">
+          <h3>单份 Buffer 的协议不变</h3>
+          <div class="stack">
+            <div class="slot"><b>stage 0</b><span>buffer[0]</span><span>full[0] / empty[0] / phase</span></div>
+            <div class="slot"><b>stage 1</b><span>buffer[1]</span><span>full[1] / empty[1] / phase</span></div>
+            <div class="slot"><b>stage …</b><span>buffer[…]</span><span>相同 protocol state</span></div>
+            <div class="slot"><b>stage N−1</b><span>buffer[N−1]</span><span>相同 protocol state</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Little's Law 视角</h3>
+          <pre>required_inflight ≈ latency / initiation_interval
+
+Stages 受以下因素共同约束：
+  - 目标 overlap / issue interval
+  - SMEM / TMEM 容量
+  - barrier 与寄存器成本
+  - occupancy
+  - async engine queue depth</pre>
+        </article>
+      </div>
+      <div class="grid three" style="margin-top:16px">
+        <article class="card good"><h3>不进入 Effect Family</h3><p><span class="mono">PipelineTmaUmma&lt;1&gt;</span> 与 <span class="mono">PipelineTmaUmma&lt;4&gt;</span> 使用同一 completion / visibility 协议。</p></article>
+        <article class="card"><h3>State 用 Composition</h3><p>index、phase、wrap-around 可复用为 <span class="mono">PipelineState</span>，但它必须作为每个具体 pipeline 的成员，而不是基类。</p></article>
+        <article class="card warn"><h3>容量仍影响局部逻辑</h3><p>TMA store 的 pending-group 阈值可能依赖 Stages，但这只是该 class 的 queue capacity，不产生新 effect kind。</p></article>
+      </div>
+    </section>
+
+    <section id="analysis">
+      <div class="section-head">
+        <h2>8. Compiler 如何自动选择 Pipeline</h2>
+        <p class="section-kicker">分析从 logical buffer 和 memory effect 出发。指令名只负责提供 effect metadata；先用矩阵选 family，再用显式的 proof predicate 选同一 family 内的具体 class。</p>
+      </div>
+      <div class="flow" aria-label="compiler pipeline analysis">
+        <div class="node"><b>collect + normalize</b><span>为每个 buffer operand 记录 effect，并归一化 completion、proxy 与 issuer。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>build buffer edges</b><span>找出 write → read lifetime、participant sets、stage schedule 与 issuer domains。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>matrix lookup</b><span>按 write/read effect 精确选择 semantic family；无匹配则报错。</span></div>
+        <div class="mark">→</div>
+        <div class="node"><b>prove specialization</b><span>显式证明窄条件后选小 class，否则使用该 family 的 fallback。</span></div>
+      </div>
+      <div class="card rules" style="margin-top:16px">
+        <div class="rule"><b>逐 operand 收集 effect</b><p>UMMA、tcgen05.cp、TMA 等一次产生多个不同 buffer effect；不能给整条 instruction 只挂一个 op kind。</p></div>
+        <div class="rule"><b>构建 per-buffer producer / consumer regions</b><p>确定 first/last access、控制流覆盖、producer/consumer warp set，以及 buffer 是否真的跨 role 复用。</p></div>
+        <div class="rule"><b>验证 region 内 effect 一致性</b><p>多个 opcode 可以归并为同一 normalized kind；若同一侧混入不同 completion 义务，拆 region 或编译报错。</p></div>
+        <div class="rule"><b>精确查矩阵</b><p>family key 是 write effect × read effect；禁止按 memory space 相同退化到 generic mbarrier，也不要把 topology specialization 扩张成新的 effect kind。</p></div>
+        <div class="rule"><b>保守选择 specialization</b><p>same-role 只是候选信号；还要证明 transaction 对齐、访问顺序、control-path cardinality、issuer domain 与 completion ownership。任何一项未知就选 fallback。</p></div>
+        <div class="rule"><b>插入四个 transition</b><p>acquire 在首个 write 前；commit 在最后一个 write/completion issue 后；wait 在首个 read 前；release 在最后一个同步 read 或异步 read issue 后，把 completion 责任交给具体 pipeline。Stage reuse 仍必须晚于真实 completion。</p></div>
+        <div class="rule"><b>最后 materialize stages</b><p>先确定协议种类，再按 stage count 复制 buffer/barrier state 并生成 cursor；stage 不参与 effect 分类。</p></div>
+      </div>
+      <pre>for buffer in logical_buffers:
+  edge = analyze_inter_warp_lifetime(buffer)
+  if not edge:
+    continue
+
+  write_kind = normalize(edge.producer_effects)
+  read_kind  = normalize(edge.consumer_effects)
+  family = PIPELINE_MATRIX.lookup(write_kind, read_kind)
+
+  if family is None:
+    error("unsupported inter-warp buffer protocol", edge)
+
+  pipe_class = family.fallback
+  if family == TMA_TO_TMA_STORE and prove_one_cursor_relay(edge):
+    pipe_class = PipelineTmaTmaStoreSameRole
+  elif family == GENERIC_TO_TMA_STORE and prove_same_role_store(edge):
+    pipe_class = PipelineTmaStoreSameRole
+
+  insert_transitions(edge, pipe_class)
+  materialize_stages(edge, pipe_class, edge.stage_count)</pre>
+      <div class="callout"><strong>Less is more：</strong>这里只需要为真实存在的窄特化写两个显式 predicate；不要先造一个 specialization DSL、cost model 或规则引擎。新 predicate 只有在 benchmark 证明值得、且 correctness facts 可静态证明时再加入。</div>
+    </section>
+
+    <section id="cutlass">
+      <div class="section-head">
+        <h2>9. CUTLASS 对照：协议语义与 Stage State 分离</h2>
+        <p class="section-kicker">CUTLASS 的 pipeline 目录支持这套思路：公共调用面相似，但 TMA、UMMA、普通 barrier、TMA store 各有语义类型；stage index/phase 则由小型 <span class="mono">PipelineState</span> 表达。LittleKernel 选择把这个 state 作为每个具体 struct 的成员。</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>本地 CUTLASS 位置</th><th>它表达什么</th><th>设计启示</th></tr></thead>
+          <tbody>
+            <tr><td><code>sm90_pipeline.hpp:171</code><br><code>PipelineState</code></td><td>只有 circular index、phase 与 count。</td><td>Stage/cursor 是独立机械状态，不应决定 pipeline effect kind。</td></tr>
+            <tr><td><code>sm90_pipeline.hpp:271</code><br><code>PipelineTmaAsync</code></td><td>TMA transaction barrier、TMA acquire、completion barrier getter。</td><td><code>W.SMEM.TMA.Tx</code> 需要自己的 producer 协议。</td></tr>
+            <tr><td><code>sm90_pipeline.hpp:655</code><br><code>PipelineTmaStore</code></td><td>producer-only TMA store group throttle；acquire 最多保留 <code>UnacquiredStages</code> 个 batch，tail 等到 0。</td><td>支持 same-role one-cursor 的 <code>wait&lt;Stages-1&gt;</code> 思路，但不替代跨 role 的 source-reuse barrier。</td></tr>
+            <tr><td><code>sm90_pipeline.hpp:1015</code><br><code>PipelineAsync</code></td><td>普通 full/empty barrier pipeline。</td><td>同步 generic 路径可以简单，但不应成为所有路径的 policy host。</td></tr>
+            <tr><td><code>sm100_pipeline.hpp:119</code><br><code>PipelineUmmaAsync</code></td><td>UMMA producer commit 与 2SM multicast。</td><td><code>W.TMEM.TCGEN05.Commit</code> 需要专门发布路径。</td></tr>
+            <tr><td><code>sm100_pipeline.hpp:537</code><br><code>PipelineTmaUmmaAsync</code></td><td>TMA producer + UMMA consumer 的完整语义类型。</td><td>矩阵中的 TMA→UMMA 应当是一个可独立 review 的 class。</td></tr>
+            <tr><td><code>sm100_pipeline.hpp:765</code><br><code>PipelineUmmaConsumerAsync</code></td><td>单独处理 UMMA consumer release。</td><td>TCGEN05 consumer completion 不是普通 thread arrive policy。</td></tr>
+            <tr><td><code>sm100_pipeline.hpp:935</code><br><code>PipelineCLCFetchAsync</code></td><td>新的 CLC fetch 协议直接拥有独立 class。</td><td>新 effect pair 出现时加具体实现，不扩张万能状态机。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout"><strong>参考边界：</strong>CUTLASS 内部有时用 composition 复用 mechanism implementation，也常把 <span class="mono">PipelineState</span> 作为外部调用状态。LittleKernel 不照搬这个 ownership：具体 pipeline 内含精确的 state member——通常是 <span class="mono">PipelineState&lt;Stages&gt; state_</span>，one-cursor 特化则用更小的成员状态——并继续借鉴“语义类型分开、stage state 很小、专用 completion 留在具体类型”的边界。</div>
+    </section>
+
+    <section id="sources">
+      <div class="section-head">
+        <h2>依据与边界</h2>
+        <p class="section-kicker">本文只保存稳定的 compiler architecture。当前代码映射、已知问题、测试状态与施工计划单独维护，避免实现进度污染核心模型。</p>
+      </div>
+      <div class="grid two">
+        <article class="card">
+          <h3>文档边界与本地参考</h3>
+          <ul class="source-list">
+            <li><a href="AUTO_PIPELINE_IMPLEMENTATION_REVIEW.zh.md">当前实现与未完成工作</a> — implementation inventory、open risks 与验证状态。</li>
+            <li><span class="mono">${CUTLASS_ROOT}/include/cutlass/pipeline/sm90_pipeline.hpp</span></li>
+            <li><span class="mono">${CUTLASS_ROOT}/include/cutlass/pipeline/sm100_pipeline.hpp</span></li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>官方语义</h3>
+          <ul class="source-list">
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#proxies" target="_blank" rel="noreferrer">PTX ISA：Proxies</a></li>
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model" target="_blank" rel="noreferrer">PTX ISA：tcgen05 memory consistency</a></li>
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#tensorcore-5th-generation-instructions-tcgen05-commit" target="_blank" rel="noreferrer">PTX ISA：tcgen05.commit</a></li>
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#tensorcore-5th-generation-instructions-tcgen05-wait" target="_blank" rel="noreferrer">PTX ISA：tcgen05.wait</a></li>
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk" target="_blank" rel="noreferrer">PTX ISA：cp.async.bulk</a></li>
+            <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-wait-group" target="_blank" rel="noreferrer">PTX ISA：cp.async.bulk.wait_group</a></li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer><div class="shell">Mental model: per-buffer warp synchronization · effect-pair matrix · independent pipeline classes · staging is orthogonal · rewritten 2026-08-18</div></footer>
+</body>
+</html>

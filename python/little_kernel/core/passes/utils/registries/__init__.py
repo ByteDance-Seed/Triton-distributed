@@ -24,9 +24,8 @@
 ################################################################################
 
 # Registry module exports
-from .operator_registry import get_operator_registry, OperatorRegistry
-from .loop_modifier_registry import (get_loop_modifier_registry, register_loop_modifier, LoopModifierRegistry,
-                                     LoopModifier)
+from little_kernel.core.passes.utils.registries.operator_registry import get_operator_registry, OperatorRegistry
+from little_kernel.core.passes.utils.registries.loop_modifier_registry import get_loop_modifier_registry, register_loop_modifier, LoopModifierRegistry, LoopModifier
 
 __all__ = [
     'get_operator_registry',

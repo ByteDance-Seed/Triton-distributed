@@ -22,6 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-
-from .core.compile import ll_kernel  # noqa: F401
-from .core.expr import Var as Var
+"""LittleKernel compiler entry points; hardware implementations are plugins."""
+from .core.compile import ll_kernel
+from .core.expr import Var
+from .backends import available_backends, get_backend

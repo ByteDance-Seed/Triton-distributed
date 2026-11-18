@@ -29,15 +29,14 @@ This module contains visitor methods for control flow statements (if, while, for
 """
 
 import ast
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import little_kernel.language as ll
-from little_kernel.core.type_system import (LLType, TupleType, ConstTypeHelper, ConstAnnotationType, const_annotation,
-                                            Const)
+from little_kernel.core.type_system import LLType, TupleType, ConstTypeHelper, ConstAnnotationType, const_annotation, Const
 from little_kernel.core.passes.utils.registries.loop_modifier_registry import get_loop_modifier_registry
 from little_kernel.core.passes.utils.type_inference import TypeInferencer
 from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
 from little_kernel.codegen.registries.special_struct_registry import get_special_struct_codegen
-from ..registries.loop_modifier_codegen import get_loop_modifier_codegen
+from little_kernel.codegen.registries.loop_modifier_codegen import get_loop_modifier_codegen
 
 if TYPE_CHECKING:
     pass
@@ -240,7 +239,7 @@ class ControlFlowCodegenMixin:
         # Variables used in both if and else blocks need to be declared before if
         vars_to_declare_before_if = {}
         all_vars = set(vars_in_if.keys()) | set(vars_in_else.keys())
-        for var_name in all_vars:
+        for var_name in sorted(all_vars):
             if var_name not in self.scope_vars:
                 # Use type from if block if available, else from else block
                 if var_name in vars_in_if:
@@ -248,8 +247,13 @@ class ControlFlowCodegenMixin:
                 elif var_name in vars_in_else:
                     vars_to_declare_before_if[var_name] = vars_in_else[var_name]
 
-        # Declare variables before if statement
+        # Declare variables before if statement (skip void/SpecialStruct types)
+        from little_kernel.core.type_system import VoidType, SpecialStructType
         for var_name, (var_cpp_type, var_lltype) in vars_to_declare_before_if.items():
+            if isinstance(var_lltype, (VoidType, SpecialStructType)):
+                continue
+            if var_cpp_type == "void":
+                continue
             self.writeln_main(f"{var_cpp_type} {var_name};")
             self.scope_vars[var_name] = var_lltype
 
@@ -258,6 +262,25 @@ class ControlFlowCodegenMixin:
 
     def visit_While(self, node: ast.While) -> None:
         """Process Python while loops → C++ while loop."""
+        # Hoist loop-body variables before the loop, mirroring visit_For:
+        # Python variables assigned in the body are function-scoped, but a C++
+        # declaration emitted on the body's first assignment would be scoped
+        # to the loop's block. scope_vars otherwise still records the name,
+        # so a later use in a sibling loop body or after the loop emits a
+        # bare assignment to an undeclared C identifier
+        # (emitted_cuda_undefined_identifier).
+        vars_to_declare = self._scan_for_assigned_vars(node.body)
+
+        # Declare variables before the loop (skip void/SpecialStruct types)
+        from little_kernel.core.type_system import VoidType, SpecialStructType
+        for var_name, (var_cpp_type, var_lltype) in vars_to_declare.items():
+            if isinstance(var_lltype, (VoidType, SpecialStructType)):
+                continue
+            if var_cpp_type == "void":
+                continue
+            self.writeln_main(f"{var_cpp_type} {var_name};")
+            self.scope_vars[var_name] = var_lltype
+
         # Generate condition expression
         condition_cpp = self.visit(node.test)
         self.writeln_main(f"while ({condition_cpp}) {{")
@@ -269,14 +292,197 @@ class ControlFlowCodegenMixin:
         self.indent_level -= 1
         self.writeln_main("}")  # Close while block
 
-        # Process else block (if exists) - Python allows else on while loops
+        # Handle orelse clause
         if node.orelse:
-            self.writeln_main("else {")
-            self.indent_level += 1
-            for stmt in node.orelse:
-                self.visit(stmt)
-            self.indent_level -= 1
-            self.writeln_main("}")  # Close else block
+            raise NotImplementedError("While loop 'else' clause is not supported in C++ (Python-specific feature). "
+                                      "A C++ while loop has no else; the previous emission produced invalid C++. "
+                                      "Track loop completion with an explicit flag variable instead.")
+
+    # Upper bound on per-iteration copies emitted for a statically unrolled
+    # loop; larger literal loops keep the ``#pragma unroll`` hint instead of
+    # exploding the generated source.
+    _STATIC_UNROLL_MAX_TRIP = 256
+
+    @staticmethod
+    def _const_range_int(arg) -> Optional[int]:
+        """Resolve a range() argument AST node to a Python int literal, or None."""
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, int) and not isinstance(arg.value, bool):
+            return arg.value
+        if isinstance(arg, ast.UnaryOp) and isinstance(arg.op, ast.USub):
+            inner = ControlFlowCodegenMixin._const_range_int(arg.operand)
+            return -inner if inner is not None else None
+        return None
+
+    @classmethod
+    def _crosses_iteration(cls, stmt) -> bool:
+        """True if stmt contains a break/continue binding to the loop being unrolled.
+
+        A ``break``/``continue`` that is a direct child of ``stmt`` (top-level
+        statement of the loop body) binds the loop being considered and blocks
+        full unrolling: outside a real C++ loop these keywords are ill-formed.
+        break/continue inside a nested for/while bind to that inner loop and
+        are safe inside an unrolled copy, so nested loop subtrees are not
+        descended.  ``return`` needs no check: it exits the kernel identically
+        from a copy.
+        """
+        if isinstance(stmt, (ast.Break, ast.Continue)):
+            return True
+        if isinstance(stmt, (ast.For, ast.While)):
+            # break/continue inside this nested loop bind to it, not to the
+            # loop being considered for unrolling, so never descend.
+            return False
+        for child in ast.iter_child_nodes(stmt):
+            if isinstance(child, (ast.For, ast.While)):
+                continue
+            if isinstance(child, ast.stmt) and cls._crosses_iteration(child):
+                return True
+        return False
+
+    @staticmethod
+    def _range_trip_count(start: int, stop: int, step: int):
+        """Trip count of range(start, stop, step) without materializing it.
+
+        Empty ranges return 0. Pure arithmetic over Python ints bounds the
+        result before any enumeration, so a source range far larger than
+        memory (or even larger than Py_ssize_t) cannot trigger a giant
+        allocation or an OverflowError inside ``list(range(...))``.
+        """
+        if step > 0:
+            if stop <= start:
+                return 0
+            span = stop - start
+        else:
+            if stop >= start:
+                return 0
+            span = start - stop
+        return (span + abs(step) - 1) // abs(step)
+
+    def _static_unroll_values(self, node: ast.For) -> Optional[list]:
+        """Iteration values for a guaranteed full unroll of ``node``, or None.
+
+        Eligible loops have the form ``for v in ll.unroll(range(...))`` where
+        every range argument is an integer literal (constant trip count) and no
+        break/continue crosses an iteration boundary (same legality class as
+        LLVM LoopUnroll's full-unroll: compile-time trip count, no exiting
+        edges through the header). Ineligible loops return None and keep the
+        ``#pragma unroll`` hint path unchanged.
+        """
+        range_call = node.iter
+        if not (isinstance(range_call, ast.Call) and isinstance(range_call.func, ast.Name)
+                and range_call.func.id == "range"):
+            return None
+        const_args = [self._const_range_int(a) for a in range_call.args]
+        if not const_args or any(v is None for v in const_args):
+            return None
+        if len(const_args) == 1:
+            start, stop, step = 0, const_args[0], 1
+        elif len(const_args) == 2:
+            start, stop, step = const_args[0], const_args[1], 1
+        else:
+            start, stop, step = const_args
+        if step == 0:
+            return None
+        # Bound the trip count with integer arithmetic before any enumeration:
+        # materializing list(range(...)) first lets a large but otherwise
+        # valid literal loop exhaust host memory (and ranges past Py_ssize_t
+        # raise OverflowError from list(range(...)) outright).
+        trip_count = self._range_trip_count(start, stop, step)
+        if trip_count is None or trip_count > self._STATIC_UNROLL_MAX_TRIP:
+            return None
+        for stmt in node.body:
+            if self._crosses_iteration(stmt):
+                return None
+        # Small legal loops still fully enumerate (and unroll) every copy.
+        # Guard range() against Py_ssize_t overflow even though the cap above
+        # already excludes such trips in practice.
+        try:
+            return list(range(start, stop, step))
+        except OverflowError:
+            return None
+
+    def _resolve_int_bound_type(self, node, depth=0):
+        """Best-effort integer type of a range() bound expression, or None.
+
+        Layered resolution: the type-inference map (all_types) when the
+        inferencer recorded the node, the codegen scope map (scope_vars) for
+        plain Name loads, a structural walk of BinOp/UnaryOp nests with C++
+        promotion across operands (so `hi - 1` inherits the uint32 of `hi`
+        rather than collapsing to the literal's int32), and a Subscript load
+        from a declared tensor that resolves to the tensor's element integer
+        type (covering ragged/segment offsets like ``offsets[e]``). Anything
+        else returns None and the caller falls back to int32.
+        """
+        from little_kernel.core.type_system import IntType
+        from little_kernel.core.passes.utils.type_inference.type_inference_visitors import promote_type
+
+        if depth > 8:
+            return None
+        candidate = None
+        all_types = getattr(self, "all_types", None)
+        if all_types is not None:
+            candidate = all_types.get(node)
+        if candidate is None and isinstance(node, ast.Name):
+            candidate = self.scope_vars.get(node.id)
+        if isinstance(candidate, IntType):
+            if candidate.special is not None:
+                return ll.int32
+            # integer promotion: keep at least int32 width
+            return candidate if candidate.bits >= 32 else ll.int32
+        if candidate is not None:
+            return None  # known but not a plain integer -> caller default
+        if isinstance(node, ast.BinOp):
+            left = self._resolve_int_bound_type(node.left, depth + 1)
+            right = self._resolve_int_bound_type(node.right, depth + 1)
+            left = left if left is not None else ll.int32
+            right = right if right is not None else ll.int32
+            merged, _, _ = promote_type(left, right)
+            if merged.special is not None:
+                return ll.int32
+            return merged
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            return self._resolve_int_bound_type(node.operand, depth + 1)
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            # Subscript load from a declared tensor (e.g. ragged segment
+            # offsets[e]). When type inference has not recorded a type for the
+            # subscript itself, resolve through the tensor's declared element
+            # type so the loop variable inherits the loaded integer width
+            # (ll.Tensor[ll.int64] -> int64_t loop counter). This matters for
+            # ragged-loop lowering where S > 2**31 would otherwise truncate.
+            tensor_type = self.scope_vars.get(node.value.id)
+            if tensor_type is None:
+                all_types = getattr(self, "all_types", None)
+                if all_types is not None:
+                    tensor_type = all_types.get(node.value)
+            from little_kernel.core.type_system import TensorType
+            if isinstance(tensor_type, TensorType):
+                element_type = tensor_type.element_type
+                if isinstance(element_type, IntType):
+                    if element_type.special is not None:
+                        return ll.int32
+                    return element_type if element_type.bits >= 32 else ll.int32
+            return None
+        return None
+
+    def _promote_range_bound_types(self, range_args):
+        """Promoted integer type for a fresh range() loop variable.
+
+        Folds the resolved types of the range() bound expressions with the
+        same C++ implicit-conversion promotion used by type inference
+        (promote_type). Bounds that resolve to nothing usable contribute
+        int32, so a plain int32/int-literal loop keeps the historical
+        int32_t counter.
+        """
+        from little_kernel.core.passes.utils.type_inference.type_inference_visitors import promote_type
+
+        result_type = ll.int32
+        for arg in range_args:
+            arg_type = self._resolve_int_bound_type(arg)
+            if arg_type is None:
+                arg_type = ll.int32
+            result_type, _, _ = promote_type(result_type, arg_type)
+            if result_type.special is not None:
+                result_type = ll.int32
+        return result_type
 
     def visit_For(self, node: ast.For) -> None:
         """Process Python for loops (primarily supports `for var in range(...)` → C++ for loop)."""
@@ -309,7 +515,7 @@ class ControlFlowCodegenMixin:
                                       "Other iterables (e.g., lists, tuples) are not supported yet.")
         range_call = node.iter
 
-        # Parse range arguments (start, stop, step) with defaults
+        # Parse range arguments: Python range(start, stop, step) or range(stop)
         range_args = [self.visit(arg) for arg in range_call.args]
         # range() can be called as:
         # - range(stop) -> start=0, stop=stop, step=1
@@ -369,7 +575,18 @@ class ControlFlowCodegenMixin:
             loop_var_cpp_type = self._lltype_to_cpp(loop_var_type)
             loop_init = f"{loop_var_name} = {start}"
         else:
-            loop_var_type = ll.int32
+            # Pick the loop variable type from the range() bound expressions
+            # instead of hardcoding int32. Ragged/irregular kernels iterate
+            # with bounds loaded from typed tensors (e.g. uint32 segment
+            # offsets): an int32 loop variable against a uint32 bound makes
+            # the emitted condition a mixed-sign C++ comparison, which under
+            # usual arithmetic conversions reinterprets the (signed) counter
+            # as unsigned -- a descending scan then runs past the segment.
+            # Promote across start/stop/step with the same C++ conversion
+            # rules used by type inference, defaulting to int32 when the
+            # bounds carry no wider/unsigned type (keeps prior behavior for
+            # plain int32 loops).
+            loop_var_type = self._promote_range_bound_types(range_call.args)
             loop_var_cpp_type = self._lltype_to_cpp(loop_var_type)
             loop_init = f"{loop_var_cpp_type} {loop_var_name} = {start}"
             self.scope_vars[loop_var_name] = loop_var_type
@@ -401,24 +618,63 @@ class ControlFlowCodegenMixin:
         # Exclude loop variable - it is declared in the for loop header
         vars_to_declare = {k: v for k, v in vars_to_declare.items() if k != loop_var_name}
 
-        # Declare variables before the loop
+        # Declare variables before the loop (skip void/SpecialStruct types)
+        from little_kernel.core.type_system import VoidType, SpecialStructType
         for var_name, (var_cpp_type, var_lltype) in vars_to_declare.items():
+            if isinstance(var_lltype, (VoidType, SpecialStructType)):
+                continue
+            if var_cpp_type == "void":
+                continue
             self.writeln_main(f"{var_cpp_type} {var_name};")
             self.scope_vars[var_name] = var_lltype
 
-        # Write C++ for loop header (with modifier pragma if any)
-        if modifier_code:
-            self.writeln_main(modifier_code)
-        self.writeln_main(f"for ({loop_init}; {loop_cond}; {loop_incr}) {{")
+        # Guaranteed source-level full unroll: ll.unroll(range(...)) with all
+        # integer-literal bounds and no break/continue crossing iterations is
+        # emitted as per-iteration scoped copies. The `#pragma unroll` form is
+        # only a hint that nvcc may ignore (e.g. constant-trip head-split loops
+        # with pointer-select bodies), which measurably defeats hand schedules;
+        # duplication guarantees the unrolled schedule for any nvcc heuristic.
+        static_unroll_values = None
+        if modifier_code == "#pragma unroll" and not loop_var_in_scope:
+            static_unroll_values = self._static_unroll_values(node)
 
-        # Process loop body
-        self.indent_level += 1
-        for stmt in node.body:
-            self.visit(stmt)
-        self.indent_level -= 1
+        if static_unroll_values is not None:
+            # Each iteration gets its own scope so body-local declarations do
+            # not collide; the loop variable is re-declared per copy with the
+            # literal trip value, which nvcc constant-propagates into the body.
+            # The same literal binding is published to expression codegen for
+            # the duration of the copy so a compile-time-unrolled fragment
+            # subscript lowers to the per-element register scalar instead of
+            # an address-taken array slot (ir.wgmma.acc_fragment).
+            unroll_envs = getattr(self, "_unroll_const_envs", None)
+            for iter_value in static_unroll_values:
+                self.writeln_main("{")
+                self.indent_level += 1
+                self.writeln_main(f"{loop_var_cpp_type} {loop_var_name} = {iter_value};")
+                if unroll_envs is not None:
+                    unroll_envs.append({loop_var_name: iter_value})
+                try:
+                    for stmt in node.body:
+                        self.visit(stmt)
+                finally:
+                    if unroll_envs is not None:
+                        unroll_envs.pop()
+                self.indent_level -= 1
+                self.writeln_main("}")
+        else:
+            # Write C++ for loop header (with modifier pragma if any)
+            if modifier_code:
+                self.writeln_main(modifier_code)
+            self.writeln_main(f"for ({loop_init}; {loop_cond}; {loop_incr}) {{")
 
-        # Close loop block
-        self.writeln_main("}")
+            # Process loop body
+            self.indent_level += 1
+            for stmt in node.body:
+                self.visit(stmt)
+            self.indent_level -= 1
+
+            # Close loop block
+            self.writeln_main("}")
 
         # Cleanup: Remove new loop variable from scope
         if not loop_var_in_scope:

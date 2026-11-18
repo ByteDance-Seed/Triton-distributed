@@ -23,17 +23,56 @@
 #
 ################################################################################
 
-from ..builtin_base import builtin
+from little_kernel.language.builtin_base import builtin, BuiltinOp
 from little_kernel.core.type_system import void
 
 
-def codegen_unroll(inner_range):
-    raise RuntimeError("unroll intrinsic should never be called in code generation")
+@builtin
+class unroll(BuiltinOp):
+    """Unroll the loop over the inner range."""
+
+    @staticmethod
+    def return_type(inner_range):
+        return void
+
+    @staticmethod
+    def codegen(inner_range):
+        raise RuntimeError("unroll intrinsic should never be called in code generation")
 
 
-@builtin(eval_return_type=void, codegen_func=codegen_unroll)
-def unroll(inner_range):
+@builtin
+class no_unroll(BuiltinOp):
+    """Keep the loop rolled even when the compiler can infer its trip count."""
+
+    @staticmethod
+    def return_type(inner_range):
+        return void
+
+    @staticmethod
+    def codegen(inner_range):
+        raise RuntimeError("no_unroll intrinsic should never be called in code generation")
+
+
+@builtin
+class unroll_dyn(BuiltinOp):
+    """Unroll the loop over the inner range by a fixed count.
+
+    Unlike ll.unroll (a full-unroll request that nvcc silently ignores on
+    dynamic trip counts), this emits ``#pragma unroll <count>`` which nvcc
+    honors on runtime-bound loops: the body is duplicated <count> times with
+    a residue loop, so the target compiler can batch independent memory
+    operations (e.g. predicated streaming loads) across the copies. This is
+    the generic mechanism for software-pipelining-style load front-loading
+    on dynamic-trip loops without hand-duplicating the body.
+
+    Usage: ``for i in ll.unroll_dyn(range(lo, hi, step), 4): ...``
+    The count must be a positive integer literal at trace time.
     """
-    Unroll the loop over the inner range.
-    """
-    raise RuntimeError("unroll intrinsic should never be called in compilation")
+
+    @staticmethod
+    def return_type(inner_range, count):
+        return void
+
+    @staticmethod
+    def codegen(inner_range, count):
+        raise RuntimeError("unroll_dyn intrinsic should never be called in code generation")

@@ -32,7 +32,7 @@ and generating C++ struct definitions from Python classes.
 import ast
 from typing import Optional
 from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
-from .struct_converter import PythonClassToCppStructConverter
+from little_kernel.codegen.special_struct.struct_converter import PythonClassToCppStructConverter
 
 
 def _resolve_template_param(node: ast.AST, ctx: dict) -> str:

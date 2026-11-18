@@ -25,7 +25,7 @@
 
 from enum import Enum, auto
 from typing import Union, List, Optional
-from little_kernel.core.type_system import (LLType, IntType, Tensor, int32, float32, bool_, str_, ptr)
+from little_kernel.core.type_system import LLType, IntType, Tensor, int32, float32, bool_, str_, ptr
 from little_kernel.core.ir_base import LLIR, AllocateMode, MemorySpace
 
 
@@ -48,7 +48,10 @@ class Expr(LLIR):
         if isinstance(value, int):
             return Literal(value, int32)  # Simplification: default int to int32
         if isinstance(value, float):
-            return Literal(value, float32)  # Simplification: default float to float32
+            # Coerce float subclasses (e.g. ll.f32/ll.f64 literal-width
+            # markers) to exact float: the traced-IR path types all float
+            # literals float32 and Literal requires an exact builtin type.
+            return Literal(float(value), float32)  # Simplification: default float to float32
         if isinstance(value, bool):
             return Literal(value, bool_)
         if isinstance(value, str):

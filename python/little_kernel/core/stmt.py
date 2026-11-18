@@ -24,7 +24,7 @@
 ################################################################################
 
 from typing import Union, List, Optional
-from little_kernel.core.type_system import (LLType, IntType, bool_)
+from little_kernel.core.type_system import LLType, IntType, bool_
 from little_kernel.core.ir_base import LLIR, MemorySpace
 from little_kernel.core.expr import Var, Expr, TensorAccess, StructAccess, UnOp, UnOpKind, AllocateTensorExpr
 

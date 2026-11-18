@@ -24,7 +24,7 @@ Kernels are regular Python functions decorated with ``@lk.ll_kernel``:
 
 Parameters:
 
-- ``backend``: Currently only ``"cuda"`` is supported.
+- ``backend``: ``"nv/sm90"``, ``"nv/sm100"`` or ``"amd/cdna4"``; installed CUDA/HIP aliases remain available.
 - ``is_entry``: ``True`` for top-level (launchable) kernels; ``False`` for
   device functions that can be called from other kernels.
 
@@ -99,7 +99,9 @@ Building & Launching
 .. code-block:: python
 
     from little_kernel.core.passes import PASSES
-    from little_kernel.codegen.codegen_cuda import codegen_cuda
+    from little_kernel.backends import get_backend
+
+    codegen_cuda = get_backend("nv/sm90").codegen.generate
 
     passes = PASSES["cuda"]
     kernel = my_kernel.build(
@@ -108,7 +110,7 @@ Building & Launching
         block=(block_x, block_y, block_z),
         shared_mem_bytes=SMEM_SIZE,
         arch="sm_90",           # or "sm_100a" for Blackwell
-        cluster_dim=(cx, cy, cz),  # optional, for SM90+ clusters
+        cluster_shape=(cx, cy, cz),  # optional, for SM90+ clusters
     )
 
     # Launch (pass same args as the @ll_kernel function)

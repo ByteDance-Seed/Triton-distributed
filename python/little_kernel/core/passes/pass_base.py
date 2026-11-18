@@ -26,7 +26,8 @@
 import ast
 from typing import Any, List
 from copy import copy
-from .utils.preserve_attributes import copy_node_with_attrs
+from little_kernel.core.passes.utils.preserve_attributes import copy_node_with_attrs
+from little_kernel.core import ir as lk_ir
 
 
 class CompleteASTMutator(ast.NodeTransformer):
@@ -64,7 +65,7 @@ class CompleteASTMutator(ast.NodeTransformer):
             return None
         # Preserve IR nodes (EnumDef, SpecialStructDef) - they should pass through unchanged
         # unless explicitly handled by subclasses
-        from .utils.ir_nodes import is_ir_node
+        from little_kernel.core.passes.utils.ir_nodes import is_ir_node
         if is_ir_node(node):
             # IR nodes should be preserved through passes unless explicitly handled
             return node
@@ -77,7 +78,7 @@ class CompleteASTMutator(ast.NodeTransformer):
     def visit_Module(self, node: ast.Module) -> ast.AST:
         node_copy = self._copy_node(node)
         # Process body, but preserve IR nodes
-        from .utils.ir_nodes import is_ir_node
+        from little_kernel.core.passes.utils.ir_nodes import is_ir_node
         new_body = []
         for stmt in node.body:
             if is_ir_node(stmt):
@@ -554,3 +555,36 @@ class CompleteASTMutator(ast.NodeTransformer):
         node_copy.ifs = self._process_list(node.ifs)
         node_copy.is_async = node.is_async  # Boolean
         return node_copy
+
+    # ------------------------------
+    # Typed lowered IR nodes (RF06)
+    # ------------------------------
+    def _visit_lowered_node(self, node) -> ast.AST:
+        """Clone-and-transform a typed lowered node.
+
+        A lowered node is rebuilt (never rewritten in place) with every AST
+        child field run through ``self.visit``. Immutable interned values
+        (LLType result/element types, declared effect, SourceSpan) keep their
+        identity. This matches the pass contract that a transformed input is
+        copied: e.g. constant folding the ``stage`` of a StageReference yields
+        a NEW StageReference and leaves the original's stage untouched.
+        """
+        return lk_ir.map_lowered_node_children(node, lambda child: self.visit(child))
+
+    def visit_TargetExpression(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)
+
+    def visit_TargetStatement(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)
+
+    def visit_TargetInclude(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)
+
+    def visit_TargetHelper(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)
+
+    def visit_ResourceReference(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)
+
+    def visit_StageReference(self, node) -> ast.AST:
+        return self._visit_lowered_node(node)

@@ -38,6 +38,7 @@ class IRNodeType(Enum):
     """Types of IR nodes that can be inserted into the AST."""
     ENUM_DEF = "enum_def"
     SPECIAL_STRUCT_DEF = "special_struct_def"
+    CPP_ARRAY_DECL = "cpp_array_decl"
 
 
 class EnumDef(ast.AST):
@@ -86,6 +87,22 @@ class SpecialStructDef(ast.AST):
         self.struct_info = struct_info
         self.ast_node = ast_node
         self._ir_node_type = IRNodeType.SPECIAL_STRUCT_DEF
+
+
+class CppArrayDecl(ast.AST):
+    """
+    IR node representing a C++ fixed-size array declaration.
+    
+    Generates: element_type_cpp var_name[array_size];
+    Example: LocalTensor<half> tensorList[2];
+    """
+    _fields = ('var_name', 'element_type_cpp', 'array_size')
+
+    def __init__(self, var_name: str, element_type_cpp: str, array_size):
+        self.var_name = var_name
+        self.element_type_cpp = element_type_cpp
+        self.array_size = array_size
+        self._ir_node_type = IRNodeType.CPP_ARRAY_DECL
 
 
 def is_ir_node(node: ast.AST) -> bool:

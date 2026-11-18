@@ -24,7 +24,25 @@
 ################################################################################
 
 import ast
-from typing import Optional
+from typing import Optional, Tuple, Type
+
+# CPython reuses one Load/Store/Del instance for every parsed AST. Attaching
+# `.parent` to them poisons all later ast.parse() trees in the same process
+# (e.g. CuTeDSL deepcopy during cute.compile after an LK kernel build).
+_CTX_NODE_TYPES: Tuple[Type[ast.AST], ...] = (ast.Load, ast.Store, ast.Del)
+
+
+def _reset_ctx_node_parents() -> None:
+    """Clear `.parent` accidentally left on the global ctx singletons."""
+    snippets = (
+        ("x", lambda tree: tree.body[0].value.ctx),
+        ("y = 1", lambda tree: tree.body[0].targets[0].ctx),
+        ("del z", lambda tree: tree.body[0].targets[0].ctx),
+    )
+    for source, get_ctx in snippets:
+        ctx = get_ctx(ast.parse(source))
+        if hasattr(ctx, "parent"):
+            del ctx.parent
 
 
 def add_parent_references(node: ast.AST, parent: Optional[ast.AST] = None) -> None:
@@ -32,9 +50,11 @@ def add_parent_references(node: ast.AST, parent: Optional[ast.AST] = None) -> No
     Recursively traverse the AST and add a `parent` attribute to each node,
     pointing to its parent node in the AST hierarchy.
     """
-    if parent is not None:
-        node.parent = parent  # Add parent reference to current node
+    if parent is None:
+        _reset_ctx_node_parents()
 
-    # Recursively process all child nodes
+    if parent is not None and not isinstance(node, _CTX_NODE_TYPES):
+        node.parent = parent
+
     for child in ast.iter_child_nodes(node):
-        add_parent_references(child, node)  # Current node is the child's parent
+        add_parent_references(child, node)

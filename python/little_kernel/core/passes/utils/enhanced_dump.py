@@ -33,16 +33,10 @@ This module provides an enhanced version of ast.dump that can:
 
 import ast
 from typing import Any, Dict, Optional
-from .preserve_attributes import get_special_attrs
-from .ir_nodes import is_ir_node, get_ir_node_type, IRNodeType
-from .resolve_attribute import recursive_resolve_attribute
-from little_kernel.language.builtin_base import (
-    BUILTIN_ATTR,
-    EVAL_RETURN_TYPE_ATTR,
-    CONST_FUNC_ATTR,
-    INLINE_FUNC_ATTR,
-    CODEGEN_FUNC_ATTR,
-)
+from little_kernel.core.passes.utils.preserve_attributes import get_special_attrs
+from little_kernel.core.passes.utils.ir_nodes import is_ir_node, get_ir_node_type, IRNodeType
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.language.builtin_base import BUILTIN_ATTR, EVAL_RETURN_TYPE_ATTR, CONST_FUNC_ATTR, INLINE_FUNC_ATTR, CODEGEN_FUNC_ATTR
 
 
 def _get_intrin_info(node: ast.Call, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
