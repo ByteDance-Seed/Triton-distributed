@@ -35,7 +35,7 @@ import triton_dist
 import triton_dist.language as dl
 from triton_dist.language.extra import libshmem_device
 from triton_dist.profiler_utils import get_torch_prof_ctx, perf_func
-from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed
+from triton_dist.utils import HIP_CHECK, initialize_distributed, finalize_distributed, rocshmem_barrier_all_on_stream
 
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
@@ -169,6 +169,22 @@ def test_rocshmem_basic():
         print(f"✅ _rocshmem_basic #{mype} pass")
 
 
+def test_rocshmem_barrier_default_stream():
+    # `stream=None` is the documented default of rocshmem_barrier_all_on_stream
+    # (docs/python-api/triton-dist.language.rst) and of the public
+    # triton_dist.kernels.amd.common_ops.barrier_all_on_stream wrapper that
+    # forwards into it, so the no-argument form must fall back to the current
+    # stream instead of raising.
+    print("**rocshmem barrier default stream start!")
+
+    mype = pyrocshmem.rocshmem_my_pe()
+
+    rocshmem_barrier_all_on_stream()
+    torch.cuda.synchronize()
+
+    print(f"✅ _rocshmem_barrier_default_stream #{mype} pass")
+
+
 def test_rocshmem_memcpy():
     print("**rocshmem memcpy start!")
 
@@ -238,6 +254,8 @@ if __name__ == "__main__":
     TP_GROUP = initialize_distributed()
 
     test_rocshmem_basic()
+
+    test_rocshmem_barrier_default_stream()
 
     test_rocshmem_device()
 
