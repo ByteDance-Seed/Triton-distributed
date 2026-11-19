@@ -252,7 +252,7 @@ def calc_gather_scatter_index_v2_kernel(
         offs = n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < M
         expert_idx = tl.load(choosed_experts_ptr + offs, mask=mask)
-        val += tl.cast(tl.sum(expert_idx == pid), tl.int32)
+        val += tl.sum(tl.cast((expert_idx == pid) & mask, tl.int32))
 
     tl.store(ntokens_by_expert_ptr + pid, val)
     cooperative_barrier_on_this_grid()
