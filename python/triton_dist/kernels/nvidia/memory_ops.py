@@ -375,12 +375,13 @@ def copy_2d_persistent_kernel(
         pid_m = tile_id // num_tiles_n
         pid_n = tile_id % num_tiles_n
         offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m_i64 = offs_m[:, None].to(tl.int64)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         mask_m = offs_m < M
         mask_n = offs_n < N
         mask = mask_m[:, None] & mask_n[None, :]
-        data = tl.load(src_ptr + offs_m[:, None] * stride_m + offs_n[None, :] * stride_n, mask=mask)
-        tl.store(dst_ptr + offs_m[:, None] * stride_dst_m + offs_n[None, :] * stride_dst_n, data, mask=mask)
+        data = tl.load(src_ptr + offs_m_i64 * stride_m + offs_n[None, :] * stride_n, mask=mask)
+        tl.store(dst_ptr + offs_m_i64 * stride_dst_m + offs_n[None, :] * stride_dst_n, data, mask=mask)
 
 
 @triton.jit(do_not_specialize=["M"])
