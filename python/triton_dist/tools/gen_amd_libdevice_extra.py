@@ -24,7 +24,7 @@
 ################################################################################
 import argparse
 import sys
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 
 ALIGNMENT_MAP = {"i32": 4, "i64": 8}
 
@@ -173,17 +173,20 @@ def gen_fence():
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", action="store_true", default=False, help="file path to save llvm ir to")
+    parser.add_argument("--out", metavar="PATH", help="file path to save llvm ir to")
     return parser.parse_args()
 
 
-args = parse_args()
+def main():
+    args = parse_args()
+    output = open(args.out, "w", encoding="utf-8") if args.out else nullcontext(sys.stdout)
+    with output as stream, redirect_stdout(stream):
+        gen_load()
+        gen_store()
+        gen_atomic_add()
+        gen_atomic_cas()
+        gen_fence()
 
-with redirect_stdout(open(args.out) if args.out else sys.stdout):
-    gen_load()
-    gen_store()
-    gen_atomic_add()
-    gen_atomic_cas()
-    gen_fence()
 
-# print("done")
+if __name__ == "__main__":
+    main()
