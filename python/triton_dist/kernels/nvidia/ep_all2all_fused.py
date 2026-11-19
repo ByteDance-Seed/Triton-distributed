@@ -469,8 +469,8 @@ def tile_kernel_scatter_token_intra_node(
             t1, t2, t3, t4 = load_v4(input_buf + token_idx * hidden_size + elem_idx * VEC_SIZE, "b32")
             store_v4(remote_output_ptr + input_token_idx * hidden_size + elem_idx * VEC_SIZE, t1, t2, t3, t4, "b32")
 
-        remote_scatter_output_barrier_buf = dl.symm_at(scatter_output_barrier_buf, from_rank)
         if scatter_output_barrier_buf is not None:
+            remote_scatter_output_barrier_buf = dl.symm_at(scatter_output_barrier_buf, from_rank)
             sync_warp()
             if lane_idx == 0:
                 libshmem_device.fence()
