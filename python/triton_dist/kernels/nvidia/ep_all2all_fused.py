@@ -154,7 +154,7 @@ def tile_kernel_dispatch_token_intra_node(
             tokens_this_expert = ld(local_splits_buf + i)
             if tokens_this_expert == 0:
                 libshmem_device.signal_op(
-                    barriers_ptr + i // experts_per_rank * world_size + rank,
+                    barriers_ptr + i % experts_per_rank * world_size + rank,
                     1,
                     libshmem_device.NVSHMEM_SIGNAL_SET,
                     i // experts_per_rank,
