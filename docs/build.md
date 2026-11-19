@@ -119,21 +119,9 @@ bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_tp_e2e.py --bsz 8 -
 bash ./scripts/launch.sh python/triton_dist/test/nvidia/test_e2e_inference.py --bsz 4096 --gen_len 128 --max_length 150 --model <model_path> --backend triton_dist
 ```
 
-### Run All Unit Tests
-The full test suite is available via:
-```sh
-bash .codebase/scripts/nvidia/run_unittest.sh
-```
+### Run Unit, E2E, and Tutorial Tests
 
-### Run E2E Tests
-```sh
-bash .codebase/scripts/nvidia/run_e2e_test.sh
-```
-
-### Run Tutorial Tests
-```sh
-bash .codebase/scripts/nvidia/run_tutorial_test.sh
-```
+See [Running Tests](testing.md) for the maintained commands to run each test category.
 
 ### Run All The Tutorials
 See examples in the `tutorials` directory at the project root.
