@@ -171,6 +171,7 @@ def create_reduce_scater_2d_ctx(
         max_M,
         N,
         rank,
+        local_rank,
         world_size,
         local_world_size,
         dtype,
@@ -199,7 +200,7 @@ def create_reduce_scater_2d_ctx(
     signal_bufs = nvshmem_create_tensors([world_size * num_signal_bufs],
                                          NVSHMEM_SIGNAL_DTYPE, rank,
                                          local_world_size)
-    signal_buf = signal_bufs[rank]
+    signal_buf = signal_bufs[local_rank]
     signal_buf.zero_()
 
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
@@ -460,6 +461,7 @@ if __name__ == "__main__":
     rs_ctx = create_reduce_scater_2d_ctx(M,
                                          N,
                                          RANK,
+                                         LOCAL_RANK,
                                          WORLD_SIZE,
                                          LOCAL_WORLD_SIZE,
                                          output_dtype,
