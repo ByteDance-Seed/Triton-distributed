@@ -62,8 +62,13 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.autosectionlabel",
     "sphinx.ext.napoleon",
+    "sphinx.ext.intersphinx",
     "sphinx_gallery.gen_gallery",
 ]
+
+intersphinx_mapping = {
+    'torch': ('https://docs.pytorch.org/docs/stable/', None),
+}
 
 sphinx_gallery_conf = {
     'examples_dirs': 'examples',
