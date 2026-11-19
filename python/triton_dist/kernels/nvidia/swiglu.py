@@ -156,6 +156,8 @@ def _swiglu_backward_kernel(
     dC_ptr += row_idx * dC_row_stride
     A_ptr += row_idx * A_row_stride
     B_ptr += row_idx * B_row_stride
+    dA_ptr += row_idx * dA_row_stride
+    dB_ptr += row_idx * dB_row_stride
 
     dC_row = tl.load(dC_ptr + col_offsets, mask=mask, other=0)
     A_row = tl.load(A_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
@@ -208,6 +210,8 @@ def _swiglu_backward_kernel_persistent(
     dC_ptr += row_start * dC_row_stride
     A_ptr += row_start * A_row_stride
     B_ptr += row_start * B_row_stride
+    dA_ptr += row_start * dA_row_stride
+    dB_ptr += row_start * dB_row_stride
 
     for row_idx in range(row_start, row_end):
         dC_row = tl.load(dC_ptr + col_offsets, mask=mask, other=0)
@@ -234,6 +238,8 @@ def _swiglu_backward_kernel_persistent(
         dC_ptr += dC_row_stride
         A_ptr += A_row_stride
         B_ptr += B_row_stride
+        dA_ptr += dA_row_stride
+        dB_ptr += dB_row_stride
 
 
 def swiglu_forward(AB, scale=None, sm_margin=0, use_aot=False):
