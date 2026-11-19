@@ -685,7 +685,7 @@ if __name__ == "__main__":
             ep_kernels.ep_context.config.rank,
             ep_kernels.ep_context.config.world_size,
             ep_kernels.num_sm,
-            ep_kernels.ep_context.recv_token_count_cpu,
+            token_src_rank_topk_and_indices_ptrs=None,
             expert_alignment=ep_kernels.expert_alignment,
         )
         ep_kernels.ep_group_barrier()

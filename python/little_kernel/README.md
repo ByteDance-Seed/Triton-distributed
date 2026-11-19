@@ -106,5 +106,5 @@ uv run --locked --group bench python -m benchmarks.nv.common.run_all --list
 ```
 
 The GPU command requires matching hardware and toolkit. For SM100 dataflow, see
-the [frontend guide](../../docs/dataflow.md). Selected hardware publishing is
-described in the [repository README](../../README.md).
+the [SM100 dataflow guide](../../docs/little_kernel/dataflow.rst). Selected hardware publishing is
+described in the [LittleKernel documentation](../../docs/little_kernel/README.md).
