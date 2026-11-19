@@ -52,6 +52,7 @@ class MethodStubInfo:
     is_tuple_return: bool = False  # Returns tuple
     tuple_return_types: Optional[List[LLType]] = None  # Types for tuple return
     param_types: Optional[List[Optional[LLType]]] = None  # Parameter type annotations
+    template_args: Optional[List[str]] = None  # Template arguments for C++ template method calls
 
 
 @dataclass
@@ -62,17 +63,24 @@ class StructStubInfo:
     template_params: Optional[List[str]] = None  # Template parameters if any
     namespace: Optional[str] = None  # Namespace (e.g., "cute")
     methods: Dict[str, MethodStubInfo] = field(default_factory=dict)  # Method configurations
+    init_method: Optional[str] = None  # Auto-call this method with extra positional args after template args
 
 
 # Registry: Python class name -> StructStubInfo
 _struct_stub_registry: Dict[str, StructStubInfo] = {}
 
 
-def struct_method(cpp_method_name: Optional[str] = None, is_static: bool = False, is_classmethod: bool = False,
-                  custom_codegen: Optional[Callable[[ast.Call, Any],
-                                                    str]] = None, return_type: Optional[Union[LLType, str]] = None,
-                  is_tuple_return: bool = False, tuple_return_types: Optional[List[Union[LLType, str]]] = None,
-                  param_types: Optional[List[Optional[Union[LLType, str]]]] = None):
+def struct_method(
+    cpp_method_name: Optional[str] = None,
+    is_static: bool = False,
+    is_classmethod: bool = False,
+    custom_codegen: Optional[Callable[[ast.Call, Any], str]] = None,
+    return_type: Optional[Union[LLType, str]] = None,
+    is_tuple_return: bool = False,
+    tuple_return_types: Optional[List[Union[LLType, str]]] = None,
+    param_types: Optional[List[Optional[Union[LLType, str]]]] = None,
+    template_args: Optional[List[str]] = None,
+):
     """
     Decorator to configure a method in a struct stub.
     
@@ -81,7 +89,8 @@ def struct_method(cpp_method_name: Optional[str] = None, is_static: bool = False
             cpp_method_name="cpp_method",  # If different from Python name
             is_static=True,  # For @staticmethod
             return_type=ll.bool_,
-            param_types=[ll.int32, ll.int32]
+            param_types=[ll.int32, ll.int32],
+            template_args=["Element"]  # For template method calls like obj.Get<Element>()
         )
         def my_method(self, arg1, arg2):
             pass
@@ -95,25 +104,35 @@ def struct_method(cpp_method_name: Optional[str] = None, is_static: bool = False
         is_tuple_return: Whether the method returns a tuple
         tuple_return_types: Types for tuple return elements
         param_types: Parameter type annotations (list of LLType or string, None for self/cls)
+        template_args: Template argument names for C++ template method calls.
+                       These are resolved from the first N call arguments.
+                       E.g., template_args=["T"] means first arg is a type: obj.Get(half) -> obj.Get<half>()
     """
 
     def decorator(func: Callable) -> Callable:
         # Store method configuration in function attributes
         func.__struct_method_stub__ = True
         func.__struct_method_info__ = MethodStubInfo(
-            python_method_name=func.__name__, cpp_method_name=cpp_method_name, is_static=is_static,
-            is_classmethod=is_classmethod, custom_codegen=custom_codegen,
-            return_type=return_type if isinstance(return_type, LLType) else None, is_tuple_return=is_tuple_return,
+            python_method_name=func.__name__,
+            cpp_method_name=cpp_method_name,
+            is_static=is_static,
+            is_classmethod=is_classmethod,
+            custom_codegen=custom_codegen,
+            return_type=return_type if isinstance(return_type, LLType) else None,
+            is_tuple_return=is_tuple_return,
             tuple_return_types=[t if isinstance(t, LLType) else None
                                 for t in tuple_return_types] if tuple_return_types else None,
-            param_types=[t if isinstance(t, LLType) else None for t in param_types] if param_types else None)
+            param_types=[t if isinstance(t, LLType) else None for t in param_types] if param_types else None,
+            template_args=template_args,
+        )
         return func
 
     return decorator
 
 
 def struct_stub(cpp_struct_name: str, includes: Union[str, List[str]], template_params: Optional[List[str]] = None,
-                namespace: Optional[str] = None, python_class_name: Optional[str] = None):
+                namespace: Optional[str] = None, python_class_name: Optional[str] = None,
+                init_method: Optional[str] = None):
     """
     Decorator to register a Python class as a stub for an existing C++ struct.
     
@@ -121,7 +140,8 @@ def struct_stub(cpp_struct_name: str, includes: Union[str, List[str]], template_
         @struct_stub(
             cpp_struct_name="MyStruct",
             includes=['"my_struct.h"'],
-            template_params=["T", "int N"]  # Optional
+            template_params=["T", "int N"],  # Optional
+            init_method="SetGlobalBuffer",    # Optional: auto-call with extra args
         )
         class MyStruct:
             def __init__(self, arg1, arg2):
@@ -143,6 +163,9 @@ def struct_stub(cpp_struct_name: str, includes: Union[str, List[str]], template_
                          (e.g., ["T", "int N"] for "template <typename T, int N>")
         namespace: Optional namespace prefix (e.g., "cute" for "cute::MyStruct")
         python_class_name: Optional Python class name (defaults to class.__name__)
+        init_method: Optional method name to auto-call with extra positional args.
+                     E.g., GlobalTensor(ll.float32, ptrA) with init_method="SetGlobalBuffer"
+                     generates: GlobalTensor<float> x; x.SetGlobalBuffer(ptrA);
     """
     # Normalize includes to list
     if isinstance(includes, str):
@@ -208,7 +231,8 @@ def struct_stub(cpp_struct_name: str, includes: Union[str, List[str]], template_
 
         # Register the struct stub
         stub_info = StructStubInfo(cpp_struct_name=cpp_struct_name, includes=includes_list,
-                                   template_params=template_params, namespace=namespace, methods=methods)
+                                   template_params=template_params, namespace=namespace, methods=methods,
+                                   init_method=init_method)
         _struct_stub_registry[name] = stub_info
 
         # Mark the class as a struct stub

@@ -25,13 +25,88 @@
 
 import ast
 import little_kernel.language as ll
-from little_kernel.core.type_system import (IntType, FloatType, TupleType, Const, ConstTypeHelper, ConstAnnotationType,
-                                            const_annotation, SpecialStructType, int32, uint32, float32, float64, bool_,
-                                            void)
-from .type_inference_core import (TypeInferenceError, TypeMismatchError, UnsupportedNodeError, UndefinedVariableError)
-from .type_inference_visitors import promote_type
-from ..registries.loop_modifier_registry import get_loop_modifier_registry
-from ..resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.type_system import IntType, FloatType, TupleType, Const, ConstTypeHelper, ConstAnnotationType, const_annotation, SpecialStructType, int32, uint32, float32, float64, bool_, void
+from little_kernel.core.type_system import LLType, TensorType
+from little_kernel.core.passes.utils.type_inference.type_inference_core import TypeInferenceError, TypeMismatchError, UnsupportedNodeError, UndefinedVariableError
+from little_kernel.core.passes.utils.type_inference.type_inference_visitors import promote_type
+from little_kernel.core.passes.utils.registries.loop_modifier_registry import get_loop_modifier_registry
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.language.builtin_base import ELEMENT_ANNOTATION_ALLOC_ATTR
+
+
+def _resolve_marked_element_alloc(value_node, ctx):
+    """Resolve the callee of ``value_node`` when it is a call to a builtin
+    marked ELEMENT_ANNOTATION_ALLOC_ATTR; otherwise return None."""
+    if not isinstance(value_node, ast.Call) or not value_node.args:
+        return None
+    if not isinstance(value_node.func, (ast.Attribute, ast.Name)):
+        return None
+    try:
+        resolved = recursive_resolve_attribute(value_node.func, ctx)
+    except Exception:
+        return None
+    if not getattr(resolved, ELEMENT_ANNOTATION_ALLOC_ATTR, False):
+        return None
+    return resolved
+
+
+def _element_annotation_alloc_name(value_node, var_name, ctx):
+    """Normalize the element-annotation direct spelling of a declaration
+    alloc and return the builtin, or None when the value is not a marked
+    element-annotation alloc call at all.
+
+    ``v: ll.float32 = ll.alloc_local_memory(ll.float32, N)`` (and the plain
+    ``v = ll.alloc_local_memory(ll.float32, N)`` form) supplies the buffer
+    name through the assignment target rather than through the builtin's
+    internal leading var_name argument.  For such a call whose first
+    argument is the element dtype (not a buffer name), insert the target
+    name as a string literal first argument so the builtin's eval_arg_type,
+    return-type inference, and codegen see exactly one contract.  The helper
+    is idempotent: once normalized (by any earlier visit of the same node),
+    the leading argument is already the buffer-name literal and the call is
+    simply returned as-is.
+    """
+    resolved = _resolve_marked_element_alloc(value_node, ctx)
+    if resolved is None:
+        return None
+    first = value_node.args[0]
+    # Direct form iff the first argument IS the element dtype: a string
+    # literal or a plain Name is the internal form's buffer name.  Resolving
+    # an attribute chain (ll.float32 / backend dtype aliases) yields the
+    # LLType itself for the direct form, as does a const-folded Constant
+    # wrapping the LLType.
+    is_direct = False
+    if isinstance(first, ast.Constant):
+        if isinstance(first.value, LLType):
+            is_direct = True
+        # A Python str constant is the (already normalized) buffer name.
+    elif isinstance(first, LLType):
+        is_direct = True
+    elif isinstance(first, ast.Attribute):
+        try:
+            resolved_first = recursive_resolve_attribute(first, ctx)
+        except Exception:
+            resolved_first = None
+        is_direct = isinstance(resolved_first, LLType)
+    if is_direct:
+        name_arg = ast.copy_location(ast.Constant(value=var_name), first)
+        value_node.args.insert(0, name_arg)
+    return resolved
+
+
+def _numeric_assignment_compatible(existing_type, value_type):
+    """Implicit conversions allowed for a value assigned to a variable of an
+    already-declared numeric type. Mirrors the coercion rules of
+    visit_AnnAssign's annotated-declaration value check:
+    int<->int (width/sign), int->float, float<->float. Everything else
+    (float->int, non-numeric) is a type error."""
+    if isinstance(existing_type, IntType) and isinstance(value_type, IntType):
+        return True
+    if isinstance(existing_type, FloatType) and isinstance(value_type, IntType):
+        return True
+    if isinstance(existing_type, FloatType) and isinstance(value_type, FloatType):
+        return True
+    return False
 
 
 class StatementTypeInferencer:
@@ -50,6 +125,12 @@ class StatementTypeInferencer:
         self.inferencer.all_types[node.returns] = return_type
 
         self.inferencer.push_scope()
+        # Make this function's declared return type the active return
+        # context. Return statements anywhere inside the body -- including
+        # nested if/for/while blocks -- validate against it through
+        # check_return_statement(); a nested FunctionDef pushes its own
+        # context, so an inner signature can never leak to the outer body.
+        self.inferencer.push_return_context(return_type)
         # Scan function body for local variable definitions
         # This ensures is_local() returns True for variables assigned in the function
         self.inferencer.scope_manager.define_from_ast(node.args)
@@ -57,31 +138,24 @@ class StatementTypeInferencer:
         try:
             for arg in node.args.args:
                 if arg.annotation is None:
-                    raise TypeInferenceError(f"Parameter '{arg.arg}' requires type annotation", node=arg)
+                    raise TypeInferenceError(f"Parameter '{arg.arg}' requires type annotation", node=arg,
+                                             ctx=self.inferencer.ctx)
                 arg_type = self.inferencer._resolve_annotation(arg.annotation)
                 # Store parameter type in all_types for codegen
                 self.inferencer.all_types[arg.annotation] = arg_type
                 self.inferencer.add_variable_to_scope(arg.arg, arg_type)
 
             for stmt in node.body:
+                # visit_Return validates every return (direct or nested in
+                # if/for/while) against the return context pushed above.
                 self.inferencer.visit(stmt)
-                if isinstance(stmt, ast.Return):
-                    if stmt.value is None:
-                        if return_type != void:
-                            raise TypeMismatchError(
-                                f"Return statement has no value, but function return type is {return_type}", node=stmt)
-                    else:
-                        return_value_type = self.inferencer.infer_node_type(stmt.value)
-                        if return_value_type != return_type:
-                            raise TypeMismatchError(
-                                f"Return value type {return_value_type} does not match function return type {return_type}",
-                                node=stmt)
 
             # Store function name and return type in parent scope
             # We need to access the parent scope (before we pop)
             if len(self.inferencer.scope_stack) >= 2:
                 self.inferencer.scope_stack[-2][node.name] = return_type
         finally:
+            self.inferencer.pop_return_context()
             self.inferencer.pop_scope()
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -121,6 +195,11 @@ class StatementTypeInferencer:
         else:
             target_type = self.inferencer._resolve_annotation(annotation)
             if node.value is not None:
+                # Element-annotation declaration allocs supply their buffer
+                # name through this target; normalize before value inference
+                # so the builtin keeps its internal (var_name, dtype, ...)
+                # contract.
+                element_alloc = _element_annotation_alloc_name(node.value, var_name, self.inferencer.ctx)
                 value_type = self.inferencer.infer_node_type(node.value)
                 # Check if target_type is Const[inner_type] - allow assignment if inner_type matches value_type
                 if isinstance(target_type, Const):
@@ -144,9 +223,14 @@ class StatementTypeInferencer:
                                 f"Assignment annotation type {target_type} (inner type {target_type.inner_type}) does not match value type {value_type}",
                                 node=node)
                 elif target_type != value_type:
+                    if element_alloc and value_type == TensorType(target_type):
+                        # Scalar annotation + Tensor[scalar] value of a marked
+                        # declaration alloc: the annotation declares the
+                        # array's element type; the variable binds the array.
+                        target_type = value_type
                     # Allow implicit conversion between compatible numeric types
                     # Check if both are integer types (int32, uint32, int64, uint64, etc.)
-                    if isinstance(target_type, IntType) and isinstance(value_type, IntType):
+                    elif isinstance(target_type, IntType) and isinstance(value_type, IntType):
                         # Allow implicit conversion between integer types
                         pass
                     # Allow implicit conversion from integer to float
@@ -193,6 +277,13 @@ class StatementTypeInferencer:
                 self.inferencer.all_types[node.value] = special_struct_type
                 return
 
+        # Element-annotation declaration allocs also accept the bare
+        # ``v = ll.alloc_local_*(dtype, ...)`` spelling; insert the target
+        # name as the builtin's leading var_name argument before value
+        # inference so eval/codegen see exactly one contract.
+        if isinstance(target, ast.Name):
+            _element_annotation_alloc_name(node.value, target.id, self.inferencer.ctx)
+
         value_type = self.inferencer.infer_node_type(node.value)
 
         if isinstance(target, ast.Name):
@@ -205,13 +296,27 @@ class StatementTypeInferencer:
             else:
                 target_type = value_type
 
-            if var_name not in self.inferencer.current_scope:
+            # Fresh-definition vs reassignment must be decided against the
+            # whole scope stack, not only the innermost map: Python has no
+            # block scope, so `v = ...` inside a for/while body rebinds the
+            # function-local `v` declared before the loop rather than
+            # declaring a shadow. Checking only current_scope silently
+            # shadowed the outer binding, skipped the reassignment type
+            # check, and let an incompatible value through (float into an
+            # int32 variable compiled to a hidden static_cast). Look up any
+            # enclosing binding first; only a name visible nowhere on the
+            # stack is a fresh definition in the innermost scope.
+            existing_type = self.inferencer.get_variable_type(var_name, node, required=False)
+            if existing_type is None:
                 self.inferencer.add_variable_to_scope(var_name, target_type)
-            else:
-                existing_type = self.inferencer.get_variable_type(var_name, node)
-                if existing_type != target_type:
-                    raise TypeMismatchError(
-                        f"Reassignment to '{var_name}' changes type: {existing_type} → {target_type}", node=node)
+            elif existing_type != target_type and not _numeric_assignment_compatible(existing_type, target_type):
+                # Same implicit numeric conversions as before (int<->int,
+                # int->float, float<->float): a bare literal adopts the
+                # target variable's dtype on reassignment (e.g. `u = 0`
+                # after `u: ll.uint32 = 0`) instead of erroring on the
+                # literal's default int32/float32.
+                raise TypeMismatchError(f"Reassignment to '{var_name}' changes type: {existing_type} → {target_type}",
+                                        node=node)
 
         elif isinstance(target, ast.Tuple):
             value_type = self.inferencer.infer_node_type(node.value)
@@ -283,9 +388,12 @@ class StatementTypeInferencer:
                     node=node)
 
             # If promotion occurred, update the value type in all_types for codegen
-            # The promoted type should match expected_type
             if was_promoted:
                 self.inferencer.all_types[node.value] = promoted_expected_type
+
+        elif isinstance(target, ast.Attribute):
+            # Attribute assignment (e.g., params.ndNum = 1)
+            self.inferencer.all_types[node.value] = value_type
 
         else:
             raise UnsupportedNodeError(f"Unsupported assignment target type: {type(target).__name__}", node=target)
@@ -330,8 +438,28 @@ class StatementTypeInferencer:
                 self.inferencer.visit(stmt)
             for stmt in node.orelse:
                 self.inferencer.visit(stmt)
+            # Python scoping: a name first assigned in a loop body is a
+            # function-local binding, visible to statements after the loop
+            # (ragged kernels rely on this to carry the result of a scan --
+            # last key, insertion point, partial accumulator -- out of the
+            # per-segment loop). The generic visitor already gives while/if
+            # bodies this function-scope treatment because it never pushes a
+            # scope; the for loop must not be the one statement kind that
+            # drops its body bindings at the header. The C/CUDA backend
+            # reconciles the same mismatch by hoisting the declaration
+            # (_scan_for_assigned_vars), so rejecting the use-after-loop here
+            # at the type level only forbids programs codegen already emits
+            # correctly. The loop variable itself stays loop-local (codegen
+            # deletes it from scope at the end of visit_For). Types recorded
+            # in the loop scope already passed the assignment-time
+            # compatibility checks against any outer binding, so publishing
+            # them to the parent scope is consistent with program order.
+            loop_scope_types = dict(self.inferencer.current_scope)
+            loop_scope_types.pop(loop_var_name, None)
         finally:
             self.inferencer.pop_scope()
+        for body_name, body_type in loop_scope_types.items():
+            self.inferencer.add_variable_to_scope(body_name, body_type)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         """Process augmented assignment (e.g., x += 1, y -= 2).
@@ -342,20 +470,35 @@ class StatementTypeInferencer:
         3. Check that the operation is valid for these types
         4. Ensure the result type matches the target type
         """
-        if not isinstance(node.target, ast.Name):
+        if isinstance(node.target, ast.Name):
+            var_name = node.target.id
+
+            # Get the variable type (will search parent scopes if not in current scope)
+            # This will raise UndefinedVariableError if the variable doesn't exist
+            try:
+                target_type = self.inferencer.get_variable_type(var_name, node.target)
+            except UndefinedVariableError:
+                raise TypeInferenceError(f"Variable '{var_name}' used in augmented assignment before assignment",
+                                         node=node.target)
+        elif isinstance(node.target, ast.Subscript):
+            # Tensor/pointer element augmented assignment (e.g., out[i] += x[i]):
+            # the scatter-accumulate idiom of masked/ragged irregular kernels.
+            # Mirror visit_Assign's subscript handling: base must be a tensor or
+            # pointer and the element/inner type is the target type. The slice
+            # index is visited so its type is recorded for codegen.
+            base_type = self.inferencer.infer_node_type(node.target.value)
+            if not (base_type.is_tensor() or base_type.is_pointer()):
+                raise TypeMismatchError(
+                    f"Subscript augmented assignment requires tensor/pointer base (got {base_type})", node=node.target)
+            self.inferencer.infer_node_type(node.target.slice)
+            if base_type.is_tensor():
+                target_type = base_type.element_type
+            else:
+                target_type = base_type.inner_type
+        else:
             raise UnsupportedNodeError(
-                f"Augmented assignment only supports variable targets (got {type(node.target).__name__})",
-                node=node.target)
-
-        var_name = node.target.id
-
-        # Get the variable type (will search parent scopes if not in current scope)
-        # This will raise UndefinedVariableError if the variable doesn't exist
-        try:
-            target_type = self.inferencer.get_variable_type(var_name, node.target)
-        except UndefinedVariableError:
-            raise TypeInferenceError(f"Variable '{var_name}' used in augmented assignment before assignment",
-                                     node=node.target)
+                f"Augmented assignment only supports variable or tensor/pointer subscript targets "
+                f"(got {type(node.target).__name__})", node=node.target)
         value_type = self.inferencer.infer_node_type(node.value)
 
         # For augmented assignment, the result type should match the target type

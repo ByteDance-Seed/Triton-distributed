@@ -77,10 +77,7 @@ def register_special_struct(struct_name=None, declaration_codegen=None, method_c
         cls = None
 
     def decorator(cls: type) -> type:
-        from little_kernel.codegen.special_struct_codegen import (generic_special_struct_declaration_codegen,
-                                                                  generic_special_struct_method_codegen,
-                                                                  generic_special_struct_tuple_unpack_codegen,
-                                                                  generic_special_struct_definition_codegen)
+        from little_kernel.codegen.special_struct_codegen import generic_special_struct_declaration_codegen, generic_special_struct_method_codegen, generic_special_struct_tuple_unpack_codegen, generic_special_struct_definition_codegen
 
         name = struct_name if struct_name is not None else cls.__name__
 
@@ -93,7 +90,9 @@ def register_special_struct(struct_name=None, declaration_codegen=None, method_c
         if struct_definition_codegen:
             def_codegen = struct_definition_codegen
         else:
-            def_codegen = lambda emitter: generic_special_struct_definition_codegen(name, emitter)
+
+            def def_codegen(emitter):
+                return generic_special_struct_definition_codegen(name, emitter)
 
         _SPECIAL_STRUCT_CODEGEN_REGISTRY[name] = {
             'declaration': decl_codegen, 'method': meth_codegen, 'tuple_unpack': tuple_codegen, 'struct_definition':

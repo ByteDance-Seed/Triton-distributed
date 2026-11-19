@@ -25,7 +25,20 @@
 
 import ast
 from typing import Dict, Callable, Optional, Any
-from ..resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+
+
+def _unwrap_unroll_dyn(iter_node: ast.Call, ctx: Dict[str, Any]) -> ast.AST:
+    """Unwrap ll.unroll_dyn(range(...), count) to the inner range() call.
+
+    The count argument is validated by the codegen handler (it must be a
+    positive integer literal); here we only need the iterator for tracing
+    and type inference.
+    """
+    if len(iter_node.args) < 1:
+        raise ValueError("Loop modifier 'unroll_dyn' requires a range() iterator and an "
+                         "unroll count (e.g. ll.unroll_dyn(range(lo, hi, step), 4))")
+    return iter_node.args[0]
 
 
 class LoopModifier:
@@ -75,6 +88,10 @@ class LoopModifierRegistry:
         """Register default loop modifiers."""
         # Register ll.unroll
         self.register_modifier("unroll", LoopModifier("unroll", unwrap=True))
+        self.register_modifier("no_unroll", LoopModifier("no_unroll", unwrap=True))
+        # Register ll.unroll_dyn: ll.unroll_dyn(range(...), count) unwraps to the
+        # range; the count argument is consumed by the codegen handler.
+        self.register_modifier("unroll_dyn", LoopModifier("unroll_dyn", unwrap=True, handler=_unwrap_unroll_dyn))
 
     def register_modifier(self, name: str, modifier: LoopModifier):
         """
@@ -168,7 +185,9 @@ class LoopModifierRegistry:
         if modifier is None:
             return node
 
-        if len(node.args) != 1:
+        # Handler-based modifiers (e.g. unroll_dyn) own their argument
+        # validation; the generic 1-argument rule only applies otherwise.
+        if modifier.handler is None and len(node.args) != 1:
             raise ValueError(f"Loop modifier '{modifier.name}' requires exactly 1 argument (got {len(node.args)})")
 
         return modifier.process(node, ctx)

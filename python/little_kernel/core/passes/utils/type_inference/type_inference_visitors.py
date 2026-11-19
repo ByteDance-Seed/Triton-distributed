@@ -27,11 +27,10 @@ import ast
 from enum import Enum
 from typing import Dict, Any, Optional
 from typing import Tuple as PyTuple
-from little_kernel.core.type_system import (LLType, IntType, FloatType, Pointer, Const, Template, TupleType,
-                                            AnnotateTypeHelper, TupleTypeHelper, int32, int64, float32, bool_, str_)
-from .type_inference_core import (TypeInferenceError, TypeMismatchError, UnsupportedNodeError)
-from ..registries.operator_registry import get_operator_registry
-from ..resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.type_system import LLType, IntType, FloatType, Pointer, Const, Template, TupleType, AnnotateTypeHelper, TupleTypeHelper, int32, int64, float32, bool_, str_
+from little_kernel.core.passes.utils.type_inference.type_inference_core import TypeInferenceError, TypeMismatchError, UnsupportedNodeError
+from little_kernel.core.passes.utils.registries.operator_registry import get_operator_registry
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
 
 
 class ConstantTypeInferencer:
@@ -137,10 +136,13 @@ class AnnotationResolver:
         # Check if it's Tuple[...]
         is_tuple = self._check_is_tuple(ann_node)
         if is_tuple:
-            if isinstance(ann_node.slice, ast.Tuple):
-                element_types = [self._resolve_annotation(elt) for elt in ann_node.slice.elts]
+            slice_node = ann_node.slice
+            if isinstance(slice_node, ast.Index):
+                slice_node = slice_node.value
+            if isinstance(slice_node, ast.Tuple):
+                element_types = [self._resolve_annotation(elt) for elt in slice_node.elts]
             else:
-                element_type = self._resolve_annotation(ann_node.slice)
+                element_type = self._resolve_annotation(slice_node)
                 element_types = [element_type]
             return TupleType(tuple(element_types))
 
@@ -203,7 +205,12 @@ class AnnotationResolver:
                 except Exception:
                     pass
         elif isinstance(ann_node.value, ast.Constant):
-            return ann_node.value.value is tuple
+            if ann_node.value.value is tuple:
+                return True
+            # Handle Constant(LLType) - e.g. from evaluated annotation
+            val = ann_node.value.value
+            if isinstance(val, TupleTypeHelper):
+                return True
         return False
 
 
@@ -301,6 +308,26 @@ def promote_type(left_type: LLType, right_type: LLType) -> PyTuple[LLType, LLTyp
     return left_type, right_type, False
 
 
+def _integral_promote_operand(t: LLType) -> LLType:
+    """C++ integral promotion applied to one arithmetic operand's type.
+
+    [conv.integral.prom]: a prvalue of an integer type whose conversion
+    rank is less than the rank of int is converted to int (int32 here),
+    because 32-bit int represents every value of int8/uint8/int16/uint16.
+    Types of rank >= int (int32/uint32/int64/...) are unchanged, and the
+    special bool/binary types are unchanged: promote_type already widens
+    those to int32 and they must retain identity for that path.
+
+    Only the operator *result* typing uses this; operand node types are
+    intentionally left untouched, so codegen keeps the narrow element
+    reads and the emitted C++ applies the same promotion implicitly at
+    the expression level (the same contract documented in visit_BinOp).
+    """
+    if isinstance(t, IntType) and t.special is None and t.bits < 32:
+        return int32
+    return t
+
+
 class OperatorTypeInferencer:
     """Handles type inference for operators using registry."""
 
@@ -345,6 +372,12 @@ class OperatorTypeInferencer:
                 element_type = right_type.element_type
                 return Pointer(element_type)
 
+        # C++ integral promotion fixes each operand's type first (e.g.
+        # int8 & int8 computes in int), then the usual arithmetic
+        # conversions reconcile the pair (existing promote_type rules).
+        left_type = _integral_promote_operand(left_type)
+        right_type = _integral_promote_operand(right_type)
+
         # Try to promote types
         promoted_left, promoted_right, was_promoted = promote_type(left_type, right_type)
 
@@ -370,7 +403,9 @@ class OperatorTypeInferencer:
         if handler is None:
             raise UnsupportedNodeError(f"Unsupported unary operator: {op_type.__name__}", node=node)
 
-        return handler(operand_type)
+        # C++ applies integral promotion to the operand of unary +/- and ~
+        # as well (e.g. -int8 has type int); Not is bool-typed regardless.
+        return handler(_integral_promote_operand(operand_type))
 
     def infer_bool_op(self, op_type: type, node: ast.BoolOp) -> LLType:
         """Infer type of boolean operations."""

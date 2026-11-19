@@ -25,13 +25,13 @@
 
 import ast
 from typing import Dict, List, Optional, Any
-from little_kernel.core.type_system import LLType
-from .type_inference_core import (TypeInferenceError, get_variable_type_from_scope)
-from ..scope_manager import ScopeManager
-from .type_inference_visitors import AnnotationResolver
-from .type_inference_ast_visitors import ASTNodeVisitors
-from .type_inference_statements import StatementTypeInferencer
-from .type_inference_call import CallTypeInferencer
+from little_kernel.core.type_system import LLType, IntType, FloatType, void
+from little_kernel.core.passes.utils.type_inference.type_inference_core import TypeInferenceError, TypeMismatchError, get_variable_type_from_scope
+from little_kernel.core.passes.utils.scope_manager import ScopeManager
+from little_kernel.core.passes.utils.type_inference.type_inference_visitors import AnnotationResolver
+from little_kernel.core.passes.utils.type_inference.type_inference_ast_visitors import ASTNodeVisitors
+from little_kernel.core.passes.utils.type_inference.type_inference_statements import StatementTypeInferencer
+from little_kernel.core.passes.utils.type_inference.type_inference_call import CallTypeInferencer
 
 
 class TypeInferencer(ast.NodeVisitor):
@@ -60,9 +60,64 @@ class TypeInferencer(ast.NodeVisitor):
         self.annotation_resolver = AnnotationResolver(ctx, self._resolve_annotation, self.scope_manager)
         self.all_types: Dict[ast.AST, LLType] = {}
 
+        # Function return-context stack.  Every FunctionDef pushes its own
+        # declared return type so that a ``return`` nested inside if/for/
+        # while/try bodies validates against the function that *lexically*
+        # contains it.  Checking only direct children of FunctionDef let
+        # nested returns evade the declared type, and a single shared field
+        # would let an inner nested function's signature leak back into the
+        # outer function once the inner definition finished.
+        self._return_type_stack: List[LLType] = []
+
         # Initialize modular visitors
         self.ast_visitors = ASTNodeVisitors(self)
         self.statement_inferencer = StatementTypeInferencer(self)
+
+    @property
+    def current_return_type(self) -> Optional[LLType]:
+        """Declared return type of the lexically enclosing function."""
+        if self._return_type_stack:
+            return self._return_type_stack[-1]
+        return None
+
+    def push_return_context(self, return_type: LLType) -> None:
+        """Begin a function body with its declared return type."""
+        self._return_type_stack.append(return_type)
+
+    def pop_return_context(self) -> None:
+        """Leave the innermost function body."""
+        self._return_type_stack.pop()
+
+    def check_return_statement(self, node: ast.Return) -> None:
+        """Validate one return statement against its enclosing function.
+
+        This is the single owner of return checking, shared by direct and
+        nested returns so both enforce the same void/value/type rules at
+        the return's source location.
+        """
+        return_type = self.current_return_type
+        if return_type is None:
+            # A return outside any FunctionDef is invalid Python for the
+            # kernel pipeline; report it instead of silently accepting.
+            raise TypeInferenceError("'return' outside of a function", node=node, ctx=self.ctx)
+        if node.value is None:
+            if return_type != void:
+                raise TypeMismatchError(f"Return statement has no value, but function return type is {return_type}",
+                                        node=node, ctx=self.ctx)
+            return
+        return_value_type = self.infer_node_type(node.value)
+        if return_value_type == return_type:
+            return
+        # Preserve the established implicit numeric coercion rules: int->int
+        # (width/sign) and int->float / float->float are accepted the same
+        # way annotated assignments are; every other mismatch (notably
+        # float->int and value returns from void) fails here.
+        if ((isinstance(return_type, IntType) and isinstance(return_value_type, IntType))
+                or (isinstance(return_type, FloatType) and isinstance(return_value_type, (IntType, FloatType)))):
+            return
+        raise TypeMismatchError(
+            f"Return value type {return_value_type} does not match function return type {return_type}", node=node,
+            ctx=self.ctx)
 
     # ------------------------------ Scope Management (delegated to ScopeManager) ------------------------------
     @property
@@ -90,9 +145,12 @@ class TypeInferencer(ast.NodeVisitor):
         self.scope_manager.define(name)
         self.scope_manager.set_variable_type(name, type_)
 
-    def get_variable_type(self, name: str, node: ast.AST) -> LLType:
-        """Get type of a variable from scope/context."""
-        return get_variable_type_from_scope(self.scope_manager, name, node, self.ctx)
+    def get_variable_type(self, name: str, node: ast.AST, *, required: bool = True) -> Optional[LLType]:
+        """Get type of a variable from scope/context.
+        With ``required=False``, returns None instead of raising when the
+        name is bound nowhere on the scope stack or in the global context.
+        """
+        return get_variable_type_from_scope(self.scope_manager, name, node, self.ctx, required=required)
 
     # ------------------------------ Annotation Resolution ------------------------------
     def _resolve_annotation(self, ann_node: ast.AST) -> LLType:
@@ -101,12 +159,22 @@ class TypeInferencer(ast.NodeVisitor):
 
     # ------------------------------ AST Node Visitors ------------------------------
     def visit(self, node):
-        """Override visit to cache results."""
+        """Override visit to cache results and attach diagnostic context.
+
+        Program errors raised while visiting reach this single boundary;
+        rebuild their message with the inferencer's explicitly known
+        compilation context so source snippets resolve without caller-frame
+        guessing, and re-raise preserving type, cause and source node.
+        """
         if node in self.all_types:
             return self.all_types[node]
         if node is None:
             return None
-        ret = super().visit(node)
+        try:
+            ret = super().visit(node)
+        except TypeInferenceError as exc:
+            exc.reformat_with_context(self.ctx)
+            raise
         if ret is not None:
             self.all_types[node] = ret
         return ret
@@ -168,6 +236,28 @@ class TypeInferencer(ast.NodeVisitor):
     def visit_Expr(self, node: ast.Expr) -> None:
         """Process expression statements"""
         self.ast_visitors.visit_Expr(node)
+
+    # ------------------------------ Typed lowered IR (RF06) ------------------------------
+    def visit_TargetExpression(self, node):
+        """Infer an explicitly typed backend expression escape hatch."""
+        return self.ast_visitors.visit_TargetExpression(node)
+
+    def visit_ResourceReference(self, node):
+        """Infer a typed lowered resource reference."""
+        return self.ast_visitors.visit_ResourceReference(node)
+
+    def visit_StageReference(self, node):
+        """Infer a pipeline-stage-indexed resource reference."""
+        return self.ast_visitors.visit_StageReference(node)
+
+    def visit_TargetStatement(self, node) -> None:
+        self.ast_visitors.visit_TargetStatement(node)
+
+    def visit_TargetInclude(self, node) -> None:
+        self.ast_visitors.visit_TargetInclude(node)
+
+    def visit_TargetHelper(self, node) -> None:
+        self.ast_visitors.visit_TargetHelper(node)
 
     def visit_Return(self, node: ast.Return) -> None:
         """Process return statements"""

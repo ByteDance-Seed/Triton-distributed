@@ -26,13 +26,13 @@
 import ast
 from typing import Dict, List, Any
 import little_kernel.language as ll
-from .utils.extract_empty_params import extract_empty_params
-from .utils.add_parent_reference import add_parent_references
-from .utils.update_context import update_context
-from .utils.resolve_attribute import recursive_resolve_attribute
-from .pass_base import CompleteASTMutator
-from .utils.preserve_attributes import create_node_with_attrs
-from .constfold import const_fold
+from little_kernel.core.passes.utils.extract_empty_params import extract_empty_params
+from little_kernel.core.passes.utils.add_parent_reference import add_parent_references
+from little_kernel.core.passes.utils.update_context import update_context
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.pass_base import CompleteASTMutator
+from little_kernel.core.passes.utils.preserve_attributes import create_node_with_attrs
+from little_kernel.core.passes.constfold import const_fold
 
 
 class FlattenEmpty(CompleteASTMutator):
@@ -66,11 +66,12 @@ class FlattenEmpty(CompleteASTMutator):
     def _evaluate_expr(self, expr: ast.AST) -> Any:
         """Evaluate an AST expression using the function's global context"""
         try:
-            compiled = compile(ast.fix_missing_locations(ast.Module(body=[ast.Expr(value=expr)], type_ignores=[])),
-                               filename="<expr_evaluation>", mode="exec")
-            eval_namespace = self.ctx.copy()
-            exec(compiled, eval_namespace)
-            return eval_namespace["__return__"]
+            # Compile as an expression so its value is returned directly; an
+            # exec'd `ast.Module` expression statement discards the value, so
+            # no result is ever bound in the namespace.
+            compiled = compile(ast.fix_missing_locations(ast.Expression(body=expr)), filename="<expr_evaluation>",
+                               mode="eval")
+            return eval(compiled, self.ctx.copy())
         except Exception as e:
             raise RuntimeError(f"Failed to evaluate expression: {ast.dump(expr, indent=2)}\nError: {str(e)}")
 

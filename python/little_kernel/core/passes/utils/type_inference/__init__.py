@@ -24,16 +24,10 @@
 ################################################################################
 
 # Type inference module exports
-from .infer_type import TypeInferencer, infer_type
-from .type_inference_core import (
-    TypeInferenceError,
-    UndefinedVariableError,
-    TypeMismatchError,
-    UnsupportedNodeError,
-    get_variable_type_from_scope,
-)
+from little_kernel.core.passes.utils.type_inference.infer_type import TypeInferencer, infer_type
+from little_kernel.core.passes.utils.type_inference.type_inference_core import TypeInferenceError, UndefinedVariableError, TypeMismatchError, UnsupportedNodeError, get_variable_type_from_scope
 # Import unified ScopeManager from parent module
-from ..scope_manager import ScopeManager
+from little_kernel.core.passes.utils.scope_manager import ScopeManager
 
 __all__ = [
     'TypeInferencer',

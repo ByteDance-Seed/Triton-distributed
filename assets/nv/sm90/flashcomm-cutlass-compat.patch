@@ -1,0 +1,62 @@
+diff --git a/FlashComm/python/flash_comm/ep_overlap/kernels/m_contig_group_tile_scheduler.py b/FlashComm/python/flash_comm/ep_overlap/kernels/m_contig_group_tile_scheduler.py
+index 4d0e34eb1..d596f4ad0 100644
+--- a/FlashComm/python/flash_comm/ep_overlap/kernels/m_contig_group_tile_scheduler.py
++++ b/FlashComm/python/flash_comm/ep_overlap/kernels/m_contig_group_tile_scheduler.py
+@@ -22,7 +22,8 @@
+ # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #
+ ################################################################################
+-import cutlass
++import inspect
++
+ from cutlass.cutlass_dsl import (
+     Int32,
+     dsl_user_op,
+@@ -38,6 +39,11 @@ from cutlass.utils.grouped_gemm_persistent_tile_scheduler import (
+     StaticPersistentGroupTileScheduler,
+ )
+
++_BASE_SCHEDULER_HAS_CACHED_SHAPES = (
++    "cached_problem_shape_0"
++    in inspect.signature(StaticPersistentGroupTileScheduler.__init__).parameters
++)
++
+
+ class MContiguousGroupTileScheduler(StaticPersistentGroupTileScheduler):
+     """Grouped-GEMM tile scheduler for the M-contiguous (shared N/K) case.
+@@ -68,8 +74,7 @@ class MContiguousGroupTileScheduler(StaticPersistentGroupTileScheduler):
+         problem_shape_n: int,
+         problem_shape_k: int,
+     ):
+-        StaticPersistentGroupTileScheduler.__init__(
+-            self,
++        base_args = (
+             params,
+             num_persistent_clusters,
+             current_work_linear_idx,
+@@ -80,6 +85,25 @@ class MContiguousGroupTileScheduler(StaticPersistentGroupTileScheduler):
+             group_count,
+             problem_sizes_m,
+         )
++        if _BASE_SCHEDULER_HAS_CACHED_SHAPES:
++            unused_cached_shape = (
++                Int32(-1),
++                Int32(-1),
++                Int32(-1),
++                Int32(-1),
++            )
++            StaticPersistentGroupTileScheduler.__init__(
++                self,
++                *base_args,
++                unused_cached_shape,
++                unused_cached_shape,
++                False,
++            )
++        else:
++            StaticPersistentGroupTileScheduler.__init__(
++                self,
++                *base_args,
++            )
+         self.problem_sizes_m = problem_sizes_m
+         self.problem_shape_n = problem_shape_n
+         self.problem_shape_k = problem_shape_k

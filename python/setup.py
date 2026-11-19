@@ -66,7 +66,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from setuptools import Command, Extension, setup
+from setuptools import Command, Extension, find_namespace_packages, setup
 from setuptools.command.build_ext import build_ext
 from distutils.command.clean import clean
 
@@ -393,37 +393,12 @@ def get_packages():
         "triton_dist/tools/tune",
     ]
     if check_env_flag("TRITON_BUILD_LITTLE_KERNEL", "ON"):
-        candidates += [
-            p for p in (
-                "little_kernel",
-                "little_kernel/atom",
-                "little_kernel/atom/barrier",
-                "little_kernel/atom/mma",
-                "little_kernel/atom/tma",
-                "little_kernel/codegen",
-                "little_kernel/codegen/registries",
-                "little_kernel/codegen/special_struct",
-                "little_kernel/codegen/visitors",
-                "little_kernel/core",
-                "little_kernel/core/passes",
-                "little_kernel/core/passes/utils",
-                "little_kernel/core/passes/utils/registries",
-                "little_kernel/core/passes/utils/type_inference",
-                "little_kernel/language",
-                "little_kernel/language/intrin",
-                "little_kernel/runtime",
-                "little_kernel/benchmark",
-                "little_kernel/benchmark/gemm_sm90",
-                "little_kernel/benchmark/gemm_sm100",
-                "little_kernel/benchmark/compute",
-                "little_kernel/benchmark/memory",
-                "little_kernel/benchmark/latency",
-                "little_kernel/benchmark/warp",
-                "little_kernel/benchmark/sm",
-                "little_kernel/benchmark/sm90",
-            )
-        ]
-    return [p for p in candidates if os.path.isdir(p)]
+        candidates += find_namespace_packages(
+            where=".",
+            include=["little_kernel", "little_kernel.*"],
+            exclude=["*.__pycache__", "*.__pycache__.*", "*.include"],
+        )
+    return [p for p in candidates if os.path.isdir(p.replace(".", "/"))]
 
 
 package_data = {
@@ -431,6 +406,7 @@ package_data = {
     # CMake build stages into the package. find_plugin() probes triton_dist/lib
     # first for the installed layout. Empty when nothing has been built yet.
     "triton_dist": ["lib/*.so*", "_C/*.so*"],
+    "little_kernel.backends": ["**/*.json", "**/*.cuh", "**/*.h", "**/*.hpp"],
     "": ["*.so*", "*.a"],
 }
 
@@ -497,7 +473,8 @@ setup(
     description="Triton language and compiler extension for distributed deep learning systems "
     "(out-of-tree Triton plugin).",
     long_description="",
-    install_requires=["setuptools>=40.8.0", "packaging"] + TRITON_DEP + DEPS_NVIDIA + DEPS_HIP,
+    install_requires=["setuptools>=40.8.0", "packaging"] + TRITON_DEP + DEPS_NVIDIA + DEPS_HIP +
+    (["numpy"] if check_env_flag("TRITON_BUILD_LITTLE_KERNEL", "ON") else []),
     packages=get_packages(),
     package_data=package_data,
     include_package_data=True,

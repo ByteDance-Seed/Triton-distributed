@@ -25,7 +25,7 @@
 
 import ast
 from typing import Dict, Callable, Optional
-from little_kernel.core.passes.utils.registries.loop_modifier_registry import (get_loop_modifier_registry)
+from little_kernel.core.passes.utils.registries.loop_modifier_registry import get_loop_modifier_registry
 
 
 class LoopModifierCodegen:
@@ -40,6 +40,8 @@ class LoopModifierCodegen:
         """Register default codegen handlers for loop modifiers."""
         # Register unroll handler: generates #pragma unroll
         self.register_codegen("unroll", self._codegen_unroll)
+        self.register_codegen("no_unroll", self._codegen_no_unroll)
+        self.register_codegen("unroll_dyn", self._codegen_unroll_dyn)
 
     def register_codegen(self, modifier_name: str, handler: Callable):
         """
@@ -63,6 +65,50 @@ class LoopModifierCodegen:
             C++ pragma string or None
         """
         return "#pragma unroll"
+
+    def _codegen_no_unroll(self, emitter, node: ast.For) -> Optional[str]:
+        return "#pragma unroll 1"
+
+    @staticmethod
+    def _resolve_unroll_count(node: ast.For) -> int:
+        """Extract the trace-time positive-integer unroll count.
+
+        node.iter is still the un-unwrapped ll.unroll_dyn(range(...), count)
+        call when the modifier codegen runs (process_modifier precedes the
+        registry unwrap in visit_For), so the count is args[1] or the
+        keyword `count`.
+        """
+        iter_node = node.iter
+        args = list(getattr(iter_node, "args", []))
+        keywords = list(getattr(iter_node, "keywords", []))
+        count_node = None
+        if len(args) >= 2:
+            count_node = args[1]
+        else:
+            for kw in keywords:
+                if kw.arg == "count":
+                    count_node = kw.value
+                    break
+        if count_node is None:
+            raise ValueError("ll.unroll_dyn requires an unroll count: "
+                             "ll.unroll_dyn(range(...), 4)")
+        # Python-level unary minus on a literal (e.g. -4) arrives as UnaryOp.
+        negative = False
+        if isinstance(count_node, ast.UnaryOp) and isinstance(count_node.op, ast.USub):
+            negative = True
+            count_node = count_node.operand
+        if not (isinstance(count_node, ast.Constant) and isinstance(count_node.value, int)
+                and not isinstance(count_node.value, bool)):
+            raise ValueError("ll.unroll_dyn count must be an integer literal at trace "
+                             "time (e.g. ll.unroll_dyn(range(...), 4))")
+        count = -count_node.value if negative else count_node.value
+        if count < 1:
+            raise ValueError(f"ll.unroll_dyn count must be a positive integer (got {count})")
+        return count
+
+    def _codegen_unroll_dyn(self, emitter, node: ast.For) -> Optional[str]:
+        """Emit `#pragma unroll <count>`: partial unroll for dynamic-trip loops."""
+        return f"#pragma unroll {self._resolve_unroll_count(node)}"
 
     def _codegen_parallel(self, emitter, node: ast.For) -> Optional[str]:
         """

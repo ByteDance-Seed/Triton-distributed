@@ -38,14 +38,8 @@ class TypeMappingRegistry:
         self._uint_type_mappings: Dict[int, str] = {
             8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint64_t", 128: "unsigned __int128"
         }
-        self._float_type_mappings: Dict[str, str] = {
-            "fp4_e2m1": "__fp4", "fp8_e5m2": "__fp8_e5m2", "fp8_e4m3": "__fp8_e4m3", "bfloat16": "__bf16", "float16":
-            "__half", "tfloat32": "__tfloat32", "float32": "float", "float64": "double"
-        }
-        self._special_type_mappings: Dict[str, str] = {
-            "bool": "bool", "binary": "uint8_t",  # Unused: 4-bit raises in map_int_type
-            "void": "void", "str": "std::string", "TmaDescriptor": "cute::TmaDescriptor"
-        }
+        self._float_type_mappings = {'float32': 'float', 'float64': 'double'}
+        self._special_type_mappings = {'bool': 'bool', 'binary': 'uint8_t', 'void': 'void', 'str': 'std::string'}
         self._custom_handlers: Dict[type, Callable] = {}
 
     def register_int_type(self, bits: int, cpp_type: str, signed: bool = True):
@@ -89,7 +83,9 @@ class TypeMappingRegistry:
 
     def map_float_type(self, ll_type: ll.FloatType) -> str:
         """Map FloatType to C++ type string."""
-        return self._float_type_mappings.get(ll_type.fmt, f"float{ll_type.fmt}")
+        if ll_type.fmt not in self._float_type_mappings:
+            raise NotImplementedError(f"An emitting backend must provide a type policy for {ll_type.fmt}")
+        return self._float_type_mappings[ll_type.fmt]
 
     def map_special_type(self, name: str) -> Optional[str]:
         """Map special type name to C++ type string."""

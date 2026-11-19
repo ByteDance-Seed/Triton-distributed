@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "upstream_revision": "744899c07d07531eb21262e42bf5bae78715d1e7",
+  "backends": [
+    "amd/cdna4",
+    "nv/sm90",
+    "nv/sm100"
+  ],
+  "source_export": "descriptor dependency closure",
+  "runtime_headers": [
+    "python/little_kernel/backends/nv/sm100/runtime/include/role_pipeline.cuh"
+  ]
+}

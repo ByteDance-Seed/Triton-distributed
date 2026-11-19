@@ -28,11 +28,10 @@ Special struct codegen modules.
 This package contains modules for converting Python classes to C++ structs.
 """
 
-from .translator import PythonToCppTranslator
-from .struct_converter import PythonClassToCppStructConverter
-from .generic_codegen import (generic_special_struct_declaration_codegen, generic_special_struct_method_codegen,
-                              generic_special_struct_tuple_unpack_codegen, generic_special_struct_definition_codegen)
-from .utils import (generate_cpp_struct_from_python_class, _resolve_template_param)
+from little_kernel.codegen.special_struct.translator import PythonToCppTranslator
+from little_kernel.codegen.special_struct.struct_converter import PythonClassToCppStructConverter
+from little_kernel.codegen.special_struct.generic_codegen import generic_special_struct_declaration_codegen, generic_special_struct_method_codegen, generic_special_struct_tuple_unpack_codegen, generic_special_struct_definition_codegen
+from little_kernel.codegen.special_struct.utils import generate_cpp_struct_from_python_class, _resolve_template_param
 
 __all__ = [
     'PythonToCppTranslator',

@@ -22,9 +22,13 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
+"""Shared runtime contracts and lazy exports from installed hardware backends."""
+from little_kernel.backends.registry import runtime_symbols, resolve_runtime_symbol
 
-from .compiler import compile_cuda
-from .cuda_runtime import CUDARuntime, KernelLauncher
-from .kernel import CompiledKernel
+__all__ = sorted(runtime_symbols())
 
-__all__ = ["compile_cuda", "CUDARuntime", "KernelLauncher", "CompiledKernel"]
+
+def __getattr__(name):
+    value = resolve_runtime_symbol(name)
+    globals()[name] = value
+    return value

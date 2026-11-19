@@ -28,14 +28,15 @@ import inspect
 import textwrap
 from typing import Dict, Any, Set, List, Callable, Optional
 
-from .pass_base import CompleteASTMutator
-from .utils.resolve_attribute import recursive_resolve_attribute
-from .utils.preserve_attributes import create_node_with_attrs
-from .utils.scope_manager import ScopeManager
-from little_kernel.language.builtin_base import (
-    INLINE_FUNC_ATTR,
-    ORIGINAL_PY_FUNC_ATTR,
+from little_kernel.core.passes.pass_base import CompleteASTMutator
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.utils.preserve_attributes import create_node_with_attrs
+from little_kernel.core.passes.utils.scope_manager import ScopeManager
+from little_kernel.core.passes.utils.inline_provenance import (
+    attach_inline_provenance,
+    make_inline_provenance,
 )
+from little_kernel.language.builtin_base import INLINE_FUNC_ATTR, ORIGINAL_PY_FUNC_ATTR
 
 
 class FunctionInliner(CompleteASTMutator):
@@ -55,9 +56,12 @@ class FunctionInliner(CompleteASTMutator):
         super().__init__()
         self.ctx = ctx
         self.scope_manager = ScopeManager(ctx)
+        self._inline_counter = 0
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         """Process function definitions and manage scope."""
+        # Reset inline counter per function so each gets unique suffixes
+        self._inline_counter = 0
         # Enter new scope for this function
         self.scope_manager.enter_scope()
         # Define function parameters as local
@@ -82,8 +86,8 @@ class FunctionInliner(CompleteASTMutator):
             func = recursive_resolve_attribute(call.func, self.ctx, self.scope_manager)
             if isinstance(func, Callable):
                 if hasattr(func, INLINE_FUNC_ATTR) and getattr(func, INLINE_FUNC_ATTR, False):
-                    inline_func = getattr(func, INLINE_FUNC_ATTR)
-                    return self._inline_call(call, inline_func, is_statement=True)
+                    inline_func = getattr(func, ORIGINAL_PY_FUNC_ATTR, func)
+                    return self._process_list(self._inline_call(call, inline_func, is_statement=True))
         return super().visit_Expr(node)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -166,7 +170,9 @@ class FunctionInliner(CompleteASTMutator):
         param_map = self._map_arguments(call_node, signature)
 
         # 2. Resolve variable conflicts (rename inlined locals to avoid clashes)
-        rename_map = self._resolve_conflicts(call_node, func_ast.body[0], signature)
+        self._inline_counter += 1
+        suffix = f"{func.__name__}_{self._inline_counter}"
+        rename_map = self._resolve_conflicts(self.scope_manager.get_all_local_names(), func_ast.body[0], suffix)
 
         # 3. Substitute parameters in the target function's body
         substituted_body = self._substitute_parameters(func_ast.body[0].body, param_map, rename_map)
@@ -178,6 +184,18 @@ class FunctionInliner(CompleteASTMutator):
             if isinstance(substituted_body[-1], ast.Return):
                 substituted_body[-1] = ast.Expr(value=substituted_body[-1].value)
             processed_body = substituted_body  # Keep returns as-is for side-effect functions
+
+        # 5. Stamp inline-callsite provenance on every node produced by this
+        # expansion.  Downstream passes use this to attribute any error
+        # raised inside one inlined body to the correct callsite copy (see
+        # passes/utils/inline_provenance.py and utils/error_report.py).
+        provenance = make_inline_provenance(
+            function_name=getattr(func, "__name__", None) or getattr(func, "__qualname__", "<anonymous>"),
+            copy_index=self._inline_counter,
+            call_node=call_node,
+        )
+        for stmt in processed_body:
+            attach_inline_provenance(stmt, provenance)
 
         return processed_body
 
@@ -205,25 +223,20 @@ class FunctionInliner(CompleteASTMutator):
 
         return arg_map
 
-    def _resolve_conflicts(self, call_context: ast.AST, target_ast: ast.AST, signature) -> Dict[str, str]:
+    def _resolve_conflicts(self, context_vars: Set[str], target_ast: ast.AST, suffix: str) -> Dict[str, str]:
         """
         Rename local variables in inlined function to avoid conflicts with:
-        - Variables in the calling context
+        - Variables in the enclosing scope (kernel locals)
         - Parameters of the calling function
         """
-        # Collect variables in the calling context
-        context_vars = self._collect_variables(call_context)
 
         # Collect local variables in the target function (excluding its parameters)
         target_params = {p.arg for p in target_ast.args.args}
         target_locals = self._collect_local_vars(target_ast) - target_params
 
-        # Generate rename map for conflicting variables
-        rename_map = {}
-        for var in target_locals:
-            if var in context_vars:
-                # Rename with prefix to avoid conflict (e.g., "tmp" → "func2_tmp")
-                rename_map[var] = f"{signature.name}_{var}"
+        # Rename ALL inlined locals to avoid conflicts and prevent const_fold from
+        # incorrectly propagating values between multiple inlined blocks.
+        rename_map = {var: f"{suffix}_{var}" for var in target_locals}
         return rename_map
 
     def _substitute_parameters(self, body: List[ast.stmt], param_map: Dict[str, ast.expr],

@@ -1,111 +1,59 @@
 Getting Started
 ===============
 
-.. contents:: On this page
-   :local:
-   :depth: 2
+Installation and CPU checks
+--------------------------
 
-Installation
-------------
+The compiler SDK requires Python 3.11 or newer and NumPy. From the repository root::
 
-LittleKernel is included in Triton-distributed.  A standard editable install
-picks it up automatically::
+    uv sync --locked --group cpu-test --group build --group format
+    uv run --locked pytest -q
+    uv run --locked pytest -q tests/repository
 
-    cd python
-    TRITON_BUILD_LITTLE_KERNEL=ON pip install -e .
+The root project also builds a standalone LittleKernel wheel. Triton-distributed
+continues to use its existing ``python/setup.py`` entry point, with the bundled
+compiler controlled by ``TRITON_BUILD_LITTLE_KERNEL``.
 
-Verify::
-
-    python -c "import little_kernel; print('OK')"
-
-Prerequisites:
-
-- Python >= 3.9
-- PyTorch with CUDA support
-- ``nvcc`` on ``$PATH`` (CUDA Toolkit 12+; CUDA 13 for SM100)
-
-Writing Your First Kernel
--------------------------
-
-A minimal kernel that adds two vectors:
+Writing a kernel
+----------------
 
 .. code-block:: python
 
     import little_kernel as lk
-    import little_kernel.language as ll
+    from little_kernel.backends import get_backend
     from little_kernel.core.passes import PASSES
-    from little_kernel.codegen.codegen_cuda import codegen_cuda
-    import torch
 
-    @lk.ll_kernel(backend="cuda", is_entry=True)
-    def vec_add(
-        A: ll.Tensor[ll.float32],
-        B: ll.Tensor[ll.float32],
-        C: ll.Tensor[ll.float32],
-        N: ll.int32,
-    ) -> ll.void:
-        tid: ll.int32 = ll.blockIdx_x() * ll.blockDim_x() + ll.threadIdx_x()
-        if tid < N:
-            C[tid] = A[tid] + B[tid]
+    backend = get_backend("nv/sm90")
+    ll = backend.language
 
-    # Build
-    passes = PASSES["cuda"]
-    N = 1024
-    kernel = vec_add.build(
-        passes, codegen_cuda,
-        grid=(N // 256, 1, 1),
-        block=(256, 1, 1),
-        arch="sm_90",
+    @lk.ll_kernel(backend="nv/sm90", is_entry=True)
+    def vector_add(a: ll.Tensor[ll.float32], b: ll.Tensor[ll.float32],
+                   out: ll.Tensor[ll.float32], n: ll.int32) -> ll.void:
+        i: ll.int32 = ll.blockIdx_x() * 256 + ll.threadIdx_x()
+        if i < n:
+            out[i] = a[i] + b[i]
+
+    artifact = vector_add.compile_artifact(
+        PASSES[backend.backend_id], backend.codegen.generate,
+        target="sm_90a", num_threads=256,
     )
+    print(artifact.source)
 
-    # Launch
-    A = torch.randn(N, device="cuda", dtype=torch.float32)
-    B = torch.randn(N, device="cuda", dtype=torch.float32)
-    C = torch.empty(N, device="cuda", dtype=torch.float32)
-    kernel(A, B, C, N)
-    torch.cuda.synchronize()
-    assert torch.allclose(C, A + B)
-    print("PASS")
+Source generation does not require a device or tensor framework. ``build``
+additionally invokes the selected backend toolchain and returns a callable
+executable. Use ``nv/sm100`` for Blackwell or ``amd/cdna4`` for gfx950.
 
-Running Benchmarks
-------------------
+Hardware checks and benchmarks
+------------------------------
 
-Micro-benchmarks
-~~~~~~~~~~~~~~~~
+Declare the matching tensor/benchmark integration in the intended environment's
+dependency configuration and lock. NVCC/HIPCC, the driver and the physical device
+must match the selected hardware. The CPU lock does not provision that stack::
 
-Run the full suite on a Hopper GPU::
+    uv run --locked python tools/verify.py --backend nv/sm90 --suite gpu
+    uv run --locked python tools/verify.py --backend amd/cdna4 --suite gpu
+    uv run --locked python -m benchmarks.nv.common.run_all --list
+    uv run --locked python -m benchmarks.nv.sm90.gemm.sm90_manual_wgmma_swizzle
+    uv run --locked python -m benchmarks.nv.sm100.gemm.run_sm100_levels
 
-    python -m little_kernel.benchmark.run_all
-
-Or a specific category::
-
-    python -m little_kernel.benchmark.run_all --category compute
-
-SM90 GEMM Kernels
-~~~~~~~~~~~~~~~~~
-
-Run individual GEMM variants::
-
-    python -m little_kernel.benchmark.gemm_sm90.gemm_v1
-
-SM100 GEMM Kernels
-~~~~~~~~~~~~~~~~~~
-
-Run all levels (requires Blackwell GPU)::
-
-    python -m little_kernel.benchmark.gemm_sm100.test_all_levels
-
-Or a specific level::
-
-    python -m little_kernel.benchmark.gemm_sm100.gemm_level1
-
-Running Tests
--------------
-
-Unit tests (no GPU required for most)::
-
-    pytest test/little_kernel/unit/ -v
-
-Integration tests (requires GPU)::
-
-    pytest test/little_kernel/integration/ -v
+Missing hardware is unavailable, never a successful numerical/performance check.

@@ -22,11 +22,4 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 ################################################################################
-
-# Export loop modifier codegen registration functions
-from .registries.loop_modifier_codegen import (register_loop_modifier_codegen, get_loop_modifier_codegen)
-
-__all__ = [
-    'register_loop_modifier_codegen',
-    'get_loop_modifier_codegen',
-]
+"""Shared source-emission infrastructure; generators are backend components."""

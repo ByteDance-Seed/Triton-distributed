@@ -1,27 +1,13 @@
 LittleKernel
 ============
 
-LittleKernel is a Python DSL for writing CUDA kernels with full PTX-level
-control.  It generates CUDA source code from Python functions and compiles
-them at runtime using ``nvcc``.
+LittleKernel is a Python DSL and compiler for NVIDIA CUDA/PTX and AMD HIP/AMDGPU
+programs. The bundled backends are ``nv/sm90``, ``nv/sm100`` and ``amd/cdna4``.
 
-.. contents:: On this page
-   :local:
-   :depth: 2
-
-Overview
---------
-
-LittleKernel bridges the gap between high-level frameworks (PyTorch, Triton)
-and hand-written CUDA/PTX.  You write kernels as decorated Python functions
-using explicit types and intrinsics, and LittleKernel:
-
-1. **Parses** the Python AST,
-2. **Runs compiler passes** (type inference, memory allocation, constant
-   folding, inlining),
-3. **Generates** CUDA C++ source with inline PTX assembly,
-4. **Compiles** via ``nvcc`` and wraps the result in a callable that
-   interoperates with PyTorch tensors.
+Shared types, IR, compiler sessions, analyses, C++ visitors, ABI and binary-cache
+services are composed with hardware-owned frontend extensions, passes, codegen,
+toolchains and runtimes. Discovery reads installed backend descriptors without
+importing all hardware implementations.
 
 Architecture
 ------------
@@ -29,25 +15,22 @@ Architecture
 ::
 
     python/little_kernel/
-    ├── language/        # DSL types, decorators, intrinsics
-    │   └── intrin/      # Per-feature intrinsic modules
-    │       ├── wgmma.py     # SM90 Tensor Core (WGMMA)
-    │       ├── umma.py      # SM100 Tensor Core (UMMA / tcgen05)
-    │       ├── tma.py       # Tensor Memory Accelerator
-    │       ├── barrier.py   # MBarrier & cluster sync
-    │       └── ...
-    ├── core/            # IR, passes, type system
-    │   └── passes/      # Compiler pipeline
-    ├── codegen/         # CUDA code generation
-    ├── runtime/         # nvcc compilation, TMA descriptors, kernel launch
-    ├── atom/            # High-level building blocks (MMA, TMA, barriers)
-    └── benchmark/       # GPU micro-benchmarks and GEMM kernels
+      core/                shared types, IR, sessions and passes
+      language/            shared DSL and portable operations
+      codegen/             shared visitors and emission policy
+      runtime/             shared ABI/cache/lifecycle services
+      backends/
+        interfaces.py      component contracts and build requests
+        registry.py        descriptor discovery and lazy factories
+        common/gpu/        reusable GPU allocation/SIMT components
+        nv/common/         CUDA/PTX, runtime and export integrations
+        nv/sm90/           Hopper WGMMA and pipeline atoms
+        nv/sm100/          Blackwell UMMA, dataflow and runtime header
+        amd/cdna4/         gfx950 frontend, HIP codegen and runtime
 
-Supported Architectures
------------------------
-
-- **SM90 (Hopper)** -- WGMMA, TMA, MBarrier, Cluster, async pipelines
-- **SM100 (Blackwell)** -- UMMA, TMEM, tcgen05, 2SM CTA groups, TMA Store
+Tests, authored programs, benchmarks and reference assets are repository-level
+``tests/``, ``examples/``, ``benchmarks/`` and ``assets/`` trees. They are not
+part of the installed compiler package.
 
 Sub-pages
 ---------

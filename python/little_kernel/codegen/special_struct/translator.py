@@ -54,6 +54,10 @@ class PythonToCppTranslator(ExpressionCodegenMixin, ControlFlowCodegenMixin, Cal
     def __init__(self, struct_var_name: str = "self", ctx: Optional[Dict[str, Any]] = None,
                  return_info: Optional[Dict[str, Any]] = None, type_inferencer: Optional[TypeInferencer] = None,
                  class_name: Optional[str] = None, static_methods: Optional[set] = None):
+        from little_kernel.codegen.policy import current_emitter
+        target = current_emitter()
+        self.tuple_namespace = getattr(target, "tuple_namespace", "std")
+        self.half_arithmetic_header = getattr(target, "half_arithmetic_header", None)
         self.struct_var_name = struct_var_name
         self.ctx = ctx or {}
         self.return_info = return_info

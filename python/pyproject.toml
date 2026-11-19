@@ -28,3 +28,14 @@ exclude = [
 
 [tool.ruff.lint]
 ignore = ["E501", "E701", "E731", "E741"]
+
+
+# The bundled DSL captures imported symbols as compilation globals and uses
+# explicit re-export/registration facades. Preserve those imports; optional
+# integration examples also deliberately defer imports until setup is complete.
+[tool.ruff.lint.per-file-ignores]
+"python/little_kernel/**/*.py" = ["F401", "F403", "F405", "E402"]
+"tests/**/*.py" = ["F401", "F403", "F405", "E402"]
+"examples/**/*.py" = ["F401", "F403", "F405", "E402"]
+"benchmarks/**/*.py" = ["F401", "F403", "F405", "E402"]
+"tools/**/*.py" = ["E402"]

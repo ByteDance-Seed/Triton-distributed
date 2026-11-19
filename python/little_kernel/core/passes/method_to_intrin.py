@@ -32,11 +32,11 @@ Converts:
 import ast
 import little_kernel.language as ll
 from typing import Dict, Any
-from .pass_base import CompleteASTMutator
-from .utils.resolve_attribute import recursive_resolve_attribute
-from .utils.update_context import update_context
-from .utils.scope_manager import ScopeManager
-from .utils.preserve_attributes import copy_node_with_attrs
+from little_kernel.core.passes.pass_base import CompleteASTMutator
+from little_kernel.core.passes.utils.resolve_attribute import recursive_resolve_attribute
+from little_kernel.core.passes.utils.update_context import update_context
+from little_kernel.core.passes.utils.scope_manager import ScopeManager
+from little_kernel.core.passes.utils.preserve_attributes import copy_node_with_attrs
 
 
 class MethodToIntrinTransformer(CompleteASTMutator):

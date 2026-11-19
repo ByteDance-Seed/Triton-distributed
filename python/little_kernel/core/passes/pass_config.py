@@ -23,16 +23,19 @@
 #
 ################################################################################
 """
-Pass configuration and registration.
+Default pipeline configuration (RF07).
 
-This module handles the registration of compilation passes for different backends.
-Passes can be registered here or imported from other modules.
+Default pipelines are declared once with stable pass ids and prerequisites.
+Registration is idempotent (calling :func:`register_default_passes` twice does
+not append stages), and accessors hand back fresh lists/immutable pipelines so
+consumers cannot mutate the global defaults.
 """
 
 import os
-from typing import List, Callable
-from .pass_registry import register_pass, get_passes, empty_pass
-from .dump import dump_ast
+from typing import Callable, List
+
+from little_kernel.core.passes.pass_registry import Pipeline, register_pass, get_passes, get_pipeline, empty_pass
+from little_kernel.core.passes.dump import dump_ast
 
 # Environment variables
 PASS_DEBUG = os.getenv("PASS_DEBUG", "").split(",")
@@ -41,48 +44,61 @@ if "" in PASS_DEBUG:
 PASS_DEBUG_ALL = "all" in PASS_DEBUG
 SIMPLE_MODE = os.getenv("SIMPLE_MODE", "true") == "true"
 
+# Stable default pipeline stage ids, in execution order.  ``insert_mem_alloc``
+# must follow ``flatten_empty``/``rebind_alloc_names`` so the memory analyzer
+# it embeds sees one allocation site per duplicated name.
+DEFAULT_PASS_IDS = (
+    "initial",
+    "special_struct_materialize",
+    "method_to_intrin",
+    "const_fold",
+    "inline",
+    "flatten_empty",
+    "rebind_alloc_names",
+    "insert_mem_alloc",
+)
 
-def register_default_passes(backend: str = "cuda"):
+
+def _canonical_backend_id(backend: str) -> str:
+    """Resolve a backend name or alias to its canonical backend id.
+
+    The pass registry keys stage lists by backend id, so registering under
+    both an alias (``"cuda"``) and its canonical id (``"nv/sm90"``) would
+    otherwise create two divergent pipelines for one backend.
     """
-    Register default passes for a backend.
-    
-    Args:
-        backend: Backend name (e.g., "cuda")
-    """
-    from .special_struct_materialize_pass import special_struct_materialize_pass
-    from .method_to_intrin import method_to_intrin
-    from .constfold import const_fold
-    from .inline import inline
-    from .flatten_empty import flatten_empty
-    from .insert_mem_alloc import insert_mem_alloc
+    from little_kernel.backends.registry import resolve_backend_spec
+    return resolve_backend_spec(backend).backend_id
 
-    # Register initial dump pass if debug is enabled
-    if len(PASS_DEBUG) > 0:
-        register_pass(backend, dump_ast("initial"), "initial", enable_debug=False)
-    else:
-        register_pass(backend, empty_pass, "empty", enable_debug=False)
 
-    # Register other passes
-    register_pass(backend, special_struct_materialize_pass, "special_struct_materialize_pass", simple_mode=SIMPLE_MODE)
-    register_pass(backend, method_to_intrin, "method_to_intrin", simple_mode=SIMPLE_MODE)
-    register_pass(backend, const_fold, "const_fold", simple_mode=SIMPLE_MODE)
-    register_pass(backend, inline, "inline", simple_mode=SIMPLE_MODE)
-    register_pass(backend, flatten_empty, "flatten_empty", simple_mode=SIMPLE_MODE)
-    register_pass(backend, insert_mem_alloc, "insert_mem_alloc", simple_mode=SIMPLE_MODE)
+def register_default_passes(backend: str = "cuda") -> Pipeline:
+    from little_kernel.backends import get_backend
+    backend = _canonical_backend_id(backend)
+    return get_backend(backend).passes.register(backend)
 
 
 def get_passes_for_backend(backend: str = "cuda") -> List[Callable]:
     """
-    Get the list of passes for a backend.
-    
+    Get a fresh list of pass callables for a backend.
+
+    The returned list is owned by the caller; reordering or extending it
+    never changes global defaults.
+
     Args:
-        backend: Backend name
-        
+        backend: Backend name or alias
+
     Returns:
-        List of pass functions
+        Fresh list of pass functions
     """
-    return get_passes(backend)
+    # Register *and* read under the canonical id: registering under the
+    # canonical key but reading the raw alias returns an empty stage list.
+    canonical = _canonical_backend_id(backend)
+    register_default_passes(canonical)
+    return get_passes(canonical)
 
 
-# Auto-register default passes for CUDA backend
-register_default_passes("cuda")
+def get_default_pipeline(backend: str = "cuda") -> Pipeline:
+    """Return the immutable default :class:`Pipeline` for a backend."""
+    return register_default_passes(backend)
+
+
+# Auto-register default pipelines for installed backends (idempotent).
