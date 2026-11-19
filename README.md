@@ -258,7 +258,7 @@ Communication
 ## License
 The Triton-distributed project is under MIT license.
 Part of our code is under Apache-2.0 License:
-- `python/triton_dist/kernels/flash_decode.py`
+- `python/triton_dist/kernels/nvidia/flash_decode.py`
 
 
 ## Citation
