@@ -1,55 +1,77 @@
 Intrinsics Reference
 ====================
 
-Use a target-specific language view to expose shared types and that backend's
-primitives without importing another implementation:
+Use ``get_backend(backend_id).language`` to obtain a target-scoped language view
+containing portable types/helpers together with that architecture's intrinsics,
+without importing unrelated backends:
 
 .. code-block:: python
 
     from little_kernel.backends import get_backend
-    hopper = get_backend("nv/sm90").language
-    blackwell = get_backend("nv/sm100").language
-    cdna4 = get_backend("amd/cdna4").language
-    print(dir(hopper))
 
-The top-level ``little_kernel.language`` facade retains lazy access to installed
-exports. A missing symbol raises explicitly; it does not select an omitted backend.
+    sm90_ll = get_backend("nv/sm90").language
+    sm100_ll = get_backend("nv/sm100").language
+    gfx950_ll = get_backend("amd/cdna4").language
 
-Shared operations
------------------
+The top-level ``little_kernel.language`` module provides lazy lookup across
+installed backend descriptors and raises explicitly if an unbundled symbol is
+requested.
 
-Shared scalar/tensor/vector types, casts, ``sizeof``, ``cdiv``, alignment,
-selection and loop annotations live under ``language``. GPU allocation and SIMT
-analysis are reusable components configured by each backend's pass provider.
+.. contents:: On this page
+   :local:
+   :depth: 2
 
-NVIDIA
-------
+Portable Operations
+-------------------
 
-CUDA/PTX intrinsics, common memory operations, barriers and atomics are owned by
-``backends.nv.common.language.intrin``. SM90-specific WGMMA and reusable MMA/
-pipeline atoms live under ``backends.nv.sm90``. SM100-specific UMMA, two-CTA TMA
-and dataflow primitives live under ``backends.nv.sm100``.
+Shared scalar/tensor/vector types, type casts, ``sizeof``, ``cdiv``, alignment
+directives (``align_memory``), conditional selection, and loop annotations
+(``unroll``) live under ``little_kernel.language``.
 
-The SM100 dataflow frontend is selected explicitly through
-``backends.nv.sm100.passes.dataflow.dataflow_frontend``. Its logical resources,
-channels and pipeline records have hardware-owned language/core definitions;
-analysis/optimization and codegen are separate components. Its required pipeline
-header is an installed package resource.
+NVIDIA SM90 & SM100 Intrinsics
+------------------------------
 
-AMD
----
+- **Common CUDA / PTX (``backends.nv.common.language.intrin``)**:
 
-CDNA4 primitives are owned by
-``backends.amd.cdna4.language.intrin.amdgcn``. They include AMDGPU memory/resource
-operations and MFMA/register-vector support. HIP codegen, toolchain and runtime
-components are instantiated independently. The data-parallel and persistent
-MXFP8 GEMM programs are under ``benchmarks/amd/cdna4``.
+  - Thread/block/cluster coordinates, warp shuffles, ballot/vote, register count
+    controls (``setmaxnreg_inc`` / ``setmaxnreg_dec``), ``mbarrier`` initialization,
+    transaction byte tracking, phase waits, 1D/2D/multicast ``TMA`` loads & stores,
+    ``LDSM`` / ``STSM``, PTX atomics (including 64-bit ``atomic_cas_i64`` and
+    FP32/INT16 CAS legalization), packed ``pack_2xbf16``, and round-to-nearest FP32
+    math helpers.
 
-Contracts
----------
+- **SM90 (``backends.nv.sm90``)**:
 
-Backend descriptors enumerate the actual public exports. Typed operations carry
-result/effect information used by type inference, passes and emission. Invalid
-type, alignment, architecture and launch options fail rather than producing
-unsupported device code. CPU source-generation tests are separate from device
-correctness and timing gates.
+  - Warp-group ``WGMMA`` matrix-multiply descriptors and async pipeline atoms
+    (``wgmma.mma_async``, ``wgmma.fence``, ``wgmma.commit_group``,
+    ``wgmma.wait_group``) across BF16, FP16, TF32, and FP8 operand layouts.
+
+- **SM100 (``backends.nv.sm100``)**:
+
+  - 1-CTA and 2-CTA ``tcgen05`` (``UMMA``) instructions, SMEM descriptor builders
+    (``make_umma_smem_desc`` and dataflow ``encode_umma_smem_desc``), Tensor Memory
+    (``TMEM``) allocation/load/store/deallocation, 2-CTA ``TMA`` multicast copies,
+    and logical ``dataflow.intrinsics`` (see :doc:`dataflow`).
+
+AMD GFX950 (CDNA4) Intrinsics
+-----------------------------
+
+``backends.amd.cdna4.language.intrin.amdgcn`` exposes **GFX950** HIP/AMDGPU
+primitives, including:
+
+- Buffer resource descriptor construction and direct global-to-LDS asynchronous
+  DMA loads (``buffer_load ... lds``).
+- LDS barrier & ``s_waitcnt`` synchronization controls and wave-level scheduling
+  barriers.
+- Register vector types and block-scaled ``MXFP8`` matrix-core ``MFMA`` intrinsics
+  used by the data-parallel and XCD-persistent ``GFX950`` GEMM kernels under
+  ``benchmarks/amd/cdna4/``.
+
+Safety Contracts
+----------------
+
+Each backend's ``backend.json`` descriptor enumerates its exact public exports.
+Typed IR nodes carry result types and memory/synchronization effects consumed by
+static analysis, optimization passes, and C++ codegen. Unsupported dtypes,
+misaligned shared-memory descriptors, or mismatched launch/architecture flags
+fail closed during compilation rather than emitting invalid device code.

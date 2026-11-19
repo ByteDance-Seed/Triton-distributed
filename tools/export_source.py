@@ -108,7 +108,7 @@ def export_source(destination: Path, backend_ids: list[str], *, write_lock=True)
             elif _scope_selected(rel, selected, vendors):
                 copy(path)
     # Release tooling is generic. Full-repository migration tests/tools are not exported.
-    for name in ("export_source.py", "verify_backend.py", "verify.py", "__init__.py"):
+    for name in ("export_source.py", "merge_rank_traces.py", "verify_backend.py", "verify.py", "__init__.py"):
         path = ROOT / "tools" / name
         if path.is_file():
             copy(path)

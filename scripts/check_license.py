@@ -1,6 +1,6 @@
 ################################################################################
 #
-# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+# Copyright (c) 2025-2026 ByteDance Ltd. and/or its affiliates
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files
@@ -29,10 +29,21 @@ import os
 import subprocess
 from pathlib import Path
 
-PYTHON_LICENSES = [
+COPYRIGHT_YEARS = ("2025-2026", "2025", "2026")
+
+
+def _expand_years(templates):
+    expanded = []
+    for tmpl in templates:
+        for yr in COPYRIGHT_YEARS:
+            expanded.append(tmpl.replace("{YEAR}", yr))
+    return expanded
+
+
+PYTHON_LICENSES = _expand_years([
     """################################################################################
 #
-# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+# Copyright (c) {YEAR} ByteDance Ltd. and/or its affiliates
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files
@@ -55,13 +66,13 @@ PYTHON_LICENSES = [
 #
 ################################################################################""",
     """################################################################################
-# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
-################################################################################"""
-]
+# Modification Copyright {YEAR} ByteDance Ltd. and/or its affiliates.
+################################################################################""",
+])
 
-TD_LICENSES = [
+TD_LICENSES = _expand_years([
     """//
-// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+// Copyright (c) {YEAR} ByteDance Ltd. and/or its affiliates
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files
@@ -81,14 +92,15 @@ TD_LICENSES = [
 // CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-//""", """//
-// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
-//"""
-]
+//""",
+    """//
+// Modification Copyright {YEAR} ByteDance Ltd. and/or its affiliates.
+//""",
+])
 
-CPP_LICENSES = [
+CPP_LICENSES = _expand_years([
     """/*
- * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+ * Copyright (c) {YEAR} ByteDance Ltd. and/or its affiliates
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files
@@ -108,8 +120,9 @@ CPP_LICENSES = [
  * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */""", """//
-// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+ */""",
+    """//
+// Copyright (c) {YEAR} ByteDance Ltd. and/or its affiliates
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files
@@ -130,34 +143,29 @@ CPP_LICENSES = [
 // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
-""", """
+""",
+    """
 /*
- * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ * Modification Copyright {YEAR} ByteDance Ltd. and/or its affiliates.
  */
-""", """//
-// Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+""",
+    """//
+// Modification Copyright {YEAR} ByteDance Ltd. and/or its affiliates.
 //
-"""
-]
+""",
+])
 
 PYTHON_EXTENSIONS = ['.py', '.pyi']
 TD_EXTENSIONS = ['.td']
 CPP_EXTENSIONS = ['.cc', '.cpp', '.c', '.h', '.hpp', '.cu', '.cuh']
-WHITELIST_PATTERNS = [
-    r'setup.py', r'^.*patches\/triton\/.*$', r"\.codebase\/.*", r'^3rdparty\/'
-]
+WHITELIST_PATTERNS = [r'setup.py', r'^.*patches\/triton\/.*$', r"\.codebase\/.*", r'^3rdparty\/']
 
 
 def get_modified_files():
     try:
-        result1 = subprocess.run(['git', 'diff', '--name-only'],
-                                 capture_output=True,
-                                 text=True)
-        result2 = subprocess.run(['git', 'diff', '--name-only', '--cached'],
-                                 capture_output=True,
-                                 text=True)
-        modified_files = set(result1.stdout.strip().split('\n') +
-                             result2.stdout.strip().split('\n'))
+        result1 = subprocess.run(['git', 'diff', '--name-only'], capture_output=True, text=True)
+        result2 = subprocess.run(['git', 'diff', '--name-only', '--cached'], capture_output=True, text=True)
+        modified_files = set(result1.stdout.strip().split('\n') + result2.stdout.strip().split('\n'))
         return [file for file in modified_files if file]
     except Exception as e:
         print(f"Error getting modified files: {e}")
@@ -166,10 +174,7 @@ def get_modified_files():
 
 def get_git_tracked_files():
     try:
-        result = subprocess.run(['git', 'ls-files'],
-                                capture_output=True,
-                                text=True,
-                                cwd=Path(__file__).parent.parent)
+        result = subprocess.run(['git', 'ls-files'], capture_output=True, text=True, cwd=Path(__file__).parent.parent)
         tracked_files = set(result.stdout.strip().split('\n'))
         return [file for file in tracked_files if file]
     except Exception as e:
@@ -201,8 +206,7 @@ def check_license(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
             lines = file.readlines()
-            max_license_lines = max(
-                len(license.splitlines()) for license in licenses)
+            max_license_lines = max(len(license.splitlines()) for license in licenses)
             num_lines = max_license_lines + 5
             first_lines = ''.join(lines[:num_lines])
             for license_text in licenses:
@@ -253,13 +257,9 @@ def add_license(file_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Check license for modified files.")
+    parser = argparse.ArgumentParser(description="Check license for modified files.")
     parser.add_argument("--modify-only", default=False, action="store_true")
-    parser.add_argument("--add",
-                        default=False,
-                        action="store_true",
-                        help="Add license to files that are missing it.")
+    parser.add_argument("--add", default=False, action="store_true", help="Add license to files that are missing it.")
     return parser.parse_args()
 
 
