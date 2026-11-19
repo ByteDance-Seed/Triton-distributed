@@ -98,6 +98,15 @@ Python API
 - :doc:`Triton-distributed semantics <python-api/triton-dist.semantics>`
 
 
+References
+----------
+
+- **UniEP (HPDC '26)** — `UniEP: Unified Expert-Parallel MegaKernel MoE for LLM Training <https://dl.acm.org/doi/10.1145/3806645.3807818>`_
+- **DITRON (ICML 2026)** — `DITRON: Distributed Multi-level Tiling Compiler for Parallel Tensor Programs <https://icml.cc/virtual/2026/poster/63503>`_
+- **Triton-distributed (arXiv 2025)** — `Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler <https://arxiv.org/abs/2504.19442>`_
+- **TileLink (MLSys 2025)** — `TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives <https://arxiv.org/abs/2503.20313>`_
+
+
 .. toctree::
    :maxdepth: 10
    :caption: Kernels & Layers

@@ -321,8 +321,34 @@ Part of our code is under Apache-2.0 License:
 
 
 ## Citation
-If you use Triton-distributed in a scientific publication, we encourage you to add the following reference to the related papers:
+If you use Triton-distributed, LittleKernel, or FlashComm in a scientific publication, we encourage you to cite our related papers:
+
+- **UniEP (HPDC '26)**: [UniEP: Unified Expert-Parallel MegaKernel MoE for LLM Training](https://dl.acm.org/doi/10.1145/3806645.3807818)
+- **DITRON (ICML 2026)**: [DITRON: Distributed Multi-level Tiling Compiler for Parallel Tensor Programs](https://icml.cc/virtual/2026/poster/63503)
+- **Triton-distributed (arXiv 2025)**: [Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler](https://arxiv.org/abs/2504.19442)
+- **TileLink (MLSys 2025)**: [TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives](https://arxiv.org/abs/2503.20313)
+
 ```bibtex
+@inproceedings{zheng2026uniep,
+  title={UniEP: Unified Expert-Parallel MegaKernel MoE for LLM Training},
+  author={Zheng, Size and Zheng, Xuegui and Chang, Li-Wen and Zhai, Jidong},
+  booktitle={Proceedings of the 35th International Symposium on High-Performance Parallel and Distributed Computing},
+  series={HPDC '26},
+  pages={387--401},
+  year={2026},
+  publisher={ACM},
+  doi={10.1145/3806645.3807818},
+  url={https://dl.acm.org/doi/10.1145/3806645.3807818}
+}
+
+@inproceedings{zheng2026ditron,
+  title={DITRON: Distributed Multi-level Tiling Compiler for Parallel Tensor Programs},
+  author={Zheng, Size and Zheng, Xuegui and Sun, Hanshi and Hou, Qi and Bao, Wenlei and Li, Shiyu and Duanmu, Haojie and Fang, Jin and Xue, Chenli and Huang, Chenhui and Liu, Yuanqiang and Chen, Renze and Zheng, Ningxin and Wang, Dongyang and Chang, Li-Wen and Lu, Liqiang and Liang, Yun and Zhai, Jidong and Liu, Xin},
+  booktitle={Forty-third International Conference on Machine Learning (ICML)},
+  year={2026},
+  url={https://icml.cc/virtual/2026/poster/63503}
+}
+
 @misc{zheng2025tritondistributed,
       title={Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler},
       author={Size Zheng and Wenlei Bao and Qi Hou and Xuegui Zheng and Jin Fang and Chenhui Huang and Tianqi Li and Haojie Duanmu and Renze Chen and Ruifan Xu and Yifan Guo and Ningxin Zheng and Ziheng Jiang and Xinyi Di and Dongyang Wang and Jianxi Ye and Haibin Lin and Li-Wen Chang and Liqiang Lu and Yun Liang and Jidong Zhai and Xin Liu},

@@ -216,3 +216,11 @@ Reproducing FlashComm Benchmarks
    torchrun --standalone --nproc_per_node=4 tests/ep_overlap/test_ep_overlap_group_gemm_combine.py \
        --num_tokens 4096 --hidden_size 7168 --intermediate_size 2048 --num_experts 256 --topk 8 \
        --local_world_size 4 --rounds 1 --iters 20 --warmup_iters 10
+
+----
+
+References
+----------
+
+- **UniEP (HPDC '26)** — `UniEP: Unified Expert-Parallel MegaKernel MoE for LLM Training <https://dl.acm.org/doi/10.1145/3806645.3807818>`_
+- **DITRON (ICML 2026)** — `DITRON: Distributed Multi-level Tiling Compiler for Parallel Tensor Programs <https://icml.cc/virtual/2026/poster/63503>`_
