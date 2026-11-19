@@ -123,7 +123,7 @@ NUM_BLOCKS = 32000  # Large enough to test overflow in index calculation.
 
 @pytest.mark.parametrize("kv_lens", [[1320, 18, 463], [1, 54, 293, 70]])
 @pytest.mark.parametrize("num_heads", [(16, 16), (32, 8), (64, 8), (6, 1)])
-@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize("head_size", [96, 128, 256])
 @pytest.mark.parametrize("block_size", [1, 16])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("soft_cap", [0, 30, 50])
@@ -209,7 +209,7 @@ def test_triton_decode_with_paged_kv_aot(
 
 @pytest.mark.parametrize("kv_lens", [[1320], [18], [463], [1], [54], [293], [70]])
 @pytest.mark.parametrize("num_heads", [(64, 8)])
-@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("head_size", [96, 128])
 @pytest.mark.parametrize("block_size", [1])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("soft_cap", [0])
