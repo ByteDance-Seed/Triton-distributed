@@ -58,6 +58,7 @@ Usage (mori_shmem; RCCL on this firmware requires HSA_NO_SCRATCH_RECLAIM=1):
     bash ./scripts/launch_amd.sh ./python/triton_dist/test/amd/test_ep_moe_fused.py
 """
 
+# ruff: noqa: E402
 import argparse
 import math
 import os

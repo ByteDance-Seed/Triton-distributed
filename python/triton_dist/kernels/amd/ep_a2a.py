@@ -65,7 +65,7 @@ def bincount(input_tensor, length, output=None, output_dtype=torch.int32, num_sm
 
 
 # Re-export intra-node kernels and helpers so layer can import from this module only.
-from triton_dist.kernels.amd.ep_a2a_intra_node import (
+from triton_dist.kernels.amd.ep_a2a_intra_node import (  # noqa: E402
     kernel_combine_token_intra_node,
     kernel_dispatch_token_intra_node,
     get_ag_splits_and_recv_offset_for_dispatch_intra_node,
