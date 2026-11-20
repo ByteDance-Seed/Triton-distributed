@@ -46,6 +46,8 @@ from .low_latency_all_to_all_v2 import create_ep_ll_a2a_ctx, dispatch_kernel_v2,
 from .ulysses_sp_dispatch import create_ulysses_sp_pre_attn_comm_context
 from .pre_attn_a2a import kernel_pre_attn_a2a
 from .post_attn_a2a import kernel_post_attn_a2a
+from .sp_mla_decode import (kernel_sp_decode_allgather_push_intra_node, mla_fwd_batch_decode_inter_rank_combine,
+                            mla_fwd_batch_decode_intra_rank, sp_decode_allgather_push_intra_node)
 
 __all__ = [
     "_forward_pull_kernel",
@@ -102,4 +104,8 @@ __all__ = [
     "create_ulysses_sp_pre_attn_comm_context",
     "kernel_pre_attn_a2a",
     "kernel_post_attn_a2a",
+    "kernel_sp_decode_allgather_push_intra_node",
+    "mla_fwd_batch_decode_inter_rank_combine",
+    "mla_fwd_batch_decode_intra_rank",
+    "sp_decode_allgather_push_intra_node",
 ]

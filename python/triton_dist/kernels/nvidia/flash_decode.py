@@ -845,13 +845,13 @@ def gqa_fwd_batch_decode(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_
 
 
 def gqa_fwd_batch_decode_intra_rank(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_table, scale, soft_cap=0.0,
-                                    output_split=None, output_combine=None, kv_split=-1):
+                                    output_split=None, output_combine=None, kv_split=-1, block_n=64, num_stages=2):
     batch, q_heads, q_head_dim = q.shape
     _, page_size, kv_heads, k_head_dim = k_cache.shape
     assert page_size == v_cache.shape[1] and kv_heads == v_cache.shape[2] and k_head_dim == q_head_dim
     v_head_dim = v_cache.shape[-1]
 
-    BLOCK_N = 64
+    BLOCK_N = block_n
     BLOCK_HEAD_DIM = 2**int(math.log2(q_head_dim))
     BLOCK_DPE = q_head_dim - BLOCK_HEAD_DIM
     BLOCK_DV = triton.next_power_of_2(v_head_dim)
@@ -904,7 +904,7 @@ def gqa_fwd_batch_decode_intra_rank(q, k_cache, v_cache, workspace, q_lens, kv_l
         k_head_dim,
         v_head_dim,
         num_warps=4,
-        num_stages=2,
+        num_stages=num_stages,
     )
 
     kernel_intra_rank_gqa_fwd_batch_decode_combine_kv[(batch, q_heads)](
