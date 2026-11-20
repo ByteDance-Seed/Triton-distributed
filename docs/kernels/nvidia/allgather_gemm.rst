@@ -13,23 +13,23 @@ API Reference
 
    :param a: Local input tensor of shape ``[M_per_rank, K]``
    :param b: Weight tensor of shape ``[N, K]``
-   :param ctx: AGGemmContext containing symmetric memory and signals
+   :param ctx: AllGatherGEMMTensorParallelContext containing communication state
    :returns: Output tensor of shape ``[M, N]``
 
-.. py:function:: create_ag_gemm_context(local_tensor, weight, rank, num_ranks, max_M, BLOCK_M, BLOCK_N, BLOCK_K, stages)
+.. py:function:: create_ag_gemm_context(max_M, N, K, dtype, rank, num_ranks, num_local_ranks=8, ag_intranode_stream=None, ag_internode_stream=None)
 
    Creates the context for AG-GEMM operation.
 
-   :param local_tensor: Sample local tensor for shape inference
-   :param weight: Weight tensor
+   :param max_M: Maximum M dimension
+   :param N: N dimension (must be divisible by ``num_ranks``)
+   :param K: K dimension
+   :param dtype: Input/output data type
    :param rank: Current rank ID
    :param num_ranks: Total number of ranks
-   :param max_M: Maximum M dimension
-   :param BLOCK_M: Block size in M dimension
-   :param BLOCK_N: Block size in N dimension
-   :param BLOCK_K: Block size in K dimension
-   :param stages: Number of pipeline stages
-   :returns: AGGemmContext object
+   :param num_local_ranks: Number of local ranks (default: ``8``)
+   :param ag_intranode_stream: Optional CUDA stream for intra-node AllGather
+   :param ag_internode_stream: Optional CUDA stream for inter-node AllGather
+   :returns: AllGatherGEMMTensorParallelContext object
 
 .. py:function:: gemm_persistent(...)
 
@@ -46,9 +46,9 @@ Example Usage
 
    from triton_dist.kernels.nvidia import ag_gemm, create_ag_gemm_context
 
-   # Create context
-   ctx = create_ag_gemm_context(A, B, rank, world_size, max_M=M, 
-                                 BLOCK_M=128, BLOCK_N=256, BLOCK_K=64, stages=3)
+   # Create context from the tensor dimensions and dtype
+   max_M = A.shape[0] * world_size
+   ctx = create_ag_gemm_context(max_M, B.shape[0], A.shape[1], A.dtype, rank, world_size)
 
    # Perform AllGather + GEMM
    output = ag_gemm(A, B, ctx)
