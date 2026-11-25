@@ -479,6 +479,7 @@ class AllGatherGEMMTensorParallelContext:
     all_gather_method: AllGatherMethod = AllGatherMethod.Auto
 
     def __post_init__(self):
+        self.num_local_ranks = min(self.num_ranks, self.num_local_ranks)
         assert self.num_ranks % self.num_local_ranks == 0
         self.is_multinode = self.num_ranks > self.num_local_ranks
         self.n_nodes = self.num_ranks // self.num_local_ranks
@@ -532,6 +533,7 @@ def create_ag_gemm_context(
         AllGatherGEMMTensorParallelContext
     """
     assert N % num_ranks == 0
+    num_local_ranks = min(num_ranks, num_local_ranks)
     N_per_rank = N // num_ranks
     ctx = AllGatherGEMMTensorParallelContext(
         N_per_rank=N_per_rank,

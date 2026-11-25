@@ -73,6 +73,7 @@ def get_allreduce_methods():
 
 @functools.lru_cache()
 def get_auto_all_reduce_method(num_ranks, num_local_ranks):
+    num_local_ranks = min(num_ranks, num_local_ranks)
     assert num_ranks == num_local_ranks, "Currently only support intra-node allreduce"
     if is_nvshmem_multimem_supported():
         return OverlappingAllReduceMethod.Consumer_Multimem
