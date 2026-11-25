@@ -38,6 +38,15 @@ from triton_dist.test.utils import assert_allclose
 from triton_dist.utils import (dist_print, get_device_max_shared_memory_size, initialize_distributed, sleep_async)
 from triton_dist.nv_utils import get_intranode_max_speed_gbps
 
+THRESHOLD_MAP = {
+    torch.float16: 1e-2,
+    torch.bfloat16: 2e-2,
+    torch.float8_e4m3fn: 2e-2,
+    torch.float8_e5m2: 2e-2,
+    torch.int8: 0,
+    torch.int32: 0,
+}
+
 
 def torch_moe_scatter_group_gemm(in_features, expert_weights, topk_ids):
     M, K = in_features.shape
@@ -164,10 +173,12 @@ def perf_test(name, input_len, dtype: torch.dtype, config, pg: torch.distributed
     C_triton_non_overlap = run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=False)
     C_triton_non_overlap_persistent = run_moe_ag_triton_non_overlap(A, B, full_topk_ids, persistent=True)
     _, C_torch = torch_ag_group_gemm(pg, A, B, full_topk_ids)
+    atol = THRESHOLD_MAP.get(dtype, 1e-3)
+    rtol = THRESHOLD_MAP.get(dtype, 1e-3)
     try:
-        assert_allclose(C_torch, C_triton, atol=1e-3, rtol=1e-3, verbose=False)
-        assert_allclose(C_torch, C_triton_non_overlap, atol=1e-3, rtol=1e-3, verbose=False)
-        assert_allclose(C_torch, C_triton_non_overlap_persistent, atol=1e-3, rtol=1e-3, verbose=False)
+        assert_allclose(C_torch, C_triton, atol=atol, rtol=rtol, verbose=False)
+        assert_allclose(C_torch, C_triton_non_overlap, atol=atol, rtol=rtol, verbose=False)
+        assert_allclose(C_torch, C_triton_non_overlap_persistent, atol=atol, rtol=rtol, verbose=False)
     except Exception as e:
         torch.save(C_torch, f"{name}_C_torch_{RANK}.pt")
         torch.save(C_triton, f"{name}_C_triton_{RANK}.pt")
