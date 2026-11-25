@@ -55,6 +55,7 @@ class AllGatherMethod(Enum):
 
 @functools.lru_cache()
 def get_auto_all_gather_method(num_ranks, num_local_ranks, pg: torch.distributed.ProcessGroup | None = None):
+    num_local_ranks = min(num_ranks, num_local_ranks)
     if has_fullmesh_nvlink():
         if num_ranks == num_local_ranks:
             return AllGatherMethod.All2All_IntraNode
