@@ -32,6 +32,14 @@ import triton.language as tl
 import triton_dist
 from triton_dist.language.extra.hip.language_extra import tid, ld, atomic_add
 from triton_dist.language.extra.language_extra import threads_per_warp
+# Re-export intra-node kernels and helpers so layer can import from this module only.
+from triton_dist.kernels.amd.ep_a2a_intra_node import (
+    kernel_combine_token_intra_node,
+    kernel_dispatch_token_intra_node,
+    get_ag_splits_and_recv_offset_for_dispatch_intra_node,
+    kernel_skipped_token_local_dispatch_intra_node,
+    kernel_skipped_token_inplace_local_combine_intra_node,
+)
 
 
 @triton_dist.jit(do_not_specialize=["n", "length", "num_sm"])
@@ -63,15 +71,6 @@ def bincount(input_tensor, length, output=None, output_dtype=torch.int32, num_sm
     kernel_bincount[grid](n, input_tensor, output, length, num_sm, num_warps=num_warps)
     return output
 
-
-# Re-export intra-node kernels and helpers so layer can import from this module only.
-from triton_dist.kernels.amd.ep_a2a_intra_node import (  # noqa: E402
-    kernel_combine_token_intra_node,
-    kernel_dispatch_token_intra_node,
-    get_ag_splits_and_recv_offset_for_dispatch_intra_node,
-    kernel_skipped_token_local_dispatch_intra_node,
-    kernel_skipped_token_inplace_local_combine_intra_node,
-)
 
 __all__ = [
     "kernel_bincount",
