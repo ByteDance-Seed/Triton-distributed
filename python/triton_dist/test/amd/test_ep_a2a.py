@@ -76,6 +76,7 @@ Performance (MI325X, 8 GPU, N=7168, G=256, topk=8, bench_iters=10,
 
 """
 
+# ruff: noqa: E402
 import os
 import sys
 import argparse

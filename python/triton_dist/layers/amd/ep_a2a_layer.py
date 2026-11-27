@@ -344,7 +344,6 @@ class EPAll2AllLayer(torch.nn.Module):
         ep_a2a_layout_desc: EPAllToAllLayoutDesc,
         has_weight=False,
     ):
-        grid = lambda meta: (self.num_sm, )
         token_dst_scatter_idx = ep_a2a_layout_desc.token_dst_scatter_idx
         if token_dst_scatter_idx is None:
             with_scatter_indices = False
@@ -492,7 +491,6 @@ class EPAll2AllLayer(torch.nn.Module):
         input: torch.Tensor,
         ep_a2a_layout_desc: EPAllToAllLayoutDesc,
     ):
-        grid = lambda meta: (self.num_sm, )
         current_stream = torch.cuda.current_stream()
         if self.enable_local_combine:
             assert ep_a2a_layout_desc.skipped_token_mapping_indices is not None
