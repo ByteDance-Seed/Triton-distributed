@@ -10,9 +10,9 @@ API Reference
 
    Performs GEMM followed by ReduceScatter with overlapping on AMD GPUs.
 
-   :param a: Input tensor of shape ``[M, K]``
-   :param b: Weight tensor of shape ``[N, K]``
-   :param ctx: GemmRSIntraNodeContext
+   :param a: Local input tensor of shape ``[M, K_per_rank]``
+   :param b: Local weight tensor of shape ``[N, K_per_rank]``
+   :param ctx: GEMMReduceScatterTensorParallelContext
    :returns: Output tensor of shape ``[M/world_size, N]``
 
 .. py:function:: create_gemm_rs_intra_node_context(max_M, N, output_dtype, rank, num_ranks, tp_group, fuse_scatter=True)

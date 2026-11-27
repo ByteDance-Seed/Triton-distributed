@@ -11,8 +11,8 @@ API Reference
 
    Performs GEMM followed by ReduceScatter with overlapping.
 
-   :param a: Input tensor of shape ``[M, K]``
-   :param b: Weight tensor of shape ``[N, K]``
+   :param a: Local input tensor of shape ``[M, local_K]``
+   :param b: Local weight tensor of shape ``[local_K, N]``
    :param ctx: GEMMReduceScatterTensorParallelContext containing communication state
    :returns: Output tensor of shape ``[M/world_size, N]``
 

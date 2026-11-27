@@ -12,16 +12,16 @@ API Reference
    Performs AllGather followed by GEMM with overlapping.
 
    :param a: Local input tensor of shape ``[M_per_rank, K]``
-   :param b: Weight tensor of shape ``[N, K]``
+   :param b: Local weight tensor of shape ``[K, N_per_rank]``
    :param ctx: AllGatherGEMMTensorParallelContext containing communication state
-   :returns: Output tensor of shape ``[M, N]``
+   :returns: Local output tensor of shape ``[M, N_per_rank]``
 
 .. py:function:: create_ag_gemm_context(max_M, N, K, dtype, rank, num_ranks, num_local_ranks=8, ag_intranode_stream=None, ag_internode_stream=None)
 
    Creates the context for AG-GEMM operation.
 
    :param max_M: Maximum M dimension
-   :param N: N dimension (must be divisible by ``num_ranks``)
+   :param N: Global N dimension (must be divisible by ``num_ranks``)
    :param K: K dimension
    :param dtype: Input/output data type
    :param rank: Current rank ID
@@ -48,7 +48,8 @@ Example Usage
 
    # Create context from the tensor dimensions and dtype
    max_M = A.shape[0] * world_size
-   ctx = create_ag_gemm_context(max_M, B.shape[0], A.shape[1], A.dtype, rank, world_size)
+   N = B.shape[1] * world_size
+   ctx = create_ag_gemm_context(max_M, N, A.shape[1], A.dtype, rank, world_size)
 
    # Perform AllGather + GEMM
    output = ag_gemm(A, B, ctx)

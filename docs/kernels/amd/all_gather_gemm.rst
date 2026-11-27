@@ -11,9 +11,9 @@ API Reference
    Performs AllGather followed by GEMM with overlapping on AMD GPUs.
 
    :param a: Local input tensor of shape ``[M_per_rank, K]``
-   :param b: Weight tensor of shape ``[N, K]``
-   :param ctx: AGGemmIntraNodeContext
-   :returns: Output tensor of shape ``[M, N]``
+   :param b: Local weight tensor of shape ``[N_per_rank, K]``
+   :param ctx: AllGatherGEMMTensorParallelContext
+   :returns: Local output tensor of shape ``[M, N_per_rank]``
 
 .. py:function:: create_ag_gemm_intra_node_context(max_M, N, K, input_dtype, output_dtype, rank, num_ranks, tp_group, ag_streams=None, M_PER_CHUNK=1024, use_copy_kernel=False, comm_sms=0)
 
